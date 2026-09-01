@@ -304,12 +304,20 @@ struct ChatScreen: View {
     private var composer: some View {
         Card {
             HStack(alignment: .bottom, spacing: 10) {
+                // Полю нужны собственные отступы и подложка: без них оно
+                // прилипало к верху, а кнопка со своими отступами оказывалась
+                // выше — строка выглядела разъехавшейся.
                 TextField("Напишите сообщение…", text: $draft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(Kind.body(14))
                     .lineLimit(1...6)
                     .focused($writing)
                     .onSubmit(send)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .background(RoundedRectangle(cornerRadius: 9).fill(p.raised))
+                    .overlay(RoundedRectangle(cornerRadius: 9)
+                        .stroke(writing ? p.accent2 : p.line, lineWidth: 1))
                 if chat.isAnswering {
                     Button("Остановить") { chat.stop() }.buttonStyle(QuietButton())
                 } else {
