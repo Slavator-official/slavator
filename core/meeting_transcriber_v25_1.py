@@ -801,14 +801,30 @@ def diarize(wav: Path, speakers: int = 0) -> list:
             stage_pct("diarization", done / max(1, total))
             return 0
 
+        wanted = speakers if speakers and speakers > 0 else NUM_SPEAKERS
         turns = engine.diarize(
-            wav,
-            threshold=DIARIZATION_THRESHOLD,
-            # Названное число участников решает главную беду кластеризации:
-            # без него движок гадает и на проверочной записи выдал 75 голосов.
-            num_speakers=speakers if speakers and speakers > 0 else NUM_SPEAKERS,
-            progress=report,
+            wav, threshold=DIARIZATION_THRESHOLD,
+            num_speakers=wanted, progress=report,
         )
+
+        # Движок отдаёт на голос меньше, чем просят.
+        #
+        # Замерено на двух разных записях: просим 3 - получаем 2, просим 4 -
+        # получаем 3, просим 5 - получаем 4. Почему так, из библиотеки не
+        # видно: привязка нативная, заглянуть внутрь нечем.
+        #
+        # Поэтому не поправка вслепую, а проверка результата: посчитали, и
+        # если голосов недобрали - просим на один больше. Так исправление
+        # переживёт починку библиотеки, а не сломается от неё.
+        if wanted and wanted > 0:
+            for extra in (1, 2):
+                if len({t["speaker"] for t in turns}) >= wanted:
+                    break
+                log(f"    голосов вышло меньше заданного, повторяю с {wanted + extra}")
+                turns = engine.diarize(
+                    wav, threshold=DIARIZATION_THRESHOLD,
+                    num_speakers=wanted + extra, progress=report,
+                )
     except Exception as exc:
         raise DiarizationError(
             "Не удалось разделить запись на спикеров.",
