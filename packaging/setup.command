@@ -129,6 +129,9 @@ fi
 # Образ Ollama берём из комплекта, а если его нет - качаем с сайта. Лёгкий
 # образ весит два мегабайта именно потому, что всё тяжёлое приезжает здесь.
 OLLAMA_DMG=""
+if [[ -d "/Applications/Ollama.app" ]]; then
+    ok "Ollama уже установлена — пропускаю"
+fi
 if [[ ! -d "/Applications/Ollama.app" ]]; then
     if [[ -f "$PAYLOAD/Ollama.dmg" ]]; then
         printf '    Устанавливаю Ollama из комплекта...\n'
@@ -178,7 +181,14 @@ fi
 
 if curl -fsS --max-time 4 http://127.0.0.1:11434/api/version >/dev/null 2>&1; then
     ok "Ollama запущена"
-    if ! curl -fsS --max-time 5 http://127.0.0.1:11434/api/tags 2>/dev/null | grep -q "${DEFAULT_LLM%%:*}"; then
+    # Проверяем ТОЧНОЕ имя модели.
+    #
+    # Раньше искали «qwen3» без версии, и совпадало что угодно из этого
+    # семейства — вплоть до слова family в описании чужой модели. У человека
+    # с любым qwen3 установщик решал, что нужная модель есть, и приложение
+    # потом не запускалось.
+    if ! curl -fsS --max-time 5 http://127.0.0.1:11434/api/tags 2>/dev/null \
+         | grep -q "\"name\":\"${DEFAULT_LLM}\""; then
         if [[ -d "$PAYLOAD/ollama-models" ]]; then
             printf '    Переношу модель %s из комплекта (5 ГБ, пара минут)...\n' "$DEFAULT_LLM"
             mkdir -p "$HOME/.ollama/models"
@@ -195,7 +205,7 @@ if curl -fsS --max-time 4 http://127.0.0.1:11434/api/version >/dev/null 2>&1; th
             fi
         fi
     else
-        ok "модель $DEFAULT_LLM уже установлена"
+        ok "модель $DEFAULT_LLM уже установлена — пропускаю"
     fi
 else
     warn "Ollama не установлена - это НЕ ошибка установки"
