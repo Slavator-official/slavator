@@ -83,7 +83,18 @@ GLOSSARY_PATH = Path(
         "MEETING_TRANSCRIBER_GLOSSARY", str(Path.home() / "whisper-work" / "glossary.txt")
     )
 ).expanduser()
-NORMALIZE_TERMS = os.environ.get("MEETING_TRANSCRIBER_NORMALIZE", "1") not in ("0", "false", "no")
+# Сверка терминов языковой моделью по умолчанию ВЫКЛЮЧЕНА.
+#
+# Замер: один запрос на 60 строк не укладывается и в десять минут даже с
+# выключенными размышлениями — модель обязана выдать все строки заново в
+# JSON, а это больше тысячи токенов на локальной модели. На стенограмме в
+# 120 реплик шаг гарантированно отваливается по времени и пропускается,
+# то есть даёт ноль пользы за минуты ожидания.
+#
+# Аббревиатуры при этом никуда не деваются: их чинит мгновенный
+# детерминированный проход по словарю (glossary_fix), он остаётся включён
+# всегда. Включить проход моделью: MEETING_TRANSCRIBER_NORMALIZE=1
+NORMALIZE_TERMS = os.environ.get("MEETING_TRANSCRIBER_NORMALIZE", "0") not in ("0", "", "false", "no")
 
 # Определение имён участников по ходу разговора: обращения по имени,
 # самопредставления, упоминания в третьем лице. Ниже порога имя не
@@ -171,6 +182,9 @@ NORMALIZE_BUDGET = float(
     os.environ.get("MEETING_TRANSCRIBER_NORMALIZE_BUDGET", "300"))
 NAMES_REQUEST_TIMEOUT = int(
     os.environ.get("MEETING_TRANSCRIBER_NAMES_TIMEOUT", "180"))
+# Размышления модели вслух: качественнее, но в разы дольше. По умолчанию
+# выключены — см. пояснение в ollama_chat.
+THINK_ALOUD = os.environ.get("MEETING_TRANSCRIBER_LLM_THINK", "0") not in ("0", "", "false", "no")
 
 DEFAULT_PROFILES_DIR = Path(
     os.environ.get(
@@ -1470,6 +1484,13 @@ def ollama_chat(system: str, user: str, json_mode: bool = True,
     payload = {
         "model": OLLAMA_MODEL,
         "stream": False,
+        # Размышления вслух выключены. Замер на короткой правке текста:
+        # с ними 24,7 с, без них 2,2 с — цена десятикратная, а качество
+        # добирается строгими указаниями в задании. С включёнными
+        # размышлениями сверка терминов на стенограмме в 120 реплик
+        # не укладывалась в отведённое время и валила весь прогон.
+        "think": THINK_ALOUD,
+        "keep_alive": "10m",
         "options": {"num_ctx": OLLAMA_NUM_CTX, "temperature": 0.2},
         "messages": [
             {"role": "system", "content": system},
@@ -1481,8 +1502,12 @@ def ollama_chat(system: str, user: str, json_mode: bool = True,
     try:
         response = _http_json(f"{OLLAMA_HOST}/api/chat", payload,
                               timeout=timeout or OLLAMA_TIMEOUT)
-    except urllib.error.URLError as exc:
-        raise LLMError("Ollama перестала отвечать во время анализа.", str(exc)) from exc
+    # OSError покрывает и URLError, и TimeoutError: истечение времени
+    # приходит именно как TimeoutError и раньше проскакивало мимо перехвата,
+    # роняя весь прогон вместо того, чтобы пропустить необязательный шаг.
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise LLMError("Ollama перестала отвечать во время анализа.",
+                       f"{type(exc).__name__}: {exc}") from exc
     return str(response.get("message", {}).get("content", "")).strip()
 
 
