@@ -81,6 +81,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+/// Два значка: слева Славатор, справа разговор с моделью.
+struct ModeSwitch: View {
+    @Binding var screen: Screen
+    @Binding var back: Screen
+    @Environment(\.palette) private var p
+
+    private var inChat: Bool { screen == .chat }
+
+    var body: some View {
+        HStack(spacing: 3) {
+            button(symbol: "waveform", active: !inChat, hint: "Славатор") {
+                if inChat { screen = back }
+            }
+            button(symbol: "bubble.left.and.bubble.right", active: inChat, hint: "Чат с моделью") {
+                if !inChat { back = screen; screen = .chat }
+            }
+        }
+        .padding(3)
+        .background(RoundedRectangle(cornerRadius: 9).fill(p.surface))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(p.line2, lineWidth: 1))
+    }
+
+    private func button(symbol: String, active: Bool, hint: String,
+                        action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(active ? Color.white : p.muted)
+                .frame(width: 34, height: 26)
+                .background(RoundedRectangle(cornerRadius: 7)
+                    .fill(active ? p.accent : Color.clear))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(hint)
+    }
+}
+
 struct Shell: View {
     @Bindable var library: Library
     var player: Player
@@ -89,6 +127,8 @@ struct Shell: View {
     var dictation: Dictation
     var chat: Chat
     @State private var screen: Screen = .main
+    /// Куда вернуться из чата.
+    @State private var lastAppScreen: Screen = .main
 
     private var palette: Palette { library.palette }
 
@@ -98,6 +138,17 @@ struct Shell: View {
             Divider().overlay(palette.line2)
 
             VStack(spacing: 0) {
+                // Переключатель «Славатор ↔ Чат»: два значка в правом
+                // верхнем углу. Возвращает ровно на тот экран Славатора,
+                // с которого ушли, — иначе переход в чат сбрасывал бы
+                // выбранный файл и найденную встречу.
+                HStack(spacing: 0) {
+                    Spacer()
+                    ModeSwitch(screen: $screen, back: $lastAppScreen)
+                }
+                .padding(.horizontal, 28)
+                .padding(.top, 16)
+
                 ScrollView {
                     Group {
                         switch screen {
@@ -115,7 +166,7 @@ struct Shell: View {
                         }
                     }
                     .padding(.horizontal, 28)
-                    .padding(.top, 26)
+                    .padding(.top, 10)
                     .padding(.bottom, 32)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -142,7 +193,6 @@ struct Sidebar: View {
         [(.main, "Главная", "house"),
          (.records, "Записи", "clock"),
          (.speakers, "Спикеры", "person"),
-         (.chat, "Чат", "bubble.left.and.bubble.right"),
          (.settings, "Настройки", "gearshape")]
     }
 
