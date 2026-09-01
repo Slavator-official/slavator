@@ -1,0 +1,990 @@
+import AppKit
+import SwiftUI
+
+// MARK: - Главная
+
+/// «Обзор» и «Живая встреча» сведены на один экран: и то и другое — способ
+/// начать работу, разводить их по вкладкам незачем.
+struct MainScreen: View {
+    @Bindable var library: Library
+    var player: Player
+    var pipeline: Pipeline
+    var capture: LiveCapture
+    @Binding var screen: Screen
+    @Environment(\.palette) private var p
+    @State private var picked: URL?
+    @State private var source = "sys"
+    @State private var pulse = false
+    @State private var ready = Paths.isReady
+    /// Сколько человек на встрече. 0 — пусть определит сама.
+    @State private var speakers = 0
+    @State private var setupStarted = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ScreenTitle(text: "Главная")
+
+            if !ready {
+                setupCard
+            }
+
+            // Обе карточки одной высоты: разъехавшиеся по высоте блоки
+            // сразу читаются как небрежность.
+            // Высоту выравнивает сам Card(fill:): стек берёт высоту большей
+            // карточки, а обе растягиваются до неё.
+            HStack(spacing: 14) {
+                pickCard
+                liveCard
+            }
+            .disabled(!ready)
+            .opacity(ready ? 1 : 0.45)
+
+            if pipeline.isRunning { progressCard }
+            lastMeeting
+
+            if !library.unknown.isEmpty { unknownCard }
+        }
+        // Установка идёт в Терминале, отдельным процессом. Возвращение в
+        // приложение - самый надёжный момент, чтобы проверить, чем кончилось.
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.didBecomeActiveNotification)) { _ in
+            ready = Paths.isReady
+        }
+    }
+
+    // первый запуск: окружения ещё нет
+    private var setupCard: some View {
+        Card {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.down.circle")
+                    .font(.system(size: 19)).foregroundStyle(p.accent).frame(width: 26)
+                Text(setupStarted ? "Идёт установка" : "Славатор ещё не настроен")
+                    .font(Kind.strong(14.5))
+                Spacer()
+            }
+            Text(setupStarted
+                 ? "Установка идёт в окне Терминала. Когда там появится «Готово», вернитесь сюда — программа сама подхватит окружение."
+                 : "Нужно один раз развернуть распознавание речи и языковую модель: около 6 ГБ загрузки и 20–40 минут. Всё останется на этом компьютере.")
+                .font(Kind.body(12.5)).foregroundStyle(p.muted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 6)
+            if !setupStarted {
+                Button("Установить") {
+                    setupStarted = true
+                    Paths.runSetup()
+                }
+                .buttonStyle(PrimaryButton(wide: true))
+                .padding(.top, 10)
+            }
+        }
+    }
+
+    // выбрать запись
+    private var pickCard: some View {
+        Card(fill: true) {
+            if let picked {
+                HStack(spacing: 14) {
+                    Image(systemName: "waveform")
+                        .font(.system(size: 21)).foregroundStyle(p.accent).frame(width: 26)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(picked.lastPathComponent)
+                            .font(Kind.strong(14)).lineLimit(1).truncationMode(.middle)
+                        Text(fileInfo(picked)).font(Kind.body(12)).foregroundStyle(p.muted)
+                    }
+                    Spacer(minLength: 8)
+                    // Выбрали не тот файл - должно быть видно, как отменить.
+                    // «Другой файл» открывает диалог заново и требует что-то
+                    // выбрать; отказаться было нельзя.
+                    Button { self.picked = nil } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 16)).foregroundStyle(p.faint)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(pipeline.isRunning)
+                    .help("Убрать файл")
+                }
+                // Кнопки прижаты к низу, как в соседней карточке: действие
+                // всегда на одной высоте, а не гуляет вслед за содержимым.
+                Spacer(minLength: 14)
+                // Оба ряда в общем стеке с явным зазором. На отступах они
+                // налезали друг на друга: у кнопок своя внутренняя высота,
+                // и складывать её с padding на глаз бесполезно.
+                VStack(alignment: .leading, spacing: 14) {
+                    // Число участников снимает главную причину дробления
+                    // голосов: без него движок гадает и выдаёт десятки «людей».
+                    HStack(spacing: 10) {
+                        Text("Участников").font(Kind.body(12.5)).foregroundStyle(p.muted)
+                        HStack(spacing: 0) {
+                            stepButton("−") { speakers = max(0, speakers - 1) }
+                            Text(speakers == 0 ? "—" : String(speakers))
+                                .font(Kind.mono(13)).frame(width: 30)
+                            stepButton("+") { speakers = min(12, speakers + 1) }
+                        }
+                        .background(RoundedRectangle(cornerRadius: 8).fill(p.raised))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(p.line, lineWidth: 1))
+                        Text(speakers == 0 ? "определю сама" : "разложу ровно на \(speakers)")
+                            .font(Kind.body(12)).foregroundStyle(p.faint)
+                        Spacer(minLength: 0)
+                    }
+
+                    HStack(spacing: 8) {
+                        Button("Начать транскрибацию") {
+                            pipeline.run(input: picked, library: library, speakers: speakers)
+                        }
+                        .buttonStyle(PrimaryButton())
+                        .disabled(pipeline.isRunning)
+                        Button("Другой файл") { pick() }.buttonStyle(QuietButton())
+                        Spacer(minLength: 0)
+                    }
+                }
+            } else {
+                Button(action: pick) {
+                    HStack(spacing: 14) {
+                        Image(systemName: "doc.badge.plus")
+                            .font(.system(size: 21)).foregroundStyle(p.faint).frame(width: 26)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Выбрать запись").font(Kind.strong(14.5)).foregroundStyle(p.text)
+                            Text("или перетащите файл сюда")
+                                .font(Kind.body(12.5)).foregroundStyle(p.muted)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .frame(maxHeight: .infinity)
+            }
+        }
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            guard let provider = providers.first else { return false }
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                if let url { DispatchQueue.main.async { picked = url } }
+            }
+            return true
+        }
+    }
+
+    /// Кнопка счётчика: тихая, без собственной рамки — рамка общая на группе.
+    private func stepButton(_ glyph: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(glyph).font(Kind.strong(15)).foregroundStyle(p.muted)
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // слушать встречу
+    private var liveCard: some View {
+        Card(fill: true) {
+            if capture.isRecording {
+                HStack(spacing: 12) {
+                    Circle().fill(Color.hex(0xE0705F)).frame(width: 10, height: 10)
+                        .opacity(pulse ? 0.3 : 1)
+                        .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true),
+                                   value: pulse)
+                    Text(hms(capture.seconds))
+                        .font(.system(size: 22, weight: .medium, design: .monospaced))
+                    LevelMeter(level: capture.level)
+                    Button("Остановить") { finishRecording() }.buttonStyle(QuietButton())
+                }
+                .onAppear { pulse = true }
+            } else {
+                HStack(spacing: 10) {
+                    Image(systemName: "mic")
+                        .font(.system(size: 19)).foregroundStyle(p.accent2).frame(width: 26)
+                    Text("Слушать встречу").font(Kind.strong(14.5))
+                    Spacer()
+                }
+                // Как в прототипе: сначала выбор источника во всю ширину,
+                // под ним — кнопка запуска. Так решение и действие разнесены
+                // по строкам, а не толкаются в одной.
+                Segmented(options: [("sys", "Звонок"), ("mic", "Только микрофон")],
+                          selection: $source)
+                    .padding(.top, 12)
+                Text(source == "sys"
+                     ? "Собеседников из динамиков и вас с микрофона"
+                     : "Только микрофон — для встречи в одной комнате")
+                    .font(Kind.body(12)).foregroundStyle(p.muted)
+                    .padding(.top, 6)
+                Button("Начать слушать") { startRecording() }
+                    .buttonStyle(PrimaryButton(wide: true))
+                    .padding(.top, 8)
+                if let failure = capture.failure {
+                    Text(failure).font(Kind.body(12)).foregroundStyle(p.warn)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 10)
+                }
+            }
+        }
+    }
+
+    private func startRecording() {
+        let folder = URL(fileURLWithPath: library.settings.results_dir)
+        capture.start(source: source == "mic" ? .microphone : .meeting, folder: folder)
+    }
+
+    /// Остановка сразу отправляет запись в обычную обработку: живой режим и
+    /// файл сходятся в один пайплайн, иначе качество разъедется.
+    private func finishRecording() {
+        guard let url = capture.stop() else { return }
+        let voice = capture.systemTrack != nil ? capture.microphoneTrack : nil
+        if capture.seconds < 3 {
+            try? FileManager.default.removeItem(at: url)
+            if let voice { try? FileManager.default.removeItem(at: voice) }
+            showAlert("Слишком короткая запись", "Записано меньше трёх секунд — обрабатывать нечего.")
+            return
+        }
+        picked = url
+        // Микрофон уходит отдельной дорожкой: ваш голос не смешивается с
+        // собеседниками и не требует опознания.
+        pipeline.run(input: url, library: library, voiceTrack: voice)
+    }
+
+    /// Обработка идёт долго — час записи считается десятки минут. Без
+    /// внятного прогресса это неотличимо от зависшего приложения.
+    private var progressCard: some View {
+        Card {
+            HStack(alignment: .top, spacing: 14) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Eyebrow(text: "Обработка")
+                    Text(pipeline.stage).font(Kind.head(17)).padding(.top, 2)
+                    if !pipeline.detail.isEmpty {
+                        Text(pipeline.detail).font(Kind.body(13)).foregroundStyle(p.muted)
+                    }
+                }
+                Spacer()
+                Text("\(Int(pipeline.percent))%")
+                    .font(.system(size: 26, weight: .medium, design: .monospaced))
+                    .foregroundStyle(p.text)
+            }
+
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(p.raised).frame(height: 8)
+                    Capsule().fill(p.accent)
+                        .frame(width: max(0, geo.size.width * pipeline.percent / 100), height: 8)
+                        .animation(.easeOut(duration: 0.3), value: pipeline.percent)
+                }
+                .frame(height: geo.size.height, alignment: .center)
+            }
+            .frame(height: 8)
+            .padding(.top, 14)
+
+            HStack(spacing: 10) {
+                ForEach(pipeline.stageOrder, id: \.self) { key in
+                    Circle()
+                        .fill(pipeline.reached(key) ? p.accent : p.line)
+                        .frame(width: 6, height: 6)
+                }
+                Spacer()
+                Button("Прервать") { pipeline.cancel() }.buttonStyle(QuietButton())
+            }
+            .padding(.top, 14)
+        }
+    }
+
+    // последняя встреча с лентой
+    @ViewBuilder private var lastMeeting: some View {
+        if let record = library.records.first {
+            Card {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Eyebrow(text: "Последняя встреча")
+                        Text(record.title).font(Kind.head(17)).lineLimit(1)
+                    }
+                    Spacer()
+                    Button("Все записи") { screen = .records }
+                        .buttonStyle(.plain).font(Kind.body(13)).foregroundStyle(p.accent2)
+                }
+                Text(meta(record)).font(Kind.body(13)).foregroundStyle(p.muted)
+                    .padding(.top, 2).padding(.bottom, 16)
+
+                Ribbon(turns: record.turns, height: 46, library: library, record: record) { turn in
+                    playTurn(turn, in: record)
+                }
+                Ruler(length: record.length).padding(.top, 7)
+                Legend(turns: record.turns, library: library, record: record)
+                    .padding(.top, 14)
+            }
+        } else {
+            Card {
+                VStack(spacing: 8) {
+                    Image(systemName: "waveform.badge.magnifyingglass")
+                        .font(.system(size: 26)).foregroundStyle(p.faint)
+                    Text("Пока нет обработанных встреч")
+                        .font(Kind.body(14)).foregroundStyle(p.muted)
+                    Text("Выберите запись выше и нажмите «Начать транскрибацию»")
+                        .font(Kind.body(12.5)).foregroundStyle(p.faint)
+                }
+                .frame(maxWidth: .infinity).padding(.vertical, 26)
+            }
+        }
+    }
+
+    private var unknownCard: some View {
+        Card {
+            HStack {
+                Text(unknownTitle).font(Kind.head(16))
+                Spacer()
+                Button("Открыть") { screen = .newVoices }
+                    .buttonStyle(.plain).font(Kind.body(13)).foregroundStyle(p.accent2)
+            }
+            .padding(.bottom, 12)
+
+            VStack(spacing: 8) {
+                ForEach(library.unknown.prefix(2)) { voice in
+                    RowBox {
+                        PlayDot(size: 28) {
+                            player.play(url: voice.url, label: library.label(for: voice),
+                                        subtitle: "неопознанный голос",
+                                        colour: library.color(for: voice))
+                        }
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(voice.guess.map { "Похоже, это \($0)" }
+                                 ?? library.label(for: voice))
+                                .font(Kind.strong(14))
+                            Text(voice.guess != nil ? "имя определено по разговору"
+                                                    : "по имени к нему не обращались")
+                                .font(Kind.body(12.5)).foregroundStyle(p.muted)
+                        }
+                        Spacer(minLength: 8)
+                        Button(voice.guess != nil ? "Подтвердить" : "Выбрать человека") {
+                            screen = .newVoices
+                        }
+                        .buttonStyle(voice.guess != nil ? AnyButtonStyle(PrimaryButton())
+                                                        : AnyButtonStyle(QuietButton()))
+                    }
+                }
+            }
+        }
+    }
+
+    private var unknownTitle: String {
+        let n = library.unknown.count
+        let tail = n % 10, hundred = n % 100
+        if hundred >= 11 && hundred <= 14 { return "\(n) голосов не узнано" }
+        if tail == 1 { return "\(n) голос не узнан" }
+        if tail >= 2 && tail <= 4 { return "\(n) голоса не узнаны" }
+        return "\(n) голосов не узнано"
+    }
+
+    private func meta(_ record: Record) -> String {
+        var parts = [humanDate(record.date)]
+        if record.length > 0 { parts.append(hms(record.length)) }
+        if record.speakerCount > 0 { parts.append("\(record.speakerCount) участников") }
+        return parts.joined(separator: " · ")
+    }
+
+    private func playTurn(_ turn: Turn, in record: Record) {
+        // Свои реплики лежат на отдельной дорожке — системная их не слышала.
+        let wav = turn.speaker == "OWN" ? (record.ownTrack ?? record.source) : record.source
+        guard let wav else {
+            showAlert("Фрагмент недоступен",
+                      "Исходная запись встречи не найдена рядом с результатом — возможно, её перенесли или удалили.")
+            return
+        }
+        player.play(url: wav,
+                    label: Legend.label(for: turn, in: record),
+                    subtitle: "\(record.title) · \(hms(turn.start))",
+                    colour: library.color(for: turn, in: record),
+                    from: turn.start, to: turn.end)
+    }
+
+    private func pick() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.audio, .movie, .mpeg4Movie, .wav, .mp3]
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Выбрать"
+        if panel.runModal() == .OK { picked = panel.url }
+    }
+
+    private func fileInfo(_ url: URL) -> String {
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return "\(url.pathExtension.uppercased()) · \(formatter.string(fromByteCount: Int64(size)))"
+    }
+}
+
+func showAlert(_ title: String, _ text: String) {
+    let box = NSAlert()
+    box.messageText = title
+    box.informativeText = text
+    box.addButton(withTitle: "Понятно")
+    box.runModal()
+}
+
+/// Обёртка, чтобы стиль кнопки можно было выбирать по условию.
+struct AnyButtonStyle: ButtonStyle {
+    private let make: (Configuration) -> AnyView
+    init<S: ButtonStyle>(_ style: S) {
+        make = { AnyView(style.makeBody(configuration: $0)) }
+    }
+    func makeBody(configuration: Configuration) -> some View { make(configuration) }
+}
+
+// MARK: - Записи
+
+struct RecordsScreen: View {
+    @Bindable var library: Library
+    var player: Player
+    var pipeline: Pipeline
+    @Binding var screen: Screen
+    @Environment(\.palette) private var p
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ScreenTitle(text: "Записи")
+            Card {
+                if library.records.isEmpty {
+                    Text("Пока нет обработанных встреч")
+                        .font(Kind.body(14)).foregroundStyle(p.muted)
+                        .frame(maxWidth: .infinity).padding(.vertical, 28)
+                } else {
+                    // Ширины подобраны так, чтобы ленте осталось место. С
+                    // прежними колонка «Кто говорил» получала нулевую ширину:
+                    // лента схлопывалась в штрих, а заголовок переносился по
+                    // букве в строку и выглядел пустотой. Дата и длительность
+                    // сведены в одну колонку - вместе они читаются лучше.
+                    HStack(spacing: 12) {
+                        Text("Встреча").frame(width: 150, alignment: .leading)
+                        Text("Кто говорил")
+                            .frame(minWidth: 110, maxWidth: .infinity, alignment: .leading)
+                        Text("Когда").frame(width: 150, alignment: .leading)
+                        Text("Статус").frame(width: 112, alignment: .trailing)
+                        Text("Стенограмма").frame(width: 88, alignment: .trailing)
+                        Text("Саммари").frame(width: 88, alignment: .trailing)
+                    }
+                    .font(Kind.eyebrow()).tracking(0.8).foregroundStyle(p.faint)
+                    .lineLimit(1)
+                    .padding(.bottom, 9)
+
+                    ForEach(library.records) { record in
+                        Divider().overlay(p.line2)
+                        HStack(spacing: 12) {
+                            Text(record.title).font(Kind.strong(13.5))
+                                .lineLimit(1).truncationMode(.middle)
+                                .frame(width: 150, alignment: .leading)
+                            Ribbon(turns: record.turns, height: 12,
+                                   library: library, record: record)
+                                .frame(minWidth: 110, maxWidth: .infinity)
+                            Text("\(humanDate(record.date)) · \(hms(record.length))")
+                                .font(Kind.mono(12)).lineLimit(1)
+                                .foregroundStyle(p.muted).frame(width: 150, alignment: .leading)
+                            statusPill(for: record).frame(width: 112, alignment: .trailing)
+                            fileButton(record.transcript, hint: "Открыть стенограмму")
+                                .frame(width: 88, alignment: .trailing)
+                            summaryButton(for: record)
+                                .frame(width: 88, alignment: .trailing)
+                        }
+                        .padding(.vertical, 11)
+                        .contentShape(Rectangle())
+                        .onTapGesture { NSWorkspace.shared.open(record.dir) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Спикеры
+
+extension RecordsScreen {
+    /// Кнопка открытия документа встречи. Пока обработка не дошла до этого
+    /// шага, файла нет — и честнее показать это, чем неработающую кнопку.
+    @ViewBuilder func fileButton(_ url: URL?, hint: String) -> some View {
+        if let url {
+            Button { NSWorkspace.shared.open(url) } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "arrow.down.circle").font(.system(size: 12))
+                    Text("Открыть").font(Kind.body(12.5))
+                }
+                .foregroundStyle(library.palette.accent2)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(hint)
+        } else {
+            Text("нет").font(Kind.body(12.5)).foregroundStyle(library.palette.faint)
+        }
+    }
+
+    /// Резюме собирается отдельно, по запросу: это самый долгий шаг и
+    /// единственный, которому нужна языковая модель. Пока его не просили,
+    /// в колонке стоит кнопка, а не прочерк.
+    @ViewBuilder func summaryButton(for record: Record) -> some View {
+        if record.summary != nil {
+            fileButton(record.summary, hint: "Открыть резюме встречи")
+        } else if pipeline.isRunning {
+            Text("занято").font(Kind.body(12.5)).foregroundStyle(library.palette.faint)
+        } else {
+            Button { pipeline.summarize(record: record, library: library) } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "sparkles").font(.system(size: 12))
+                    Text("Собрать").font(Kind.body(12.5))
+                }
+                .foregroundStyle(library.palette.accent)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Собрать резюме, решения и поручения по этой встрече")
+        }
+    }
+
+    /// Статус встречи: важно не «готово», а есть ли неразобранные голоса.
+    @ViewBuilder func statusPill(for record: Record) -> some View {
+        let unknown = Library.readUnknown(in: record).count
+        if unknown > 0 {
+            Pill(text: unknown == 1 ? "1 новый голос" : "\(unknown) новых голоса",
+                 fg: library.palette.warn, bg: library.palette.warnBg)
+        } else {
+            Pill(text: "Готово", fg: library.palette.ok, bg: library.palette.okBg)
+        }
+    }
+}
+
+struct SpeakersScreen: View {
+    @Bindable var library: Library
+    var player: Player
+    @Binding var screen: Screen
+    @Environment(\.palette) private var p
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ScreenTitle(text: "Спикеры")
+            Card {
+                HStack {
+                    Text("Все люди").font(Kind.head(16))
+                    Spacer()
+                    if !library.unknown.isEmpty {
+                        Button("Новые голоса · \(library.unknown.count)") { screen = .newVoices }
+                            .buttonStyle(.plain).font(Kind.body(13)).foregroundStyle(p.accent2)
+                    }
+                }
+                .padding(.bottom, 14)
+
+                if library.speakers.isEmpty {
+                    Text("Пока никого нет. Люди появятся, когда вы назовёте голоса со встреч.")
+                        .font(Kind.body(13.5)).foregroundStyle(p.muted)
+                        .frame(maxWidth: .infinity).padding(.vertical, 22)
+                } else {
+                    VStack(spacing: 8) {
+                        ForEach(library.speakers) { person in
+                            RowBox {
+                                PlayDot(size: 28) { playSample(person) }
+                                Avatar(text: person.initials, colour: library.color(for: person))
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(person.name).font(Kind.strong(14.5))
+                                    if !person.subtitle.isEmpty {
+                                        Text(person.subtitle).font(Kind.body(12.5))
+                                            .foregroundStyle(p.muted).lineLimit(1)
+                                    }
+                                }
+                                Spacer(minLength: 8)
+                                VStack(alignment: .trailing, spacing: 0) {
+                                    Text("\(person.samples)").font(Kind.mono(13)).foregroundStyle(p.text)
+                                    Text("образцов").font(Kind.body(11)).foregroundStyle(p.muted)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                            .onTapGesture { screen = .person(person.key) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func playSample(_ person: Speaker) {
+        let folder = Paths.profiles.appending(path: "samples/\(person.key)")
+        let items = (try? FileManager.default.contentsOfDirectory(at: folder,
+                                                                  includingPropertiesForKeys: nil)) ?? []
+        guard let first = items.first(where: { $0.pathExtension.lowercased() == "wav" }) else {
+            showAlert("Нет образцов", "Для этого человека пока нет записей голоса.")
+            return
+        }
+        player.play(url: first, label: person.name, subtitle: person.subtitle,
+                    colour: library.color(for: person))
+    }
+}
+
+// MARK: - Новые голоса
+
+struct NewVoicesScreen: View {
+    @Bindable var library: Library
+    var player: Player
+    @Environment(\.palette) private var p
+    @State private var selected: Set<URL> = []
+    @State private var enrolling = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ScreenTitle(text: "Новые голоса")
+
+            if library.unknown.isEmpty {
+                Card {
+                    Text("Все голоса определены")
+                        .font(Kind.body(14)).foregroundStyle(p.muted)
+                        .frame(maxWidth: .infinity).padding(.vertical, 26)
+                }
+            } else {
+                Card {
+                    Text("Один человек часто распадается на несколько голосов — отметьте их вместе.")
+                        .font(Kind.body(13)).foregroundStyle(p.muted)
+                        .padding(.bottom, 14)
+
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 320), spacing: 12)],
+                              spacing: 12) {
+                        ForEach(library.unknown) { voice in
+                            VoiceCard(voice: voice, library: library, player: player,
+                                      selected: selected.contains(voice.url)) {
+                                if selected.contains(voice.url) { selected.remove(voice.url) }
+                                else { selected.insert(voice.url) }
+                            } assign: {
+                                selected = [voice.url]
+                                enrolling = true
+                            }
+                        }
+                    }
+                }
+
+                if !selected.isEmpty {
+                    HStack(spacing: 12) {
+                        Text(selectionTitle).font(Kind.strong(14))
+                        Spacer()
+                        Button("Снять выбор") { selected.removeAll() }
+                            .buttonStyle(.plain).font(Kind.body(13)).foregroundStyle(p.muted)
+                        Button(selected.count == 1 ? "Это человек…" : "Это один человек…") {
+                            enrolling = true
+                        }
+                        .buttonStyle(PrimaryButton())
+                    }
+                    .padding(14)
+                    .background(p.accentSoft)
+                    .clipShape(RoundedRectangle(cornerRadius: 11))
+                    .padding(.top, 12)
+                }
+            }
+        }
+        .sheet(isPresented: $enrolling) {
+            EnrollSheet(library: library, samples: Array(selected)) {
+                selected.removeAll()
+            }
+        }
+    }
+
+    private var selectionTitle: String {
+        let n = selected.count
+        let tail = n % 10, hundred = n % 100
+        if hundred >= 11 && hundred <= 14 { return "Выбрано \(n) голосов" }
+        if tail == 1 { return "Выбран \(n) голос" }
+        if tail >= 2 && tail <= 4 { return "Выбрано \(n) голоса" }
+        return "Выбрано \(n) голосов"
+    }
+}
+
+private struct VoiceCard: View {
+    @Environment(\.palette) private var p
+    let voice: UnknownVoice
+    var library: Library
+    var player: Player
+    var selected: Bool = false
+    var toggle: () -> Void = {}
+    var assign: () -> Void = {}
+
+    /// Реплики встречи, из которой взят голос.
+    private var turns: [Turn] {
+        library.records.first { $0.dir == voice.record }?.turns ?? []
+    }
+
+    /// Свои отрезки в цвете, чужие — приглушённой заливкой: сразу видно,
+    /// в каких местах встречи звучит именно этот голос.
+    private var highlighted: [Turn] {
+        let mine = voice.label
+        return turns.map {
+            $0.speaker == mine ? $0
+                : Turn(start: $0.start, end: $0.end, speaker: "", name: "")
+        }
+    }
+
+    var body: some View {
+        Card(padding: 15) {
+            HStack(spacing: 12) {
+                Button(action: toggle) {
+                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 19))
+                        .foregroundStyle(selected ? p.accent : p.faint)
+                }
+                .buttonStyle(.plain)
+                PlayDot { player.play(url: voice.url, label: library.label(for: voice),
+                                      subtitle: "неопознанный голос",
+                                      colour: library.color(for: voice)) }
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 7) {
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(library.color(for: voice)).frame(width: 9, height: 9)
+                        Text(library.label(for: voice)).font(Kind.strong(14))
+                    }
+                    Text(voice.record.lastPathComponent
+                        .replacingOccurrences(of: "_result", with: ""))
+                        .font(Kind.body(12.5)).foregroundStyle(p.muted).lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.bottom, 10)
+
+            if !turns.isEmpty {
+                Eyebrow(text: "Где звучит на встрече").padding(.bottom, 6)
+                Ribbon(turns: highlighted, height: 26, library: library,
+                       record: library.records.first { $0.dir == voice.record })
+                    .padding(.bottom, 12)
+            }
+
+            HStack(alignment: .top, spacing: 9) {
+                Image(systemName: voice.guess != nil ? "sparkles" : "questionmark.circle")
+                    .font(.system(size: 13)).foregroundStyle(voice.guess != nil ? p.accent2 : p.warn)
+                Text(voice.guess.map { "Похоже, это \($0) — определено по разговору" }
+                     ?? "По разговору имя определить не удалось: по имени к нему не обращались.")
+                    .font(Kind.body(13)).foregroundStyle(p.text)
+            }
+            .padding(11)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 9)
+                .fill(voice.guess != nil ? p.accentSoft : p.warnBg))
+            .padding(.bottom, 12)
+
+            HStack(spacing: 8) {
+                Button(voice.guess.map { "Это \($0)" } ?? "Выбрать человека") { assign() }
+                    .buttonStyle(PrimaryButton())
+            }
+        }
+        .overlay(RoundedRectangle(cornerRadius: 13)
+            .stroke(selected ? p.accent : .clear, lineWidth: 2))
+    }
+}
+
+// MARK: - Карточка человека
+
+struct PersonScreen: View {
+    @Bindable var library: Library
+    var player: Player
+    let key: String
+    @Binding var screen: Screen
+    @Environment(\.palette) private var p
+
+    private var person: Speaker? { library.speakers.first { $0.key == key } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            BackButton(title: "Спикеры") { screen = .speakers }
+            if let person {
+                HStack(spacing: 14) {
+                    Avatar(text: person.initials, colour: library.color(for: person), size: 54)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(person.name).font(Kind.title(20))
+                        if !person.subtitle.isEmpty {
+                            Text(person.subtitle).font(Kind.body(13.5)).foregroundStyle(p.muted)
+                        }
+                    }
+                    Spacer()
+                }
+                Card {
+                    Text("Образцы голоса").font(Kind.head(16)).padding(.bottom, 14)
+                    let samples = sampleFiles(person)
+                    if samples.isEmpty {
+                        Text("Образцов пока нет").font(Kind.body(13.5)).foregroundStyle(p.muted)
+                    } else {
+                        VStack(spacing: 8) {
+                            ForEach(samples, id: \.self) { url in
+                                RowBox {
+                                    PlayDot(size: 28) {
+                                        player.play(url: url, label: person.name,
+                                                    subtitle: "образец голоса",
+                                                    colour: library.color(for: person))
+                                    }
+                                    Text(url.lastPathComponent).font(Kind.body(13))
+                                        .lineLimit(1).truncationMode(.middle)
+                                    Spacer(minLength: 8)
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                Text("Человек не найден").font(Kind.body()).foregroundStyle(p.muted)
+            }
+        }
+    }
+
+    private func sampleFiles(_ person: Speaker) -> [URL] {
+        let folder = Paths.profiles.appending(path: "samples/\(person.key)")
+        let items = (try? FileManager.default.contentsOfDirectory(at: folder,
+                                                                  includingPropertiesForKeys: nil)) ?? []
+        return items.filter { $0.pathExtension.lowercased() == "wav" }.sorted {
+            $0.lastPathComponent < $1.lastPathComponent
+        }
+    }
+}
+
+// MARK: - Настройки
+
+struct SettingsScreen: View {
+    @Bindable var library: Library
+    var dictation: Dictation
+    @Environment(\.palette) private var p
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ScreenTitle(text: "Настройки")
+
+            dictationCard
+
+            Card {
+                Text("Общее").font(Kind.head(16)).padding(.bottom, 12)
+                SettingRow(title: "Ваше имя",
+                           subtitle: "Так подписываются ваши реплики при записи звонка") {
+                    TextField("Вы", text: Binding(
+                        get: { library.settings.my_name },
+                        set: { library.settings.my_name = $0; library.settings.save() }))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 220)
+                }
+                Divider().overlay(p.line2)
+                SettingRow(title: "Тема") {
+                    Segmented(options: [("dark", "Тёмная"), ("light", "Светлая"), ("system", "Авто")],
+                              selection: Binding(
+                                get: { library.settings.theme },
+                                set: { library.settings.theme = $0; library.settings.save(); library.reload() }))
+                        .frame(width: 260)
+                }
+            }
+
+            Card {
+                Text("Хранение данных").font(Kind.head(16)).padding(.bottom, 12)
+                SettingRow(title: "Папка для результатов", subtitle: library.settings.results_dir) {
+                    Button("Изменить") { chooseFolder() }.buttonStyle(QuietButton())
+                }
+                Divider().overlay(p.line2)
+                SettingRow(title: "Хранить диагностические данные",
+                           subtitle: "Нужны, чтобы слушать фрагменты встреч после обработки") {
+                    Toggle("", isOn: Binding(
+                        get: { library.settings.keep_diagnostics },
+                        set: { library.settings.keep_diagnostics = $0; library.settings.save() }))
+                        .labelsHidden().toggleStyle(.switch)
+                }
+            }
+
+            Card {
+                Text("Термины команды").font(Kind.head(16)).padding(.bottom, 12)
+                SettingRow(title: "Словарь", subtitle: "\(glossaryCount) терминов") {
+                    Button("Открыть") { NSWorkspace.shared.open(Paths.glossary) }
+                        .buttonStyle(QuietButton())
+                }
+            }
+        }
+    }
+
+    private var glossaryCount: Int {
+        guard let text = try? String(contentsOf: Paths.glossary, encoding: .utf8) else { return 0 }
+        return text.split(separator: "\n")
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty
+                   && !$0.trimmingCharacters(in: .whitespaces).hasPrefix("#") }.count
+    }
+
+    private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.prompt = "Выбрать"
+        if panel.runModal() == .OK, let url = panel.url {
+            library.settings.results_dir = url.path
+            library.settings.save()
+            library.reload()
+        }
+    }
+}
+
+extension SettingsScreen {
+    var dictationCard: some View {
+        Card {
+            HStack(spacing: 10) {
+                Text("Диктовка").font(Kind.head(16))
+                Spacer()
+                Text(dictationState).font(Kind.body(12.5)).foregroundStyle(dictationColour)
+            }
+            .padding(.bottom, 12)
+
+            SettingRow(title: "Диктовать в любое поле",
+                       subtitle: "Держите правый ⌥ и говорите — текст появится там, где курсор") {
+                Toggle("", isOn: Binding(
+                    get: { library.settings.dictation_enabled },
+                    set: { value in
+                        library.settings.dictation_enabled = value
+                        library.settings.save()
+                        if value { dictation.requestAccess() }
+                        dictation.refresh(settings: library.settings)
+                    }))
+                    .labelsHidden()
+            }
+            SettingRow(title: "Модель",
+                       subtitle: "«Быстро» пишет на ходу, «точно» вставляет целиком через 3 секунды") {
+                Segmented(options: [("small", "Быстро"), ("large-v3-turbo", "Точно")],
+                          selection: Binding(
+                            get: { library.settings.dictation_model },
+                            set: { library.settings.dictation_model = $0; library.settings.save() }))
+                    .frame(width: 210)
+            }
+            SettingRow(title: "Обработка по ⌥⇧",
+                       subtitle: "Убрать «э-э» и разложить перечисление списком. Нужна Ollama") {
+                Segmented(options: [("clean", "Чистка"), ("structure", "Структура"), ("shrink", "Сжатие")],
+                          selection: Binding(
+                            get: { library.settings.dictation_level },
+                            set: { library.settings.dictation_level = $0; library.settings.save() }))
+                    .frame(width: 280)
+            }
+        }
+    }
+
+    private var dictationState: String {
+        switch dictation.state {
+        case .off:           return "выключена"
+        case .needsAccess:   return "нужен доступ к вводу"
+        case .starting:      return "готовится…"
+        case .idle:          return "готова"
+        case .listening:     return "слушаю"
+        case .finishing:     return "дописываю"
+        case .failed(let m): return m
+        }
+    }
+
+    private var dictationColour: Color {
+        switch dictation.state {
+        case .idle, .listening, .finishing: return p.ok
+        case .needsAccess, .failed:         return p.warn
+        default:                            return p.muted
+        }
+    }
+}
+
+private struct SettingRow<Trailing: View>: View {
+    @Environment(\.palette) private var p
+    let title: String
+    var subtitle: String? = nil
+    @ViewBuilder var trailing: Trailing
+
+    var body: some View {
+        HStack(spacing: 20) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(Kind.body(14))
+                if let subtitle {
+                    Text(subtitle).font(Kind.body(12.5)).foregroundStyle(p.muted)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+            }
+            Spacer()
+            trailing
+        }
+        .padding(.vertical, 11)
+    }
+}

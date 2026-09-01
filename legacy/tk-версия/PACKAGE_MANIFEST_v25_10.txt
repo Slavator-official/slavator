@@ -1,0 +1,16 @@
+install_v25_10.sh
+run_v25_10.sh
+validate_v25_10.sh
+meeting_transcriber_gui_v25_10.py
+README_v25_10.md
+PACKAGE_MANIFEST_v25_10.txt
+render_v25_10.py
+REGRESSION_CHECKLIST_v25_10.md
+speaker_service/service.py
+speaker_service/backend.py
+speaker_service/__init__.py
+tests/test_ui_contract_v25_10.py
+tests/test_backend_adapter.py
+tests/test_speaker_service.py
+test_v25_10.py
+package_v25_10.sh

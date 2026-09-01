@@ -1,0 +1,1 @@
+"""Local speaker-management service for Meeting Transcriber v25.2."""
