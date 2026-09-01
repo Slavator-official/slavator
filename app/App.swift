@@ -10,12 +10,14 @@ struct SlavatorApp: App {
     @State private var pipeline = Pipeline()
     @State private var capture = LiveCapture()
     @State private var dictation = Dictation()
+    @State private var chat = Chat()
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {
         WindowGroup {
             Shell(library: library, player: player,
-                  pipeline: pipeline, capture: capture, dictation: dictation)
+                  pipeline: pipeline, capture: capture,
+                  dictation: dictation, chat: chat)
                 .frame(minWidth: 1080, minHeight: 620)
                 .onAppear {
                     library.reload()
@@ -39,7 +41,7 @@ struct SlavatorApp: App {
 }
 
 enum Screen: Hashable {
-    case main, records, speakers, newVoices, settings
+    case main, records, speakers, newVoices, settings, chat
     case person(String)
 }
 
@@ -85,6 +87,7 @@ struct Shell: View {
     var pipeline: Pipeline
     var capture: LiveCapture
     var dictation: Dictation
+    var chat: Chat
     @State private var screen: Screen = .main
 
     private var palette: Palette { library.palette }
@@ -105,6 +108,7 @@ struct Shell: View {
                                                       pipeline: pipeline, screen: $screen)
                         case .speakers:  SpeakersScreen(library: library, player: player, screen: $screen)
                         case .newVoices: NewVoicesScreen(library: library, player: player)
+                        case .chat:      ChatScreen(library: library, chat: chat)
                         case .settings:  SettingsScreen(library: library, dictation: dictation)
                         case .person(let key): PersonScreen(library: library, player: player,
                                                             key: key, screen: $screen)
@@ -138,6 +142,7 @@ struct Sidebar: View {
         [(.main, "Главная", "house"),
          (.records, "Записи", "clock"),
          (.speakers, "Спикеры", "person"),
+         (.chat, "Чат", "bubble.left.and.bubble.right"),
          (.settings, "Настройки", "gearshape")]
     }
 

@@ -90,6 +90,9 @@ struct Settings: Codable {
     /// clean | structure | shrink — насколько сильно править надиктованное.
     var dictation_level = "structure"
 
+    /// Языковая модель: и для резюме встреч, и для чата.
+    var llm_model = "qwen3:8b"
+
     static func load() -> Settings {
         guard let data = try? Data(contentsOf: Paths.settings),
               let value = try? JSONDecoder().decode(Settings.self, from: data)
