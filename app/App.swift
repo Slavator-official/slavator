@@ -99,6 +99,7 @@ struct ModeSwitch: View {
             }
         }
         .padding(3)
+        .frame(maxWidth: .infinity)
         .background(RoundedRectangle(cornerRadius: 9).fill(p.surface))
         .overlay(RoundedRectangle(cornerRadius: 9).stroke(p.line2, lineWidth: 1))
     }
@@ -109,7 +110,8 @@ struct ModeSwitch: View {
             Image(systemName: symbol)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(active ? Color.white : p.muted)
-                .frame(width: 34, height: 26)
+                .frame(maxWidth: .infinity)
+                .frame(height: 27)
                 .background(RoundedRectangle(cornerRadius: 7)
                     .fill(active ? p.accent : Color.clear))
                 .contentShape(Rectangle())
@@ -134,21 +136,18 @@ struct Shell: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            Sidebar(library: library, screen: $screen)
+            Sidebar(library: library, screen: $screen,
+                    lastAppScreen: $lastAppScreen, chat: chat)
             Divider().overlay(palette.line2)
 
             VStack(spacing: 0) {
-                // Переключатель «Славатор ↔ Чат»: два значка в правом
-                // верхнем углу. Возвращает ровно на тот экран Славатора,
-                // с которого ушли, — иначе переход в чат сбрасывал бы
-                // выбранный файл и найденную встречу.
-                HStack(spacing: 0) {
-                    Spacer()
-                    ModeSwitch(screen: $screen, back: $lastAppScreen)
-                }
-                .padding(.horizontal, 28)
-                .padding(.top, 16)
-
+                // Чат живёт вне общей прокрутки: внутри неё высота не
+                // задаётся, и экран обрывался на середине окна.
+                if screen == .chat {
+                    ChatScreen(library: library, chat: chat)
+                        .padding(.horizontal, 28)
+                        .padding(.vertical, 22)
+                } else {
                 ScrollView {
                     Group {
                         switch screen {
@@ -159,16 +158,19 @@ struct Shell: View {
                                                       pipeline: pipeline, screen: $screen)
                         case .speakers:  SpeakersScreen(library: library, player: player, screen: $screen)
                         case .newVoices: NewVoicesScreen(library: library, player: player)
-                        case .chat:      ChatScreen(library: library, chat: chat)
+                        // Чат нарисован выше, вне прокрутки. Ветка нужна
+                        // только чтобы перечисление было исчерпано.
+                        case .chat:      EmptyView()
                         case .settings:  SettingsScreen(library: library, dictation: dictation)
                         case .person(let key): PersonScreen(library: library, player: player,
                                                             key: key, screen: $screen)
                         }
                     }
                     .padding(.horizontal, 28)
-                    .padding(.top, 10)
+                    .padding(.top, 26)
                     .padding(.bottom, 32)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 }
 
                 if player.isActive {
@@ -187,6 +189,8 @@ struct Shell: View {
 struct Sidebar: View {
     @Bindable var library: Library
     @Binding var screen: Screen
+    @Binding var lastAppScreen: Screen
+    var chat: Chat
     @Environment(\.palette) private var p
 
     private var items: [(Screen, String, String)] {
@@ -205,9 +209,21 @@ struct Sidebar: View {
                         .clipShape(RoundedRectangle(cornerRadius: 11))
                 }
                 Text("Славатор").font(Kind.title(19))
+                Spacer(minLength: 0)
             }
-            .padding(.horizontal, 10).padding(.bottom, 22)
+            .padding(.horizontal, 10).padding(.bottom, 12)
 
+            // Переключатель режимов стоит здесь, у названия: это выбор
+            // «чем сейчас занимаемся», а не действие внутри экрана, и в
+            // правом верхнем углу он читался как случайная кнопка.
+            ModeSwitch(screen: $screen, back: $lastAppScreen)
+                .padding(.horizontal, 10).padding(.bottom, 18)
+
+            if screen == .chat {
+                // В режиме чата «Главная» и «Записи» не нужны, а список
+                // переписок нужен постоянно — он и занимает их место.
+                ChatHistory(chat: chat)
+            } else {
             VStack(spacing: 2) {
                 ForEach(items, id: \.1) { item in
                     NavButton(title: item.1, symbol: item.2,
@@ -217,6 +233,7 @@ struct Sidebar: View {
                         screen = item.0
                     }
                 }
+            }
             }
             Spacer()
         }
