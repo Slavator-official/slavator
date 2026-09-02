@@ -48,27 +48,9 @@ jobs:
         run: python -m pytest -q windows/test_bridge.py
 
       - name: Звук и диктовка загружаются
-        shell: pwsh
         run: |
-          # Записать здесь нечего: на сборочной машине нет ни звуковых
-          # устройств, ни рабочего стола. Проверяется то, что проверить можно, —
-          # что модули грузятся, структуры для SendInput собраны верно и
-          # перечисление устройств не роняет процесс.
           python -m pip install soundcard
-          python -c @"
-import sys, ctypes
-sys.path.insert(0, 'windows')
-import live_capture, dictation
-assert live_capture.RATE == 16000
-# Размер INPUT обязан совпадать с тем, что ждёт SendInput: ошибка здесь
-# молча ничего не печатает, и найти её потом почти невозможно.
-size = ctypes.sizeof(dictation._Input)
-assert size in (28, 40), f'неожиданный размер INPUT: {size}'
-info = live_capture.devices()
-print('устройства:', info.get('ok'), info.get('error', ''))
-print('склейка устоявшейся части:',
-      repr(dictation.Dictation._stable('Давайте за', 'Давайте зафиксируем')))
-"@
+          python windows/check_native.py
 
       - name: Тесты ядра
         run: python -m pytest -q core/tests
