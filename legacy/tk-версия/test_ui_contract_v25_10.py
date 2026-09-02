@@ -1,5 +1,5 @@
 from pathlib import Path
-ROOT=Path(__file__).resolve().parents[1]
+ROOT=Path(__file__).resolve().parent
 SRC=ROOT/"meeting_transcriber_gui_v25_10.py"
 TEXT=SRC.read_text(encoding="utf-8")
 def test_no_reference_rendering():

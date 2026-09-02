@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import signal
+from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -17,7 +18,18 @@ import ui_theme
 from speaker_service.service import SpeakerService
 from speaker_service.backend import BackendAdapter
 
-APP_VERSION = "25.10"
+def _app_version() -> str:
+    for parent in Path(__file__).resolve().parents:
+        version = parent / "VERSION"
+        if version.is_file():
+            try:
+                return version.read_text(encoding="utf-8").strip()
+            except OSError:
+                break
+    return os.environ.get("SLAVATOR_VERSION", "0.0.0-dev")
+
+
+APP_VERSION = _app_version()
 
 # Совпадает с именем каталога, который создаёт ядро обработки.
 EXTRA_DIR_NAME = "доп файлы, на случай ошибки summary"
@@ -133,7 +145,13 @@ class UI(tk.Tk):
         self.playback_state = "stopped"
         self.widget_proc = None
         self.backend = BackendAdapter(self._find_backend(), self._find_python())
-        self.speakers = SpeakerService()
+        self.speakers = SpeakerService(
+            profiles_dir=Path(os.environ.get(
+                "MEETING_TRANSCRIBER_PROFILES",
+                str(Path.home() / "whisper-work" / "speaker_profiles"),
+            )),
+            results_root=Path(self.settings["results_dir"]),
+        )
         self.canvas = tk.Canvas(self, bg=BG, highlightthickness=0, bd=0)
         self.canvas.pack(fill="both", expand=True)
         self.bind("<Configure>", lambda _e: self.after_idle(self.render))
@@ -234,11 +252,23 @@ class UI(tk.Tk):
         here = Path(__file__).resolve().parent
         candidates = [
             here / "meeting_transcriber_v25_1.py",
+            here.parents[1] / "core" / "meeting_transcriber_v25_1.py",
+            here.parent / "core" / "meeting_transcriber_v25_1.py",
             Path.home() / "Downloads/meeting_transcriber_v25_1_project/meeting_transcriber_v25_1.py",
         ]
         return next((p for p in candidates if p.is_file()), None)
 
     def _find_python(self):
+        configured = os.environ.get("SLAVATOR_PYTHON")
+        if configured and Path(configured).is_file():
+            return Path(configured)
+        if os.name == "nt":
+            support = Path(os.environ.get(
+                "MEETING_TRANSCRIBER_APP_SUPPORT",
+                str(Path(os.environ.get("APPDATA", Path.home())) / "Славатор"),
+            ))
+            candidate = support / "env" / "Scripts" / "python.exe"
+            return candidate if candidate.is_file() else Path(sys.executable)
         p = Path.home() / "whisper-work/.venv-diarization/bin/python"
         return p if p.is_file() else Path(sys.executable)
 
@@ -918,15 +948,12 @@ class UI(tk.Tk):
         y=220
         for sp in people[:7]:
             self.draw_person_row(l,y,r,58,sp); y+=64
-        if len(people)<7:
-            demo=[("Иванов Иван Иванович","Руководитель проекта","ООО «Рога и Копыта»",12),
-                  ("Петров Петр Петрович","Аналитик","ООО «Рога и Копыта»",8),
-                  ("Сидорова Анна Сергеевна","Бизнес-аналитик","УБ ЦОК",5),
-                  ("Кузнецов Алексей Викторович","Разработчик","МП Учителя",7),
-                  ("Смирнов Алексей Сергеевич","Тестировщик","МП Учителя",4)]
-            for name,pos,comp,cnt in demo[len(people):7]:
-                self.draw_demo_person(l,y,r,58,name,pos,comp,cnt); y+=64
-        self.text(l, y+12, f"Показано 5 из {max(7,len(people))}",9,MUTED)
+        if not people:
+            self.text((l+r)/2, y+60, "Пока нет голосовых профилей",
+                      12, MUTED, "normal", "center")
+            self.button((l+r)/2-80,y+88,160,32,"+  Новый человек",self.create_person_dialog,True)
+        else:
+            self.text(l, y+12, f"Показано {min(7,len(people))} из {len(people)}",9,MUTED)
 
     def avatar(self,x,y,initials):
         self.canvas.create_oval(self.sx(x),self.sx(y),self.sx(x+36),self.sx(y+36),fill=AVATAR,outline="",tags="ui")
@@ -1017,11 +1044,9 @@ class UI(tk.Tk):
         self.button(r-110,74,110,34,"☷  Фильтры",lambda:messagebox.showinfo("Фильтры","Проект, тип встречи, дата, статус"),False,False,10)
         records=self.recent_records()
         if not records:
-            records=[("Встреча с продуктовой командой","МП Учителя","Техническая","21.05.2025, 14:32","6","Готово"),
-                     ("Обсуждение требований","УБ ЦОК","Со стейкхолдерами","20.05.2025, 10:15","4","Готово"),
-                     ("Планирование релиза","МП Учителя","Техническая","19.05.2025, 16:40","5","Готово"),
-                     ("Демо для заказчика","УБ ЦОК","Со стейкхолдерами","18.05.2025, 14:20","3","Готово"),
-                     ("Перспектива спринта","МП Учителя","Техническая","17.05.2025, 11:10","4","Готово")]
+            self.text((l+r)/2, 220, "Здесь появятся обработанные встречи",
+                      12, MUTED, "normal", "center")
+            return
         y=130
         total=r-l
         # Reserve a dedicated overflow-menu column. Every visible value is
@@ -1169,7 +1194,8 @@ class UI(tk.Tk):
 
     def open_glossary(self):
         """Открыть словарь терминов в текстовом редакторе."""
-        path = Path.home()/"whisper-work"/"glossary.txt"
+        path = Path(os.environ.get("MEETING_TRANSCRIBER_GLOSSARY",
+                                   str(Path.home()/"whisper-work"/"glossary.txt")))
         if not path.is_file():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
@@ -1177,7 +1203,12 @@ class UI(tk.Tk):
                 "# Приложение узнаёт их в речи и пишет единообразно:\n"
                 "# услышав «си джей эм», напишет CJM.\n",
                 encoding="utf-8")
-        subprocess.Popen(["open", "-e", str(path)])
+        if os.name == "nt":
+            os.startfile(str(path))
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-e", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
 
     def toggle_diagnostics(self):
         self.save_setting(keep_diagnostics=not self.settings.get("keep_diagnostics"))
@@ -1186,14 +1217,22 @@ class UI(tk.Tk):
         chosen=filedialog.askdirectory(title="Папка для результатов")
         if chosen:
             self.save_setting(results_dir=chosen)
+            self.speakers.results_root = Path(chosen).expanduser().resolve()
             self.render()
 
     # ---------- data/actions ----------
     def recent_records(self):
-        root=Path.home()/"Downloads"; out=[]
+        root=Path(str(self.settings.get("results_dir", app_settings.DEFAULT_RESULTS_DIR))).expanduser(); out=[]
         if root.exists():
             for d in sorted(root.glob("*_result"),key=lambda p:p.stat().st_mtime,reverse=True):
-                if d.is_dir(): out.append((d.name.removesuffix("_result"),"МП Учителя","Техническая","—","—","Готово",d))
+                if not d.is_dir():
+                    continue
+                turns = self.load_diarization(d)
+                speakers = len({turn["speaker"] for turn in turns}) if turns else 0
+                stamp = datetime.fromtimestamp(d.stat().st_mtime).strftime("%d.%m.%Y, %H:%M")
+                status = "С резюме" if (d / "02_summary_todo.docx").is_file() else "Стенограмма"
+                out.append((d.name.removesuffix("_result"), "—", "Запись",
+                            stamp, str(speakers or "—"), status, d))
         return out
 
     def show(self,page): self.page=page; self.render()
@@ -1215,7 +1254,8 @@ class UI(tk.Tk):
 
     def _run_backend(self):
         try:
-            self.proc=self.backend.start_transcription(self.selected_file)
+            self.proc=self.backend.start_transcription(
+                self.selected_file, out_dir=Path(self.settings["results_dir"]), no_summary=False)
             if self.proc.stdout:
                 for line in self.proc.stdout:self.events.put(("log",line.rstrip()))
             self.events.put(("done",self.proc.wait()))
@@ -1226,8 +1266,16 @@ class UI(tk.Tk):
             while True:
                 kind,val=self.events.get_nowait()
                 if kind=="done":
-                    if val==0:messagebox.showinfo("Готово","Запись обработана. Результаты сохранены.")
+                    self.title("Славатор")
+                    if val==0:
+                        self.render(); messagebox.showinfo("Готово","Запись обработана. Результаты сохранены.")
                     else:messagebox.showerror("Ошибка обработки","Обработка завершилась с ошибкой.")
+                elif kind=="log" and val.startswith("@@PROGRESS@@"):
+                    try:
+                        payload=json.loads(val[len("@@PROGRESS@@"):])
+                        self.title(f"Славатор · {payload.get('pct',0):.0f}% · {payload.get('detail') or payload.get('stage','')}")
+                    except (ValueError, TypeError):
+                        pass
                 elif kind=="error":messagebox.showerror("Не удалось запустить обработку",str(val))
         except queue.Empty:
             pass
@@ -1253,7 +1301,13 @@ class UI(tk.Tk):
         self._stop_wav()
         try:
             self.playback_path = Path(path).resolve()
-            self.playback_proc = subprocess.Popen(["afplay", str(self.playback_path)])
+            if os.name == "nt":
+                helper = Path(__file__).resolve().parents[2] / "windows" / "audio_player.py"
+                if not helper.is_file():
+                    raise FileNotFoundError("Не найден Windows-модуль воспроизведения")
+                self.playback_proc = subprocess.Popen([sys.executable, "-B", str(helper), str(self.playback_path)])
+            else:
+                self.playback_proc = subprocess.Popen(["afplay", str(self.playback_path)])
             self.playback_state = "playing"
             self.render()
         except Exception as e:
@@ -1269,6 +1323,8 @@ class UI(tk.Tk):
             self.playing_color = ui_theme.unknown_color(THEME_NAME)
         if self.playback_path == path and self.playback_proc is not None and self.playback_proc.poll() is None:
             try:
+                if os.name == "nt":
+                    self._stop_wav(); self.render(); return
                 if self.playback_state == "playing":
                     os.kill(self.playback_proc.pid, signal.SIGSTOP)
                     self.playback_state = "paused"

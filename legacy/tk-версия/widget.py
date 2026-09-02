@@ -279,8 +279,8 @@ class Widget(tk.Tk):
         self.render()
 
     def _stop_recording(self):
-        folder = Path(str(self.settings.get("widget_output_dir",
-                                            Path.home() / "Downloads"))).expanduser()
+        folder = Path(str(self.settings.get(
+            "widget_output_dir", app_settings.DEFAULT_RESULTS_DIR))).expanduser()
         stamp = time.strftime("%Y-%m-%d_%H-%M")
         target = folder / f"Встреча {stamp}.wav"
 

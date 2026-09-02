@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import uuid
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -46,8 +47,12 @@ class SpeakerService:
     def _load_json(self, path: Path, default: Any):
         if not path.exists():
             return default
-        with path.open("r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            # Битый файл метаданных не должен ронять весь GUI.
+            return default
 
     def _save_json(self, path: Path, value: Any):
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -123,6 +128,12 @@ class SpeakerService:
 
     @staticmethod
     def _wav_duration(path: Path) -> float:
+        try:
+            with wave.open(str(path), "rb") as source:
+                rate = source.getframerate()
+                return source.getnframes() / float(rate) if rate else 0.0
+        except (OSError, wave.Error):
+            pass
         try:
             out = subprocess.check_output(
                 ["ffprobe", "-v", "error", "-show_entries", "format=duration",

@@ -6,16 +6,27 @@
 """
 import json
 import os
+import sys
 from pathlib import Path
 
 APP_NAME = "Славатор"
 
+def default_results_dir() -> Path:
+    """Папка, которую пользователь ожидает видеть на своей системе."""
+    if os.name == "nt":
+        profile = Path(os.environ.get("USERPROFILE", str(Path.home())))
+        return profile / "Documents" / APP_NAME
+    return Path.home() / "Downloads"
+
+
+DEFAULT_RESULTS_DIR = default_results_dir()
+
 DEFAULTS = {
     "theme": "dark",              # dark | light | system
     "language": "ru",
-    "results_dir": str(Path.home() / "Downloads"),
+    "results_dir": str(DEFAULT_RESULTS_DIR),
     "widget_enabled": False,
-    "widget_output_dir": str(Path.home() / "Downloads"),
+    "widget_output_dir": str(DEFAULT_RESULTS_DIR),
     "keep_diagnostics": False,
     "widget_anchor": "top-right",  # угол/край экрана или "free"
     "widget_x": None,
@@ -30,7 +41,13 @@ def support_dir() -> Path:
     override = os.environ.get("MEETING_TRANSCRIBER_APP_SUPPORT", "").strip()
     if override:
         return Path(override).expanduser()
-    return Path.home() / "Library" / "Application Support" / APP_NAME
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
+        return Path(base) / APP_NAME if base else Path.home() / APP_NAME
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / APP_NAME
+    base = os.environ.get("XDG_CONFIG_HOME")
+    return (Path(base) if base else Path.home() / ".config") / APP_NAME
 
 
 def settings_path() -> Path:

@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -13,14 +15,30 @@ class BackendAdapter:
     def available(self) -> bool:
         return bool(self.backend and self.backend.exists())
 
-    def start_transcription(self, input_file: Path):
+    def start_transcription(
+        self,
+        input_file: Path,
+        *,
+        out_dir: Path | None = None,
+        no_summary: bool = False,
+        speakers: int = 0,
+        env: dict[str, str] | None = None,
+    ):
         if not self.available():
             raise RuntimeError("Ядро транскрибации не найдено.")
+        command = [str(self.python), "-B", str(self.backend), str(input_file)]
+        if no_summary:
+            command.append("--no-summary")
+        if out_dir is not None:
+            command += ["--out-dir", str(out_dir)]
+        if speakers > 0:
+            command += ["--speakers", str(speakers)]
         return subprocess.Popen(
-            [str(self.python), str(self.backend), str(input_file)],
+            command,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
             cwd=str(self.backend.parent),
+            env={**os.environ, "PYTHONUNBUFFERED": "1", **(env or {})},
         )
