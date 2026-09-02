@@ -420,10 +420,14 @@ def preflight(need_llm: bool = True, need_diarization: bool = True) -> bool:
             problems.append(f"  - нет пакета {package}")
 
     if problems:
+        support_hint = (
+            "%APPDATA%\\Славатор" if os.name == "nt"
+            else "~/Library/Application Support/Славатор"
+        )
         raise DependencyError(
             "Окружение не готово к обработке:\n" + "\n".join(problems),
-            "Переустановите окружение: удалите ~/Library/Application Support/Славатор "
-            "и запустите приложение заново.",
+            f"Переустановите окружение в {support_hint} и запустите "
+            "приложение заново.",
         )
 
     # Ollama проверяется отдельно и мягко: без неё не будет только резюме,
@@ -1892,32 +1896,14 @@ def analyze_meeting(utterances: list[Utterance], extra_dir: Path) -> dict[str, A
     write_json(extra_dir / "initial_analysis.json", partials)
 
     if len(partials) == 1:
-        merged = partials[0]
-        result: dict[str, Any] = {
-            "title": "",
-            "summary": "",
-            "participants": sorted({item.label for item in utterances}),
-            "topics": list(merged.get("topics", [])),
-            "decisions": list(merged.get("decisions", [])),
-            "todos": list(merged.get("todos", [])),
-            "risks": list(merged.get("risks", [])),
-            "questions": list(merged.get("questions", [])),
-        }
         stage_pct("summary", 0.6, "итоговое резюме")
-        raw = ollama_chat(
-            REDUCE_SYSTEM,
-            REDUCE_TEMPLATE.format(parts=json.dumps(partials, ensure_ascii=False, indent=2)),
-        )
-        final = parse_json_response(raw)
     else:
         stage_pct("summary", len(chunks) / (len(chunks) + 1), "сведение фрагментов")
-        raw = ollama_chat(
-            REDUCE_SYSTEM,
-            REDUCE_TEMPLATE.format(parts=json.dumps(partials, ensure_ascii=False, indent=2)),
-        )
-        final = parse_json_response(raw)
-        result = {}
-
+    raw = ollama_chat(
+        REDUCE_SYSTEM,
+        REDUCE_TEMPLATE.format(parts=json.dumps(partials, ensure_ascii=False, indent=2)),
+    )
+    final = parse_json_response(raw)
     speakers = sorted({item.label for item in utterances})
     analysis: dict[str, Any] = {
         "title": str(final.get("title", "")).strip(),

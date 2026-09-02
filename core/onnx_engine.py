@@ -19,7 +19,6 @@ HuggingFace, создавать токен и принимать условия 
 ядро только ради работы с профилями, и платить за это загрузкой движка не
 должно.
 """
-import json
 import os
 import shutil
 import tarfile
@@ -141,7 +140,9 @@ def ensure_models(names, log=print) -> None:
 
         if spec.get("archive"):
             with tarfile.open(tmp, "r:bz2") as archive:
-                archive.extractall(MODELS_DIR)
+                # Архив приходит из сети: не разрешаем именам выйти
+                # за MODELS_DIR или создать опасные ссылки.
+                archive.extractall(MODELS_DIR, filter="data")
             tmp.unlink(missing_ok=True)
         else:
             tmp.replace(target)
