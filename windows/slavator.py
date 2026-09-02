@@ -34,6 +34,10 @@ from pathlib import Path
 APP_NAME = "Славатор"
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
+# live_capture и dictation лежат рядом; при запуске по ярлыку текущий каталог
+# другой, поэтому путь добавляем явно.
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
 
 
 # --------------------------------------------------------------------------
@@ -82,6 +86,10 @@ DEFAULTS = {
     "results_dir": str(Path.home() / "Downloads"),
     "my_name": "Вы",
     "llm_model": "qwen3:8b",
+    "dictation_enabled": False,
+    # small — текст идёт на ходу; large-v3-turbo точнее, но ждать три секунды.
+    "dictation_model": "small",
+    "dictation_level": "structure",
 }
 
 
@@ -138,6 +146,8 @@ class Bridge:
 
     def __init__(self) -> None:
         self.window = None
+        self.capture = None
+        self.dictation = None
         self.task: subprocess.Popen | None = None
         self.stage = ""
         self.percent = 0.0
@@ -320,6 +330,70 @@ class Bridge:
                           if "ОШИБКА" in x or "Подсказка" in x or x.startswith("  - ")]
             self.failure = "\n".join(meaningful or self.log[-10:]) \
                 or "Ядро завершилось с ошибкой"
+
+    # ---------- живая запись ----------
+
+    def capture_start(self, with_system: bool = True) -> dict:
+        if self.busy:
+            return {"ok": False, "error": "Идёт обработка — сначала дождитесь её"}
+        try:
+            from live_capture import LiveCapture
+        except ImportError as exc:
+            return {"ok": False, "error": f"Не загрузился модуль записи: {exc}"}
+        if self.capture is None:
+            self.capture = LiveCapture()
+        return self.capture.start(self.settings()["results_dir"], with_system)
+
+    def capture_stop(self) -> dict:
+        if self.capture is None:
+            return {"ok": False, "error": "Запись не шла"}
+        result = self.capture.stop()
+        # Слишком короткую обрабатывать нечего, но и молчать нельзя.
+        if result.get("seconds", 0) < 3:
+            for key in ("file", "voice"):
+                path = result.get(key)
+                if path:
+                    try:
+                        Path(path).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            return {"ok": False, "error": "Записано меньше трёх секунд"}
+        # Живой режим и готовый файл сходятся в один конвейер: разведёшь их —
+        # разъедется и качество.
+        started = self.transcribe(result.get("file", ""))
+        result["started"] = started.get("ok", False)
+        return result
+
+    def capture_state(self) -> dict:
+        if self.capture is None:
+            return {"recording": False, "level": 0, "seconds": 0, "failure": ""}
+        return self.capture.state()
+
+    # ---------- диктовка ----------
+
+    def dictation_enable(self) -> dict:
+        try:
+            from dictation import Dictation
+        except ImportError as exc:
+            return {"ok": False, "error": f"Не загрузился модуль диктовки: {exc}"}
+        env = dict(os.environ)
+        env.update(read_config())
+        settings = self.settings()
+        if self.dictation is None:
+            self.dictation = Dictation(
+                venv_python(), settings.get("dictation_model", "small"),
+                env, settings.get("dictation_level", "structure"))
+        return self.dictation.enable()
+
+    def dictation_disable(self) -> dict:
+        if self.dictation is None:
+            return {"ok": True}
+        return self.dictation.disable()
+
+    def dictation_status(self) -> dict:
+        if self.dictation is None:
+            return {"state": "off", "failure": "", "level": 0, "seconds": 0}
+        return self.dictation.status()
 
     # ---------- записи ----------
 

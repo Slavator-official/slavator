@@ -214,6 +214,8 @@ td.right, th.right { text-align:right; }
   padding:8px 11px; border-radius:8px; background:var(--raised);
   border:1px solid var(--line); font-size:13.5px; min-width:190px;
 }
+.meter { display:inline-flex; align-items:flex-end; gap:2.5px; height:17px; }
+.meter i { display:block; width:3px; border-radius:2px; background:var(--accent2); }
 .hidden { display:none !important; }
 .toast {
   position:fixed; left:50%; bottom:22px; transform:translateX(-50%);
@@ -317,6 +319,9 @@ const state = {
   people: 0,
   search: "",
   asking: false,
+  live: { recording: false },
+  liveMode: "sys",
+  dictation: { state: "off" },
 };
 
 /* ---------------- вспомогательное ---------------- */
@@ -495,16 +500,11 @@ function drawMain() {
   $("screen").innerHTML = `<h1>Главная</h1>${setup}
     <div class="two">
       <div class="card">${picked}</div>
-      <div class="card">
-        <div class="row"><b style="font-size:14.5px">Слушать встречу</b></div>
-        <p class="muted" style="margin:8px 0 0;font-size:12.5px">
-          Запись звонка с экрана и микрофона на Windows пока не сделана —
-          это следующая задача. Готовые файлы обрабатываются полностью.</p>
-        <div style="flex:1"></div>
-      </div>
+      <div class="card" id="livecard">${liveCard()}</div>
     </div>
     <div id="progress"></div>${lastCard}`;
 
+  wireLive();
   if (state.picked) {
     $("unpick").onclick = () => { state.picked = ""; state.pickedInfo = null; draw(); };
     $("another").onclick = choose;
@@ -522,6 +522,59 @@ function drawMain() {
     b.onclick = () => { state.screen = b.dataset.nav2; draw(); };
   });
   drawProgress();
+}
+
+function liveCard() {
+  const live = state.live || {};
+  if (live.recording) {
+    const bars = [0.55, 0.9, 1, 0.75, 0.95, 0.6]
+      .map((k) => `<i style="height:${Math.max(3, Math.min(17, live.level * 17 * k + 3))}px"></i>`)
+      .join("");
+    return `<div class="row">
+        <span style="width:10px;height:10px;border-radius:50%;background:#E0705F"></span>
+        <b class="mono" style="font-size:22px">${hms(live.seconds)}</b>
+        <span class="meter">${bars}</span>
+        <span class="grow"></span>
+        <button class="btn quiet" id="live-stop">Остановить</button>
+      </div>
+      <p class="muted" style="margin:10px 0 0;font-size:12.5px">
+        ${state.liveMode === "mic" ? "Пишу микрофон"
+          : "Пишу звук компьютера и микрофон — двумя дорожками"}</p>`;
+  }
+  return `<div class="row"><b style="font-size:14.5px">Слушать встречу</b></div>
+    <span class="seg" style="margin-top:12px">
+      <button data-live="sys" class="${state.liveMode !== "mic" ? "on" : ""}">Звонок</button>
+      <button data-live="mic" class="${state.liveMode === "mic" ? "on" : ""}">Только микрофон</button>
+    </span>
+    <p class="muted" style="margin:8px 0 0;font-size:12px">${state.liveMode === "mic"
+      ? "Все в одной комнате — пишем только микрофон"
+      : "Собеседников из динамиков и вас с микрофона"}</p>
+    <div style="flex:1"></div>
+    <button class="btn wide" id="live-go" style="margin-top:10px">Начать слушать</button>
+    ${live.failure ? `<p class="muted" style="margin:10px 0 0;font-size:12px;color:var(--warn)">${esc(live.failure)}</p>` : ""}`;
+}
+
+function wireLive() {
+  const stop = $("live-stop");
+  if (stop) {
+    stop.onclick = () => api().capture_stop().then((r) => {
+      state.live = { recording: false, failure: r.ok ? (r.failure || "") : (r.error || "") };
+      draw();
+      if (r.ok && r.started) toast("Запись пошла в обработку");
+      else if (!r.ok) toast(r.error || "Не получилось");
+    });
+  }
+  const go = $("live-go");
+  if (go) {
+    go.onclick = () => api().capture_start(state.liveMode !== "mic").then((r) => {
+      if (!r.ok) { state.live = { recording: false, failure: r.error }; draw(); return; }
+      state.live = { recording: true, level: 0, seconds: 0, failure: "" };
+      draw();
+    });
+  }
+  document.querySelectorAll("[data-live]").forEach((b) => {
+    b.onclick = () => { state.liveMode = b.dataset.live; draw(); };
+  });
 }
 
 function choose() {
@@ -636,6 +689,23 @@ function drawSettings() {
       <div class="setting"><div class="who grow"><b>Папка для результатов</b>
         <p class="mono">${esc(s.results_dir || "")}</p></div>
         <button class="btn quiet" id="set-dir">Выбрать</button></div>
+      <div class="setting"><div class="who grow"><b>Диктовать в любое поле</b>
+        <p>Держите правый <b>Alt</b> и говорите — текст появится там, где курсор.
+           С <b>Shift</b> текст сначала причёсывается моделью.
+           ${state.dictation.state === "failed"
+             ? '<span class="pill warn">' + esc(state.dictation.failure) + '</span>'
+             : state.dictation.state !== "off"
+               ? '<span class="pill ok">включена</span>' : ''}</p></div>
+        <span class="seg">
+          <button data-dict="on" class="${s.dictation_enabled ? "on" : ""}">Вкл</button>
+          <button data-dict="off" class="${s.dictation_enabled ? "" : "on"}">Выкл</button>
+        </span></div>
+      <div class="setting"><div class="who grow"><b>Модель диктовки</b>
+        <p>«Быстро» пишет на ходу, «точно» вставляет целиком через три секунды</p></div>
+        <span class="seg">
+          <button data-dm="small" class="${s.dictation_model !== "large-v3-turbo" ? "on" : ""}">Быстро</button>
+          <button data-dm="large-v3-turbo" class="${s.dictation_model === "large-v3-turbo" ? "on" : ""}">Точно</button>
+        </span></div>
       <div class="setting"><div class="who grow"><b>Языковая модель</b>
         <p>Для резюме встреч и чата. ${state.env.ollama
           ? '<span class="pill ok">Ollama отвечает</span>'
@@ -650,6 +720,21 @@ function drawSettings() {
   });
   document.querySelectorAll("[data-theme]").forEach((b) => {
     b.onclick = () => save({ theme: b.dataset.theme }).then(applyTheme);
+  });
+  document.querySelectorAll("[data-dict]").forEach((b) => {
+    b.onclick = () => {
+      const on = b.dataset.dict === "on";
+      save({ dictation_enabled: on }).then(() =>
+        (on ? api().dictation_enable() : api().dictation_disable()).then((r) => {
+          if (r && r.ok === false) toast(r.error || "Не получилось");
+          return api().dictation_status().then((st) => {
+            state.dictation = st; draw();
+          });
+        }));
+    };
+  });
+  document.querySelectorAll("[data-dm]").forEach((b) => {
+    b.onclick = () => save({ dictation_model: b.dataset.dm }).then(draw);
   });
 }
 
@@ -749,6 +834,10 @@ function boot() {
   }).then(() => {
     document.documentElement.dataset.theme =
       state.settings.theme === "light" ? "light" : "dark";
+    if (state.settings.dictation_enabled) {
+      api().dictation_enable().then(() =>
+        api().dictation_status().then((st) => { state.dictation = st; }));
+    }
     return refresh();
   });
 
@@ -789,6 +878,16 @@ function boot() {
       // Обработка кончилась — обновляем список записей.
       if (was.busy && !p.busy) refresh();
     });
+    if (state.live.recording) {
+      api().capture_state().then((live) => {
+        state.live = { ...live, failure: live.failure || "" };
+        const card = $("livecard");
+        if (card && state.mode === "app" && state.screen === "main") {
+          card.innerHTML = liveCard();
+          wireLive();
+        }
+      });
+    }
   }, 500);
 }
 
