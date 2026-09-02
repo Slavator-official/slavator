@@ -1,0 +1,798 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Славатор</title>
+<style>
+/* Токены перенесены один в один из app/Theme.swift.
+   Приложение на маке и на Windows обязано быть одним продуктом, а не двумя
+   похожими: цвет здесь — не украшение, а часть узнавания. */
+:root {
+  --bg:#0A1420; --sidebar:#0C1826; --surface:#101E2E; --raised:#16263A; --row:#132339;
+  --line:#1E3350; --line2:#182A42;
+  --text:#F2F6FC; --muted:#90A0B5; --faint:#63758C;
+  --accent:#2F6FF5; --accent2:#5590FF; --accent-soft:#16305A;
+  --ok:#19C37D; --ok-bg:#10362A; --warn:#F0B429; --warn-bg:#382C10;
+  --unknown:#4A5D75;
+  --sp1:#E0A33C; --sp2:#35A9A0; --sp3:#8E7DE8; --sp4:#E0705F; --sp5:#56B37F;
+  --sp6:#7B96C4; --sp7:#D97BA8; --sp8:#9AAF3E; --sp9:#4FA3D9; --sp10:#BE9A6E;
+}
+html[data-theme="light"] {
+  --bg:#F4F6FA; --sidebar:#FFFFFF; --surface:#FFFFFF; --raised:#F8FAFD; --row:#F8FAFD;
+  --line:#E2E8F2; --line2:#EDF1F7;
+  --text:#0B1F33; --muted:#63707F; --faint:#8794A3;
+  --accent:#2F6FF5; --accent2:#1D5DEB; --accent-soft:#E3ECFD;
+  --ok:#12A06A; --ok-bg:#DCF4E6; --warn:#A87200; --warn-bg:#FDEFC9;
+  --unknown:#A9B6C6;
+  --sp1:#C7862A; --sp2:#1E8F87; --sp3:#6F5FD0; --sp4:#CB5647; --sp5:#3E9866;
+  --sp6:#5C7CAC; --sp7:#B85C8A; --sp8:#74872A; --sp9:#2E82B5; --sp10:#8F6E45;
+}
+
+* { box-sizing:border-box; }
+html, body { height:100%; }
+body {
+  margin:0; display:flex; overflow:hidden;
+  background:var(--bg); color:var(--text);
+  /* Системный шрифт платформы — как и на маке. */
+  font-family:"Segoe UI Variable Text","Segoe UI",-apple-system,system-ui,sans-serif;
+  font-size:14px; line-height:1.5;
+  -webkit-user-select:none; user-select:none;
+}
+button { font:inherit; cursor:pointer; border:0; background:none; color:inherit; }
+button:focus-visible, input:focus-visible { outline:2px solid var(--accent2); outline-offset:2px; }
+input, textarea { font:inherit; color:inherit; -webkit-user-select:text; user-select:text; }
+::-webkit-scrollbar { width:10px; height:10px; }
+::-webkit-scrollbar-thumb { background:var(--line); border-radius:5px; }
+::-webkit-scrollbar-track { background:transparent; }
+
+/* ---------------- боковое меню ---------------- */
+.side {
+  width:224px; flex:none; display:flex; flex-direction:column;
+  background:var(--sidebar); border-right:1px solid var(--line2); padding:14px 0 10px;
+}
+.brand { display:flex; align-items:center; gap:10px; padding:0 20px 12px; }
+.brand .mark {
+  width:42px; height:42px; border-radius:11px; flex:none;
+  background:linear-gradient(150deg,var(--accent2),var(--accent));
+  display:grid; place-items:center;
+}
+.brand .mark svg { width:22px; height:22px; }
+.brand b { font-size:19px; font-weight:800; letter-spacing:-.01em; }
+
+.modes { display:flex; gap:3px; margin:0 20px 18px; padding:3px;
+         background:var(--surface); border:1px solid var(--line2); border-radius:9px; }
+.modes button {
+  flex:1; height:27px; display:grid; place-items:center; border-radius:7px;
+  color:var(--muted); transition:background .13s, color .13s;
+}
+.modes button svg { width:17px; height:17px; }
+.modes button:hover { color:var(--text); background:var(--row); }
+.modes button.on { background:var(--accent); color:#fff; }
+
+.nav { padding:0 10px; display:flex; flex-direction:column; gap:2px; }
+.nav button {
+  display:flex; align-items:center; gap:11px; width:100%;
+  padding:9px 10px; border-radius:9px; color:var(--muted); font-size:14px;
+}
+.nav button svg { width:18px; height:18px; flex:none; }
+.nav button:hover { background:var(--row); color:var(--text); }
+.nav button.on { background:var(--accent-soft); color:var(--accent2); font-weight:600; }
+.nav .badge {
+  margin-left:auto; min-width:20px; height:18px; padding:0 6px; border-radius:9px;
+  background:var(--warn); color:#241a02; font-size:11px; font-weight:700;
+  display:grid; place-items:center;
+}
+.side .foot { margin-top:auto; padding:10px 20px 0; color:var(--faint); font-size:11.5px; }
+
+/* список переписок вместо навигации */
+.chats { display:flex; flex-direction:column; min-height:0; flex:1; padding:0 10px; }
+.chats .head { display:flex; align-items:center; gap:8px; padding:0 10px 9px; }
+.chats .head span { font-size:10.5px; font-weight:600; letter-spacing:.09em;
+                    text-transform:uppercase; color:var(--faint); }
+.chats .head button { margin-left:auto; color:var(--accent2); }
+.chats .head button svg { width:15px; height:15px; display:block; }
+.chats input {
+  width:100%; margin-bottom:9px; padding:7px 10px; border-radius:8px;
+  background:var(--raised); border:1px solid transparent; font-size:12.5px;
+}
+.chats .list { overflow-y:auto; display:flex; flex-direction:column; gap:2px; }
+.chats .item {
+  display:flex; align-items:center; gap:8px; padding:8px 10px;
+  border-radius:8px; color:var(--muted); font-size:13px; text-align:left;
+}
+.chats .item i { width:5px; height:5px; border-radius:50%; background:var(--faint); flex:none; }
+.chats .item span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.chats .item:hover { background:var(--row); }
+.chats .item.on { background:var(--raised); color:var(--text); }
+.chats .item.on i { background:var(--accent2); }
+.chats .item .kill { margin-left:auto; opacity:0; color:var(--faint); }
+.chats .item:hover .kill { opacity:1; }
+.chats .item .kill:hover { color:var(--warn); }
+
+/* ---------------- содержимое ---------------- */
+.main { flex:1; min-width:0; display:flex; flex-direction:column; }
+.scroll { flex:1; overflow-y:auto; padding:26px 28px 32px; }
+h1 { font-size:25px; font-weight:800; margin:0 0 14px; letter-spacing:-.02em; }
+.card {
+  background:var(--surface); border:1px solid var(--line2);
+  border-radius:13px; padding:18px; margin-bottom:14px;
+}
+.two { display:grid; grid-template-columns:1fr 1fr; gap:14px; align-items:stretch; }
+.two > .card { margin:0; display:flex; flex-direction:column; }
+.eyebrow { font-size:10.5px; font-weight:600; letter-spacing:.09em;
+           text-transform:uppercase; color:var(--faint); }
+.muted { color:var(--muted); }
+.faint { color:var(--faint); }
+.row { display:flex; align-items:center; gap:10px; }
+.grow { flex:1; min-width:0; }
+.mono { font-family:"Cascadia Mono",Consolas,ui-monospace,monospace; font-variant-numeric:tabular-nums; }
+
+.btn { padding:9px 16px; border-radius:9px; font-size:13.5px; font-weight:600;
+       background:var(--accent); color:#fff; }
+.btn:hover { background:var(--accent2); }
+.btn[disabled] { opacity:.45; cursor:default; }
+.btn.quiet { background:var(--raised); color:var(--text); border:1px solid var(--line); }
+.btn.quiet:hover { background:var(--row); }
+.btn.wide { width:100%; }
+
+.seg { display:inline-flex; gap:2px; padding:3px; background:var(--raised); border-radius:9px; }
+.seg button { padding:6px 13px; border-radius:7px; font-size:12.5px;
+              font-weight:600; color:var(--muted); white-space:nowrap; }
+.seg button.on { background:var(--accent); color:#fff; }
+
+.pill { display:inline-flex; align-items:center; padding:3px 9px; border-radius:9px;
+        font-size:11.5px; font-weight:600; }
+.pill.warn { background:var(--warn-bg); color:var(--warn); }
+.pill.ok { background:var(--ok-bg); color:var(--ok); }
+
+.drop { border:1px dashed var(--line); border-radius:11px; padding:22px;
+        text-align:center; color:var(--muted); cursor:pointer; }
+.drop:hover, .drop.over { border-color:var(--accent2); color:var(--text); }
+
+.stepper { display:inline-flex; align-items:center; background:var(--raised);
+           border:1px solid var(--line); border-radius:9px; overflow:hidden; }
+.stepper button { width:28px; height:28px; color:var(--muted); font-size:15px; font-weight:600; }
+.stepper button:hover { color:var(--text); background:var(--row); }
+.stepper .value { width:32px; text-align:center; font-size:13px; }
+
+.bar { height:8px; border-radius:4px; background:var(--line); overflow:hidden; margin:12px 0 10px; }
+.bar i { display:block; height:100%; background:var(--accent); transition:width .25s ease; }
+.dots { display:flex; gap:9px; }
+.dots i { width:6px; height:6px; border-radius:50%; background:var(--line); }
+.dots i.on { background:var(--accent); }
+
+/* голосовая лента */
+.ribbon { display:flex; gap:2px; height:14px; margin:12px 0 8px; }
+.ribbon i { display:block; border-radius:2px; min-width:2px; }
+.legend { display:flex; flex-wrap:wrap; gap:8px 18px; font-size:12.5px; color:var(--muted); }
+.legend span { display:flex; align-items:center; gap:6px; }
+.legend i { width:11px; height:11px; border-radius:3px; }
+
+table { width:100%; border-collapse:collapse; }
+th { text-align:left; font-size:10.5px; font-weight:600; letter-spacing:.08em;
+     text-transform:uppercase; color:var(--faint); padding-bottom:9px; }
+td { padding:11px 0; border-top:1px solid var(--line2); vertical-align:middle; font-size:13.5px; }
+td.right, th.right { text-align:right; }
+.link { color:var(--accent2); font-size:12.5px; font-weight:600; }
+.link:hover { text-decoration:underline; }
+
+/* чат */
+.chatwrap { flex:1; display:flex; flex-direction:column; min-height:0; padding:26px 28px 22px; }
+.thread { flex:1; overflow-y:auto; background:var(--surface); border:1px solid var(--line2);
+          border-radius:13px; padding:16px; margin-bottom:12px; }
+.msg { padding:12px; border-radius:10px; margin-bottom:12px; }
+.msg .who { font-size:10.5px; font-weight:600; letter-spacing:.08em;
+            text-transform:uppercase; margin-bottom:5px; }
+.msg.me { background:var(--accent-soft); } .msg.me .who { color:var(--accent2); }
+.msg.it { background:var(--raised); } .msg.it .who { color:var(--faint); }
+.msg .body { white-space:pre-wrap; -webkit-user-select:text; user-select:text; }
+.msg .body code { font-family:"Cascadia Mono",Consolas,monospace; font-size:.92em;
+                  background:var(--row); padding:1px 5px; border-radius:4px; }
+.empty { display:flex; flex-direction:column; align-items:center; justify-content:center;
+         height:100%; gap:6px; color:var(--muted); text-align:center; }
+.empty svg { width:28px; height:28px; color:var(--faint); }
+.composer { background:var(--surface); border:1px solid var(--line2);
+            border-radius:13px; padding:14px; }
+.composer .line { display:flex; gap:10px; align-items:flex-end; }
+.composer textarea {
+  flex:1; resize:none; min-height:40px; max-height:150px; padding:10px 12px;
+  border-radius:9px; background:var(--raised); border:1px solid var(--line);
+  font-size:14px; line-height:1.45;
+}
+.composer textarea:focus { border-color:var(--accent2); outline:none; }
+.check { display:flex; align-items:center; gap:8px; margin-top:10px;
+         font-size:12px; color:var(--muted); }
+.check input { width:14px; height:14px; accent-color:var(--accent); }
+
+.setting { display:flex; align-items:center; gap:16px; padding:13px 0;
+           border-bottom:1px solid var(--line2); }
+.setting:last-child { border-bottom:0; padding-bottom:0; }
+.setting:first-of-type { padding-top:0; }
+.setting .who b { font-size:14.5px; font-weight:600; display:block; }
+.setting .who p { margin:2px 0 0; font-size:12.8px; color:var(--muted); }
+.setting input[type="text"] {
+  padding:8px 11px; border-radius:8px; background:var(--raised);
+  border:1px solid var(--line); font-size:13.5px; min-width:190px;
+}
+.hidden { display:none !important; }
+.toast {
+  position:fixed; left:50%; bottom:22px; transform:translateX(-50%);
+  background:var(--sidebar); border:1px solid var(--line); border-radius:10px;
+  padding:11px 17px; font-size:13px; box-shadow:0 16px 40px rgba(0,0,0,.45);
+  opacity:0; pointer-events:none; transition:opacity .2s;
+}
+.toast.on { opacity:1; }
+</style>
+</head>
+<body>
+
+<nav class="side">
+  <div class="brand">
+    <div class="mark">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/>
+        <path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/>
+      </svg>
+    </div>
+    <b>Славатор</b>
+  </div>
+
+  <div class="modes">
+    <button id="mode-app" class="on" title="Славатор">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round"><path d="M3 12h2M8 7v10M12 4v16M16 8v8M21 12h-2"/></svg>
+    </button>
+    <button id="mode-chat" title="Чат с моделью">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+           stroke-linecap="round" stroke-linejoin="round">
+        <path d="M8.5 13.5a5.5 5.5 0 1 1 3.2 5l-3.7.9.9-3.4a5.5 5.5 0 0 1-.4-2.5z"/>
+        <path d="M15.6 6.8a5.5 5.5 0 0 0-7.1 6.7"/>
+      </svg>
+    </button>
+  </div>
+
+  <div class="nav" id="nav"></div>
+
+  <div class="chats hidden" id="chatlist">
+    <div class="head">
+      <span>Переписки</span>
+      <button id="chat-new" title="Новая переписка">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>
+        </svg>
+      </button>
+    </div>
+    <input id="chat-search" placeholder="Поиск" autocomplete="off">
+    <div class="list" id="chat-items"></div>
+  </div>
+
+  <div class="foot" id="version"></div>
+</nav>
+
+<main class="main">
+  <div class="scroll" id="screen"></div>
+  <div class="chatwrap hidden" id="chatscreen">
+    <h1>Чат</h1>
+    <div class="thread" id="thread"></div>
+    <div class="composer">
+      <div class="line">
+        <textarea id="draft" placeholder="Напишите сообщение…" rows="1"></textarea>
+        <button class="btn" id="send">Отправить</button>
+      </div>
+      <label class="check">
+        <input type="checkbox" id="thinking">
+        Размышлять перед ответом
+        <span class="faint">медленнее, но обдуманнее</span>
+      </label>
+    </div>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+
+const api = () => window.pywebview.api;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+const SPEAKER_COLOURS = ["--sp1","--sp2","--sp3","--sp4","--sp5",
+                         "--sp6","--sp7","--sp8","--sp9","--sp10"];
+
+const state = {
+  mode: "app",
+  screen: "main",
+  settings: {},
+  env: {},
+  records: [],
+  speakers: [],
+  chats: [],
+  chatId: null,
+  picked: "",
+  pickedInfo: null,
+  people: 0,
+  search: "",
+  asking: false,
+};
+
+/* ---------------- вспомогательное ---------------- */
+
+function toast(text) {
+  const box = $("toast");
+  box.textContent = text;
+  box.classList.add("on");
+  clearTimeout(box._timer);
+  box._timer = setTimeout(() => box.classList.remove("on"), 2600);
+}
+
+function hms(seconds) {
+  const s = Math.max(0, Math.round(seconds || 0));
+  const m = Math.floor(s / 60);
+  return m + ":" + String(s % 60).padStart(2, "0");
+}
+
+/** Цвет говорящего: постоянный внутри встречи, как на маке. */
+function speakerColour(record, key) {
+  const ids = [...new Set(record.turns.map((t) => t.speaker))].sort();
+  const index = ids.indexOf(key);
+  if (index < 0) return "var(--unknown)";
+  return "var(" + SPEAKER_COLOURS[index % SPEAKER_COLOURS.length] + ")";
+}
+
+function ribbonHtml(record) {
+  if (!record.turns || !record.turns.length) return "";
+  const total = Math.max(record.duration || 0,
+    ...record.turns.map((t) => t.end)) || 1;
+  let html = '<div class="ribbon">';
+  let cursor = 0;
+  for (const turn of record.turns) {
+    const gap = Math.max(0, turn.start - cursor);
+    if (gap > 0) html += `<i style="flex:${gap / total};background:transparent"></i>`;
+    const width = Math.max(0.0015, (turn.end - turn.start) / total);
+    html += `<i style="flex:${width};background:${speakerColour(record, turn.speaker)}"></i>`;
+    cursor = turn.end;
+  }
+  html += "</div>";
+
+  const groups = new Map();
+  for (const turn of record.turns) {
+    const label = turn.name || turn.speaker;
+    groups.set(label, (groups.get(label) || 0) + (turn.end - turn.start));
+  }
+  const speech = [...groups.values()].reduce((a, b) => a + b, 0) || 1;
+  const ids = [...new Set(record.turns.map((t) => t.speaker))].sort();
+  html += '<div class="legend">';
+  for (const [label, seconds] of [...groups.entries()].sort((a, b) => b[1] - a[1])) {
+    const turn = record.turns.find((t) => (t.name || t.speaker) === label);
+    const shown = turn.name || ("Голос " + (ids.indexOf(turn.speaker) + 1));
+    html += `<span><i style="background:${speakerColour(record, turn.speaker)}"></i>` +
+            `${esc(shown)} <span class="faint">${Math.round(seconds / speech * 100)}%</span></span>`;
+  }
+  return html + "</div>";
+}
+
+/* ---------------- боковое меню ---------------- */
+
+const NAV = [
+  ["main", "Главная", '<path d="M3 10l9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z"/>'],
+  ["records", "Записи", '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'],
+  ["speakers", "Спикеры", '<circle cx="12" cy="8" r="3.5"/><path d="M5 20c0-3.5 3-6 7-6s7 2.5 7 6"/>'],
+  ["settings", "Настройки", '<circle cx="12" cy="12" r="3"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6L17 7M7 17l-1.4 1.4"/>'],
+];
+
+function drawNav() {
+  $("nav").innerHTML = NAV.map(([key, title, path]) => {
+    const badge = key === "speakers" && state.speakers.length
+      ? `<span class="badge">${state.speakers.length}</span>` : "";
+    return `<button data-nav="${key}" class="${state.screen === key ? "on" : ""}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round">${path}</svg>
+      ${title}${badge}</button>`;
+  }).join("");
+  $("nav").querySelectorAll("[data-nav]").forEach((b) => {
+    b.onclick = () => { state.screen = b.dataset.nav; draw(); };
+  });
+}
+
+function drawChatList() {
+  const probe = state.search.trim().toLowerCase();
+  const shown = state.chats.filter((c) => !probe
+    || (c.title || "").toLowerCase().includes(probe)
+    || (c.messages || []).some((m) => (m.text || "").toLowerCase().includes(probe)));
+  $("chat-items").innerHTML = shown.map((c) => `
+    <button class="item ${c.id === state.chatId ? "on" : ""}" data-chat="${c.id}">
+      <i></i><span>${esc(c.title || "Новый чат")}</span>
+      <span class="kill" data-kill="${c.id}" title="Удалить">✕</span>
+    </button>`).join("");
+  $("chat-items").querySelectorAll("[data-chat]").forEach((b) => {
+    b.onclick = (e) => {
+      if (e.target.dataset.kill) {
+        api().chat_delete(e.target.dataset.kill).then((rest) => {
+          state.chats = rest;
+          if (state.chatId === e.target.dataset.kill) {
+            state.chatId = rest.length ? rest[0].id : null;
+          }
+          drawChatList(); drawThread();
+        });
+        return;
+      }
+      state.chatId = b.dataset.chat;
+      drawChatList(); drawThread();
+    };
+  });
+}
+
+/* ---------------- экраны ---------------- */
+
+function draw() {
+  const chat = state.mode === "chat";
+  $("mode-app").classList.toggle("on", !chat);
+  $("mode-chat").classList.toggle("on", chat);
+  $("nav").classList.toggle("hidden", chat);
+  $("chatlist").classList.toggle("hidden", !chat);
+  $("screen").classList.toggle("hidden", chat);
+  $("chatscreen").classList.toggle("hidden", !chat);
+  if (chat) { drawChatList(); drawThread(); return; }
+
+  drawNav();
+  const painters = { main: drawMain, records: drawRecords,
+                     speakers: drawSpeakers, settings: drawSettings };
+  (painters[state.screen] || drawMain)();
+}
+
+function drawMain() {
+  const setup = state.env.ready ? "" : `
+    <div class="card">
+      <div class="row"><b style="font-size:14.5px">Славатор ещё не настроен</b></div>
+      <p class="muted" style="margin:6px 0 0">Окружение не развёрнуто. Запустите
+        <span class="mono">windows\\install.ps1</span> — он поставит Python,
+        модели распознавания и Ollama.</p>
+    </div>`;
+
+  const picked = state.picked ? `
+    <div class="row">
+      <b class="grow" style="font-size:14px">${esc(state.pickedInfo?.name || "")}</b>
+      <button class="btn quiet" id="unpick" title="Убрать файл">✕</button>
+    </div>
+    <div class="muted" style="font-size:12px">${esc(state.pickedInfo?.size || "")}</div>
+    <div style="flex:1"></div>
+    <div class="row" style="margin-top:14px">
+      <span class="muted" style="font-size:12.5px">Участников</span>
+      <span class="stepper">
+        <button id="less">−</button>
+        <span class="value mono">${state.people || "—"}</span>
+        <button id="more">+</button>
+      </span>
+      <span class="faint" style="font-size:12px">${state.people
+        ? "разложу ровно на " + state.people : "определю сама"}</span>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button class="btn" id="go">Начать транскрибацию</button>
+      <button class="btn quiet" id="another">Другой файл</button>
+    </div>`
+    : `<div class="drop grow" id="drop" style="display:flex;flex-direction:column;
+          align-items:center;justify-content:center">
+         <b style="color:var(--text);font-size:14.5px">Выбрать запись</b>
+         <span style="font-size:12.5px">или перетащите файл сюда</span>
+       </div>`;
+
+  const last = state.records[0];
+  const lastCard = last ? `
+    <div class="card">
+      <div class="row">
+        <span class="eyebrow grow">Последняя встреча</span>
+        <button class="link" data-nav2="records">Все записи</button>
+      </div>
+      <b style="font-size:17px;display:block;margin-top:4px">${esc(last.title)}</b>
+      <div class="muted" style="font-size:12.5px">${esc(last.date)} · ${hms(last.duration)}</div>
+      ${ribbonHtml(last)}
+    </div>` : "";
+
+  $("screen").innerHTML = `<h1>Главная</h1>${setup}
+    <div class="two">
+      <div class="card">${picked}</div>
+      <div class="card">
+        <div class="row"><b style="font-size:14.5px">Слушать встречу</b></div>
+        <p class="muted" style="margin:8px 0 0;font-size:12.5px">
+          Запись звонка с экрана и микрофона на Windows пока не сделана —
+          это следующая задача. Готовые файлы обрабатываются полностью.</p>
+        <div style="flex:1"></div>
+      </div>
+    </div>
+    <div id="progress"></div>${lastCard}`;
+
+  if (state.picked) {
+    $("unpick").onclick = () => { state.picked = ""; state.pickedInfo = null; draw(); };
+    $("another").onclick = choose;
+    $("less").onclick = () => { state.people = Math.max(0, state.people - 1); draw(); };
+    $("more").onclick = () => { state.people = Math.min(12, state.people + 1); draw(); };
+    $("go").onclick = () => {
+      api().transcribe(state.picked, state.people).then((r) => {
+        if (!r.ok) toast(r.error || "Не получилось");
+      });
+    };
+  } else {
+    $("drop").onclick = choose;
+  }
+  document.querySelectorAll("[data-nav2]").forEach((b) => {
+    b.onclick = () => { state.screen = b.dataset.nav2; draw(); };
+  });
+  drawProgress();
+}
+
+function choose() {
+  api().pick_file().then((path) => {
+    if (!path) return;
+    state.picked = path;
+    return api().file_info(path).then((info) => { state.pickedInfo = info; draw(); });
+  });
+}
+
+function drawProgress(live) {
+  const box = $("progress");
+  if (!box) return;
+  const p = live || window._lastProgress;
+  if (!p || !p.busy) { box.innerHTML = p && p.error ? errorCard(p.error) : ""; return; }
+  const stages = ["prepare","audio","asr","quality","diarization",
+                  "identify","names","transcript","documents"];
+  box.innerHTML = `<div class="card">
+      <div class="row">
+        <span class="eyebrow grow">Обработка</span>
+        <b style="font-size:22px">${Math.round(p.percent)}%</b>
+      </div>
+      <b style="font-size:16px;display:block;margin-top:2px">${esc(p.stage)}</b>
+      <div class="muted" style="font-size:12.5px">${esc(p.detail)}</div>
+      <div class="bar"><i style="width:${p.percent}%"></i></div>
+      <div class="row">
+        <span class="dots">${stages.map((_, i) =>
+          `<i class="${p.percent >= (i / stages.length) * 100 ? "on" : ""}"></i>`).join("")}</span>
+        <span class="grow"></span>
+        <button class="btn quiet" id="stop">Прервать</button>
+      </div>
+    </div>`;
+  const stop = $("stop");
+  if (stop) stop.onclick = () => api().cancel();
+}
+
+function errorCard(text) {
+  return `<div class="card" style="border-color:var(--warn)">
+    <b style="font-size:14.5px">Обработка не завершилась</b>
+    <pre class="muted" style="white-space:pre-wrap;font-size:12.5px;margin:8px 0 0">${esc(text)}</pre>
+  </div>`;
+}
+
+function drawRecords() {
+  if (!state.records.length) {
+    $("screen").innerHTML = `<h1>Записи</h1>
+      <div class="card"><div class="empty" style="height:180px">
+        <b>Пока нет обработанных встреч</b>
+        <span class="muted">Выберите запись на главной и нажмите «Начать транскрибацию»</span>
+      </div></div>`;
+    return;
+  }
+  $("screen").innerHTML = `<h1>Записи</h1><div class="card"><table>
+    <tr><th style="width:190px">Встреча</th><th>Кто говорил</th>
+        <th style="width:150px">Когда</th><th class="right" style="width:92px">Стенограмма</th>
+        <th class="right" style="width:92px">Саммари</th></tr>
+    ${state.records.map((r, i) => `<tr>
+      <td><b>${esc(r.title)}</b></td>
+      <td>${ribbonHtml(r)}</td>
+      <td class="mono muted" style="font-size:12px">${esc(r.date)}<br>${hms(r.duration)}</td>
+      <td class="right">${r.transcript
+        ? `<button class="link" data-open="${esc(r.transcript)}">Открыть</button>`
+        : '<span class="faint">нет</span>'}</td>
+      <td class="right">${r.summary
+        ? `<button class="link" data-open="${esc(r.summary)}">Открыть</button>`
+        : `<button class="link" data-sum="${i}">Собрать</button>`}</td>
+    </tr>`).join("")}
+  </table></div>`;
+
+  document.querySelectorAll("[data-open]").forEach((b) => {
+    b.onclick = () => api().reveal(b.dataset.open);
+  });
+  document.querySelectorAll("[data-sum]").forEach((b) => {
+    b.onclick = () => {
+      const record = state.records[Number(b.dataset.sum)];
+      api().summarize(record.dir).then((r) => {
+        if (!r.ok) toast(r.error || "Не получилось");
+        else { state.screen = "main"; draw(); }
+      });
+    };
+  });
+}
+
+function drawSpeakers() {
+  $("screen").innerHTML = `<h1>Спикеры</h1>` + (state.speakers.length
+    ? `<div class="card"><table>
+         <tr><th>Имя</th><th>Должность</th><th class="right" style="width:110px">Образцов</th></tr>
+         ${state.speakers.map((s) => `<tr>
+           <td><b>${esc(s.name)}</b></td>
+           <td class="muted">${esc(s.position || "—")}</td>
+           <td class="right mono">${s.samples}</td></tr>`).join("")}
+       </table></div>`
+    : `<div class="card"><div class="empty" style="height:160px">
+         <b>Никто пока не опознан</b>
+         <span class="muted">Обработайте встречу — новые голоса появятся здесь</span>
+       </div></div>`);
+}
+
+function drawSettings() {
+  const s = state.settings;
+  $("screen").innerHTML = `<h1>Настройки</h1>
+    <div class="card">
+      <div class="setting"><div class="who grow"><b>Ваше имя</b>
+        <p>Так подписываются ваши реплики при записи звонка</p></div>
+        <input type="text" id="set-name" value="${esc(s.my_name || "Вы")}"></div>
+      <div class="setting"><div class="who grow"><b>Тема</b>
+        <p>Тёмная — как на маке по умолчанию</p></div>
+        <span class="seg">
+          <button data-theme="dark" class="${s.theme !== "light" ? "on" : ""}">Тёмная</button>
+          <button data-theme="light" class="${s.theme === "light" ? "on" : ""}">Светлая</button>
+        </span></div>
+      <div class="setting"><div class="who grow"><b>Папка для результатов</b>
+        <p class="mono">${esc(s.results_dir || "")}</p></div>
+        <button class="btn quiet" id="set-dir">Выбрать</button></div>
+      <div class="setting"><div class="who grow"><b>Языковая модель</b>
+        <p>Для резюме встреч и чата. ${state.env.ollama
+          ? '<span class="pill ok">Ollama отвечает</span>'
+          : '<span class="pill warn">Ollama не запущена</span>'}</p></div>
+        <input type="text" id="set-llm" value="${esc(s.llm_model || "qwen3:8b")}"></div>
+    </div>`;
+
+  $("set-name").onchange = (e) => save({ my_name: e.target.value.trim() || "Вы" });
+  $("set-llm").onchange = (e) => save({ llm_model: e.target.value.trim() || "qwen3:8b" });
+  $("set-dir").onclick = () => api().pick_folder().then((dir) => {
+    if (dir) save({ results_dir: dir }).then(refresh);
+  });
+  document.querySelectorAll("[data-theme]").forEach((b) => {
+    b.onclick = () => save({ theme: b.dataset.theme }).then(applyTheme);
+  });
+}
+
+function save(values) {
+  return api().save_settings(values).then((fresh) => {
+    state.settings = fresh;
+    return fresh;
+  });
+}
+
+function applyTheme() {
+  document.documentElement.dataset.theme =
+    state.settings.theme === "light" ? "light" : "dark";
+  draw();
+}
+
+/* ---------------- чат ---------------- */
+
+/** Разметка модели: **жирный**, *курсив*, `код`. Переносы сохраняются. */
+function markdown(text) {
+  return esc(text)
+    .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
+    .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<i>$2</i>");
+}
+
+function currentChat() {
+  return state.chats.find((c) => c.id === state.chatId) || null;
+}
+
+function drawThread() {
+  const chat = currentChat();
+  const box = $("thread");
+  const messages = chat ? chat.messages || [] : [];
+  if (!messages.length) {
+    box.innerHTML = `<div class="empty">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round">
+        <path d="M8.5 13.5a5.5 5.5 0 1 1 3.2 5l-3.7.9.9-3.4a5.5 5.5 0 0 1-.4-2.5z"/>
+        <path d="M15.6 6.8a5.5 5.5 0 0 0-7.1 6.7"/></svg>
+      <b>Спросите что угодно</b>
+      <span>Модель работает на этом компьютере, переписка никуда не уходит</span></div>`;
+    return;
+  }
+  box.innerHTML = messages.map((m) => `
+    <div class="msg ${m.role === "user" ? "me" : "it"}">
+      <div class="who">${m.role === "user" ? "Вы" : "Модель"}</div>
+      <div class="body">${markdown(m.text)}</div>
+    </div>`).join("") + (state.asking
+      ? '<div class="faint" style="font-size:12.5px">думает…</div>' : "");
+  box.scrollTop = box.scrollHeight;
+}
+
+function ask() {
+  const field = $("draft");
+  const text = field.value.trim();
+  if (!text || state.asking) return;
+  field.value = "";
+  field.style.height = "auto";
+  state.asking = true;
+  const chat = currentChat();
+  if (chat) chat.messages = [...(chat.messages || []), { role: "user", text }];
+  drawThread();
+
+  api().ask(state.chatId, text, $("thinking").checked).then((r) => {
+    state.asking = false;
+    if (!r.ok) { toast("Модель не ответила"); if (r.error) console.warn(r.error); }
+    return api().chats().then((list) => {
+      state.chats = list;
+      if (r.id) state.chatId = r.id;
+      drawChatList(); drawThread();
+    });
+  });
+}
+
+/* ---------------- запуск ---------------- */
+
+function refresh() {
+  return Promise.all([api().records(), api().speakers(), api().environment()])
+    .then(([records, speakers, env]) => {
+      state.records = records; state.speakers = speakers; state.env = env;
+      $("version").textContent = "версия " + env.version;
+      draw();
+    });
+}
+
+function boot() {
+  Promise.all([api().settings(), api().chats()]).then(([settings, chats]) => {
+    state.settings = settings;
+    state.chats = chats;
+    if (!chats.length) {
+      return api().chat_new().then((fresh) => {
+        state.chats = [fresh]; state.chatId = fresh.id;
+      });
+    }
+    state.chatId = chats[0].id;
+  }).then(() => {
+    document.documentElement.dataset.theme =
+      state.settings.theme === "light" ? "light" : "dark";
+    return refresh();
+  });
+
+  $("mode-app").onclick = () => { state.mode = "app"; draw(); };
+  $("mode-chat").onclick = () => { state.mode = "chat"; draw(); };
+  $("chat-new").onclick = () => api().chat_new().then((fresh) =>
+    api().chats().then((list) => {
+      state.chats = list; state.chatId = fresh.id; drawChatList(); drawThread();
+    }));
+  $("chat-search").oninput = (e) => { state.search = e.target.value; drawChatList(); };
+  $("send").onclick = ask;
+  $("draft").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(); }
+  });
+  $("draft").addEventListener("input", (e) => {
+    e.target.style.height = "auto";
+    e.target.style.height = Math.min(150, e.target.scrollHeight) + "px";
+  });
+
+  document.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    const drop = $("drop");
+    if (drop) drop.classList.add("over");
+  });
+  document.addEventListener("dragleave", () => {
+    const drop = $("drop");
+    if (drop) drop.classList.remove("over");
+  });
+
+  // Опрос хода обработки. Мост односторонний, поэтому спрашиваем сами —
+  // полсекунды достаточно, чтобы полоса шла плавно.
+  setInterval(() => {
+    if (!window.pywebview || !window.pywebview.api) return;
+    api().progress().then((p) => {
+      const was = window._lastProgress || {};
+      window._lastProgress = p;
+      if (state.mode === "app" && state.screen === "main") drawProgress(p);
+      // Обработка кончилась — обновляем список записей.
+      if (was.busy && !p.busy) refresh();
+    });
+  }, 500);
+}
+
+window.addEventListener("pywebviewready", boot);
+</script>
+</body>
+</html>

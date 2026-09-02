@@ -1,24 +1,33 @@
 name: Windows
 
+# Проверка идёт на настоящей Windows, потому что разработка ведётся на маке:
+# ни PowerShell-установщик, ни пути вида %APPDATA%, ни поведение подпроцессов
+# локально не проверить. Всё, что здесь красное, у пользователя не заработает.
+
 on:
   push:
-    branches: ["codex/windows"]
+    branches: ["windows"]
   pull_request:
+  workflow_dispatch:
 
 jobs:
-  test:
+  check:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install test tools
-        run: python -m pip install pytest
-      - name: Check Python syntax
-        run: python -m compileall -q core legacy windows
-      - name: Check PowerShell syntax
+
+      - name: Поставить pytest
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Синтаксис Python
+        run: python -m compileall -q core windows
+
+      - name: Синтаксис PowerShell
         shell: pwsh
         run: |
           $failed = $false
@@ -34,5 +43,51 @@ jobs:
             }
           }
           if ($failed) { exit 1 }
-      - name: Run tests
-        run: python -m pytest -q core/tests legacy/tk-версия/test_v25_10.py legacy/tk-версия/test_gui_flows_v25_10.py legacy/tk-версия/test_ui_contract_v25_10.py
+
+      - name: Мост между интерфейсом и ядром
+        run: python -m pytest -q windows/test_bridge.py
+
+      - name: Тесты ядра
+        run: python -m pytest -q core/tests
+
+      - name: Установщик не тянет прежний интерфейс на Tk
+        shell: pwsh
+        run: |
+          # На Tk мы уже отказались: он не даёт ни теней, ни скруглений.
+          # Если он вернётся в установщик, Windows-версия снова разъедется
+          # с маком по виду — а это главное требование.
+          $text = Get-Content windows/install.ps1 -Raw
+          if ($text -match '"core",\s*"legacy"') {
+            Write-Error "install.ps1 снова копирует legacy — интерфейс на Tk"
+            exit 1
+          }
+          if (-not (Test-Path windows/ui/index.html)) {
+            Write-Error "нет windows/ui/index.html — окну нечего показывать"
+            exit 1
+          }
+
+      - name: Установщик проходит до конца
+        shell: pwsh
+        run: |
+          # Без Ollama и без запуска окна: на сборочной машине нет ни
+          # рабочего стола, ни пяти гигабайт на модель. Проверяется главное —
+          # что скрипт находит Python, поднимает окружение и раскладывает файлы.
+          ./windows/install.ps1 -SkipOllama -NoLaunch
+          $support = Join-Path $env:APPDATA "Славатор"
+          $python = Join-Path $support "env\Scripts\python.exe"
+          if (-not (Test-Path $python)) { throw "окружение не создано: $python" }
+          $installed = Join-Path $env:LOCALAPPDATA "Programs\Славатор\windows\ui\index.html"
+          if (-not (Test-Path $installed)) { throw "интерфейс не скопирован: $installed" }
+          $legacy = Join-Path $env:LOCALAPPDATA "Programs\Славатор\legacy"
+          if (Test-Path $legacy) { throw "в установку попал legacy" }
+          Write-Host "установщик отработал" -ForegroundColor Green
+
+      - name: Ядро запускается установленным питоном
+        shell: pwsh
+        run: |
+          $support = Join-Path $env:APPDATA "Славатор"
+          $python = Join-Path $support "env\Scripts\python.exe"
+          & $python (Join-Path $env:LOCALAPPDATA "Programs\Славатор\core\meeting_transcriber_v25_1.py") --check
+          # --check возвращает 1, когда нет Ollama, и это здесь ожидаемо:
+          # важно, что ядро запустилось и внятно отчиталось, а не упало.
+          if ($LASTEXITCODE -gt 1) { throw "ядро не запускается, код $LASTEXITCODE" }

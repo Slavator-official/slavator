@@ -48,13 +48,35 @@ if (-not (Test-Path $VenvPython)) {
     & $BasePython -m venv $VenvDir
 }
 
+Step "Движок Edge для окна"
+# WebView2 есть в Windows 11 и свежих Windows 10. Если его нет, окно просто
+# не откроется, и понять почему будет невозможно — поэтому проверяем заранее.
+$WebView2 = @(
+    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
+    "HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+) | Where-Object { Test-Path $_ }
+if ($WebView2) {
+    Write-Host "    WebView2 на месте" -ForegroundColor DarkGray
+} else {
+    $Winget = Get-Command winget -ErrorAction SilentlyContinue
+    if ($Winget) {
+        & $Winget.Source install --exact --id Microsoft.EdgeWebView2Runtime `
+            --accept-package-agreements --accept-source-agreements
+    } else {
+        Write-Warning "Нет WebView2. Скачайте его: https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+    }
+}
+
 Step "Библиотеки распознавания"
 & $VenvPython -m pip install --upgrade pip
 & $VenvPython -m pip install -r (Join-Path $PSScriptRoot "requirements.txt")
 if ($LASTEXITCODE -ne 0) { throw "Не удалось установить Python-библиотеки" }
 
 Step "Файлы Славатора"
-foreach ($Name in @("core", "legacy", "windows")) {
+# legacy сюда не копируется намеренно: там прежний интерфейс на Tk, от
+# которого отказались. Windows-версия рисует тот же визуал, что и мак,
+# движком Edge — см. windows/slavator.py.
+foreach ($Name in @("core", "windows")) {
     Copy-Item -Recurse -Force (Join-Path $ProjectRoot $Name) $InstallDir
 }
 New-Item -ItemType Directory -Force -Path (Join-Path $InstallDir "packaging") | Out-Null
@@ -96,7 +118,14 @@ if (-not $SkipOllama) {
     if ($Ollama) {
         Start-Process -FilePath $Ollama.Source -ArgumentList "serve" -WindowStyle Hidden -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 3
-        & $Ollama.Source pull qwen3:8b
+        # Точное имя, а не часть: «qwen3» совпадает с любой моделью семейства,
+        # и установщик решал бы, что нужная уже есть. Так было на маке.
+        $Installed = & $Ollama.Source list 2>$null | Select-String -SimpleMatch "qwen3:8b"
+        if ($Installed) {
+            Write-Host "    модель qwen3:8b уже установлена — пропускаю" -ForegroundColor DarkGray
+        } else {
+            & $Ollama.Source pull qwen3:8b
+        }
     } else {
         Write-Warning "Ollama не установлена. Стенограмма будет работать, резюме — нет."
     }

@@ -1302,7 +1302,7 @@ class UI(tk.Tk):
         try:
             self.playback_path = Path(path).resolve()
             if os.name == "nt":
-                helper = Path(__file__).resolve().parents[2] / "windows" / "audio_player.py"
+                helper = Path(__file__).resolve().parent / "audio_player.py"
                 if not helper.is_file():
                     raise FileNotFoundError("Не найден Windows-модуль воспроизведения")
                 self.playback_proc = subprocess.Popen([sys.executable, "-B", str(helper), str(self.playback_path)])
