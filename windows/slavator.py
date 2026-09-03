@@ -184,6 +184,39 @@ class Bridge:
             if version_file.exists() else "0.0.0",
         }
 
+    def readiness(self) -> dict:
+        """Отчёт ядра: что на месте, чего нет и что дозагружается кнопкой.
+
+        Отдельным вызовом, а не внутри environment(): ядро отвечает не мгновенно
+        — когда Ollama молчит, оно ждёт её несколько секунд, — а environment()
+        интерфейс дёргает после каждой операции.
+        """
+        empty = {"ok": True, "items": [], "missing": [], "can_repair": False,
+                 "needs_setup": False, "size_mb": 0}
+        if not CORE.exists() or not venv_python().exists():
+            return empty
+
+        env = dict(os.environ)
+        env.update(read_config())
+        env["PYTHONIOENCODING"] = "utf-8"
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0  # type: ignore[attr-defined]
+        try:
+            done = subprocess.run(
+                [str(venv_python()), "-B", str(CORE), "--check", "--json"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cwd=str(CORE.parent), env=env, timeout=90, creationflags=flags)
+            return json.loads(done.stdout)
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+            # Молчим намеренно: не смогли спросить — значит, не показываем
+            # карточку. Пугать человека выдуманной нехваткой хуже, чем молчать.
+            return empty
+
+    def repair(self) -> dict:
+        """Дозагрузить недостающее. Что именно — решает ядро."""
+        if self.busy:
+            return {"ok": False, "error": "Обработка уже идёт"}
+        return self._launch(["-B", str(CORE), "--repair"], "Дозагрузка")
+
     def _ollama_alive(self) -> bool:
         try:
             with urllib.request.urlopen(

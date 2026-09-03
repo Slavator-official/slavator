@@ -449,6 +449,18 @@ function draw() {
   (painters[state.screen] || drawMain)();
 }
 
+/* Чего не хватает — одной строкой, как это назвало ядро. */
+function needList(report) {
+  return (report.items || []).filter((i) => i.state !== "ok")
+    .map((i) => (i.detail ? `${i.title} — ${i.detail}` : i.title))
+    .join("; ");
+}
+
+function needWeight(mb) {
+  if (!mb) return "";
+  return mb >= 1024 ? (mb / 1024).toFixed(1) + " ГБ" : mb + " МБ";
+}
+
 function drawMain() {
   const setup = state.env.ready ? "" : `
     <div class="card">
@@ -497,7 +509,28 @@ function drawMain() {
       ${ribbonHtml(last)}
     </div>` : "";
 
-  $("screen").innerHTML = `<h1>Главная</h1>${setup}
+  // Окружение стоит, но чего-то не хватает. Отдельная карточка, а не строчка
+  // в углу: без языковой модели не будет резюме, без моделей разделения — 
+  // голосов, и узнать об этом человек должен до того, как отдаст программе
+  // часовую запись и подождёт полчаса.
+  const need = state.env.ready && state.readiness && !state.readiness.ok
+    ? state.readiness : null;
+  const update = !need ? "" : `
+    <div class="card" style="border-color:var(--warn)">
+      <div class="row">
+        <b class="grow" style="font-size:14.5px">Требуется дозагрузка</b>
+        ${need.size_mb ? `<span class="pill warn">${needWeight(need.size_mb)}</span>` : ""}
+      </div>
+      <p class="muted" style="margin:6px 0 0">${esc(needList(need))}</p>
+      ${need.needs_setup
+        ? `<p class="muted" style="margin:6px 0 0;font-size:12px">Это доставляет
+             установщик: запустите <span class="mono">windows\\install.ps1</span>
+             заново — он пропустит то, что уже стоит.</p>`
+        : `<button class="btn wide" id="repair" style="margin-top:10px"
+             ${(window._lastProgress || {}).busy ? "disabled" : ""}>Дозагрузить</button>`}
+    </div>`;
+
+  $("screen").innerHTML = `<h1>Главная</h1>${setup}${update}
     <div class="two">
       <div class="card">${picked}</div>
       <div class="card" id="livecard">${liveCard()}</div>
@@ -505,6 +538,13 @@ function drawMain() {
     <div id="progress"></div>${lastCard}`;
 
   wireLive();
+  if ($("repair")) {
+    $("repair").onclick = () => {
+      api().repair().then((r) => {
+        if (!r.ok) toast(r.error || "Не получилось");
+      });
+    };
+  }
   if (state.picked) {
     $("unpick").onclick = () => { state.picked = ""; state.pickedInfo = null; draw(); };
     $("another").onclick = choose;
@@ -818,7 +858,17 @@ function refresh() {
       state.records = records; state.speakers = speakers; state.env = env;
       $("version").textContent = "версия " + env.version;
       draw();
+      // Отчёт о готовности приходит отдельно и позже: ядро ждёт молчащую
+      // Ollama несколько секунд, а окно должно нарисоваться сразу.
+      checkReadiness();
     });
+}
+
+function checkReadiness() {
+  return api().readiness().then((report) => {
+    state.readiness = report;
+    if (state.screen === "main" && state.mode === "app") draw();
+  });
 }
 
 function boot() {

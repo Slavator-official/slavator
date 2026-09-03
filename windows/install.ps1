@@ -111,13 +111,34 @@ if (-not $SkipOllama) {
         }
         $Ollama = Get-Command ollama -ErrorAction SilentlyContinue
         if (-not $Ollama) {
-            $OllamaPath = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
-            if (Test-Path $OllamaPath) { $Ollama = [pscustomobject]@{ Source = $OllamaPath } }
+            # PATH обновляется только в новых окнах, а winget ставит Ollama
+            # в профиль пользователя. Поэтому смотрим и по известным путям:
+            # иначе установщик решает, что Ollama нет, сразу после того, как
+            # сам её поставил.
+            foreach ($candidate in @(
+                (Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"),
+                (Join-Path $env:ProgramFiles "Ollama\ollama.exe"))) {
+                if (Test-Path $candidate) {
+                    $Ollama = [pscustomobject]@{ Source = $candidate }
+                    break
+                }
+            }
         }
     }
     if ($Ollama) {
+        # Ollama сама не поднимается: службы в системе она не заводит. Без
+        # запущенного сервера не будет ни резюме, ни имён по разговору, а со
+        # стороны это выглядит как «программа сломалась».
         Start-Process -FilePath $Ollama.Source -ArgumentList "serve" -WindowStyle Hidden -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 3
+        # Ждём ответа, а не «примерно три секунды»: на холодном запуске Ollama
+        # успевает не всегда, и следующая проверка врала, что её нет.
+        foreach ($_ in 1..15) {
+            try {
+                Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/version" `
+                                  -TimeoutSec 2 -ErrorAction Stop | Out-Null
+                break
+            } catch { Start-Sleep -Seconds 1 }
+        }
         # Точное имя, а не часть: «qwen3» совпадает с любой моделью семейства,
         # и установщик решал бы, что нужная уже есть. Так было на маке.
         $Installed = & $Ollama.Source list 2>$null | Select-String -SimpleMatch "qwen3:8b"
