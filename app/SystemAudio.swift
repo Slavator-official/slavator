@@ -174,11 +174,17 @@ final class SystemAudioTap {
         else { throw TapError.noOutputDevice }
 
         address.mSelector = kAudioDevicePropertyDeviceUID
-        var uid: CFString = "" as CFString
-        var uidSize = UInt32(MemoryLayout<CFString>.size)
-        guard AudioObjectGetPropertyData(device, &address, 0, nil, &uidSize, &uid) == noErr
+        // Core Audio кладёт сюда ссылку на строку, а не саму строку. Переменная
+        // типа CFString заставляла Swift отдавать адрес готового объекта под
+        // запись — компилятор об этом предупреждал, а поведение оставалось
+        // неопределённым. Unmanaged описывает ровно то, что происходит на деле,
+        // и takeRetainedValue снимает владение, которое Core Audio передаёт нам.
+        var uid: Unmanaged<CFString>?
+        var uidSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &uidSize, &uid) == noErr,
+              let value = uid?.takeRetainedValue()
         else { throw TapError.noOutputDevice }
-        return uid as String
+        return value as String
     }
 
     private func streamFormat(of object: AudioObjectID) throws -> AVAudioFormat {
