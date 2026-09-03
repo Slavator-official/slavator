@@ -70,6 +70,32 @@ enum Paths {
         Bundle.main.resourceURL?.appending(path: "core/meeting_transcriber_v25_1.py")
             ?? URL(fileURLWithPath: "meeting_transcriber_v25_1.py")
     }
+
+    /// Окружение для запуска ядра: настройки из config.env, который пишет
+    /// установщик.
+    ///
+    /// Живёт здесь, а не внутри обработки: тем же окружением запускается и
+    /// проверка готовности. Разъехавшись, они смотрели бы на разные модели и
+    /// разные словари и отвечали бы по-разному об одном и том же.
+    static func coreEnvironment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        env["PYTHONUNBUFFERED"] = "1"
+        // Не давать Python писать __pycache__ внутрь подписанного бандла:
+        // это ломает подпись, а с ней слетают разрешения macOS.
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        guard let text = try? String(contentsOf: configEnv, encoding: .utf8) else { return env }
+        for line in text.split(separator: "\n") {
+            let clean = line.trimmingCharacters(in: .whitespaces)
+            guard !clean.hasPrefix("#"), let eq = clean.firstIndex(of: "=") else { continue }
+            let key = String(clean[clean.startIndex..<eq])
+            var value = String(clean[clean.index(after: eq)...])
+            if value.hasPrefix("\""), value.hasSuffix("\""), value.count >= 2 {
+                value = String(value.dropFirst().dropLast())
+            }
+            env[key] = value
+        }
+        return env
+    }
 }
 
 // MARK: - Настройки

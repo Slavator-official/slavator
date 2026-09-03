@@ -11,13 +11,16 @@ struct SlavatorApp: App {
     @State private var capture = LiveCapture()
     @State private var dictation = Dictation()
     @State private var chat = Chat()
+    /// Что установлено, а чего не хватает. На уровне приложения, чтобы ответ
+    /// ядра не спрашивался заново при каждом переходе по вкладкам.
+    @State private var doctor = Doctor()
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {
         WindowGroup {
             Shell(library: library, player: player,
                   pipeline: pipeline, capture: capture,
-                  dictation: dictation, chat: chat)
+                  dictation: dictation, chat: chat, doctor: doctor)
                 .frame(minWidth: 1080, minHeight: 620)
                 .onAppear {
                     library.reload()
@@ -128,6 +131,7 @@ struct Shell: View {
     var capture: LiveCapture
     var dictation: Dictation
     var chat: Chat
+    var doctor: Doctor
     @State private var screen: Screen = .main
     /// Куда вернуться из чата.
     @State private var lastAppScreen: Screen = .main
@@ -153,7 +157,7 @@ struct Shell: View {
                         switch screen {
                         case .main:      MainScreen(library: library, player: player,
                                                     pipeline: pipeline, capture: capture,
-                                                    screen: $screen)
+                                                    doctor: doctor, screen: $screen)
                         case .records:   RecordsScreen(library: library, player: player,
                                                       pipeline: pipeline, screen: $screen)
                         case .speakers:  SpeakersScreen(library: library, player: player, screen: $screen)

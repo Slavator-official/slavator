@@ -10,6 +10,7 @@ struct MainScreen: View {
     var player: Player
     var pipeline: Pipeline
     var capture: LiveCapture
+    var doctor: Doctor
     @Binding var screen: Screen
     @Environment(\.palette) private var p
     @State private var picked: URL?
@@ -26,6 +27,8 @@ struct MainScreen: View {
 
             if !ready {
                 setupCard
+            } else if let report = doctor.report, !report.ok {
+                updateCard(report)
             }
 
             // Обе карточки одной высоты: разъехавшиеся по высоте блоки
@@ -49,6 +52,12 @@ struct MainScreen: View {
         .onReceive(NotificationCenter.default.publisher(
             for: NSApplication.didBecomeActiveNotification)) { _ in
             ready = Paths.isReady
+            doctor.refresh()
+        }
+        .onAppear { doctor.refresh() }
+        // Дозагрузка кончилась — спрашиваем ядро заново, а не верим на слово.
+        .onChange(of: pipeline.isRunning) { _, running in
+            if !running { doctor.refresh() }
         }
     }
 
@@ -74,6 +83,53 @@ struct MainScreen: View {
                     Paths.runSetup()
                 }
                 .buttonStyle(PrimaryButton(wide: true))
+                .padding(.top, 10)
+            }
+        }
+    }
+
+    // окружение стоит, но чего-то не хватает
+    //
+    // Отдельная карточка, а не строчка в углу: без языковой модели не будет
+    // резюме, без моделей разделения — голосов. Человек должен узнать об этом
+    // до того, как отдаст программе часовую запись и подождёт полчаса.
+    @ViewBuilder
+    private func updateCard(_ report: Readiness) -> some View {
+        Card {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.down.circle.dotted")
+                    .font(.system(size: 19)).foregroundStyle(p.warn).frame(width: 26)
+                Text("Требуется дозагрузка").font(Kind.strong(14.5))
+                Spacer()
+                if let weight = report.weight {
+                    Pill(text: weight, fg: p.warn, bg: p.warnBg)
+                }
+            }
+            Text(report.listing)
+                .font(Kind.body(12.5)).foregroundStyle(p.muted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 6)
+
+            if report.needs_setup {
+                // Библиотеки ставит установщик: ему нужны интернет, компилятор
+                // и права, которых у окна программы нет.
+                Text("Это доставляет установщик — он пропустит то, что уже стоит.")
+                    .font(Kind.body(12)).foregroundStyle(p.faint)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 4)
+                Button(setupStarted ? "Установка идёт в Терминале" : "Установить") {
+                    setupStarted = true
+                    Paths.runSetup()
+                }
+                .buttonStyle(PrimaryButton(wide: true))
+                .disabled(setupStarted)
+                .padding(.top, 10)
+            } else {
+                Button(pipeline.isRunning ? "Идёт дозагрузка" : "Дозагрузить") {
+                    pipeline.repair(library: library)
+                }
+                .buttonStyle(PrimaryButton(wide: true))
+                .disabled(pipeline.isRunning)
                 .padding(.top, 10)
             }
         }

@@ -38,7 +38,13 @@ class BackendAdapter:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            # Кодировку задаём с обеих сторон явно. По умолчанию питон берёт
+            # кодовую страницу системы, и на Windows без кириллицы ядро
+            # обрывалось на первом русском слове, а интерфейс получал обрубок.
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
             cwd=str(self.backend.parent),
-            env={**os.environ, "PYTHONUNBUFFERED": "1", **(env or {})},
+            env={**os.environ, "PYTHONUNBUFFERED": "1",
+                 "PYTHONIOENCODING": "utf-8", **(env or {})},
         )
