@@ -262,6 +262,21 @@ class SecurityError(PipelineError):
 # --------------------------------------------------------------------------
 
 
+def speak_utf8() -> None:
+    """Весь вывод — в utf-8, какой бы ни была кодовая страница системы.
+
+    На Windows с некириллической страницей ядро падало на первом же русском
+    слове: print уходил в cp1252 и обрывался UnicodeEncodeError посреди
+    работы. Интерфейс читает этот поток как utf-8, сборка — тоже. Под
+    pythonw потоков может не быть вовсе, поэтому ошибки здесь не страшны.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def log(message: str) -> None:
     print(message, flush=True)
 
@@ -2501,6 +2516,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     global WHISPER_LANGUAGE
 
+    speak_utf8()
     args = build_parser().parse_args(argv)
     if args.language:
         WHISPER_LANGUAGE = args.language
