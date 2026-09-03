@@ -136,13 +136,55 @@ $Pythonw = Join-Path $VenvDir "Scripts\pythonw.exe"
 $Launcher = Join-Path $InstallDir "windows\slavator.py"
 $Programs = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
 $ShortcutPath = Join-Path $Programs "Славатор.lnk"
-$Shell = New-Object -ComObject WScript.Shell
-$Shortcut = $Shell.CreateShortcut($ShortcutPath)
-$Shortcut.TargetPath = $Pythonw
-$Shortcut.Arguments = "`"$Launcher`""
-$Shortcut.WorkingDirectory = $InstallDir
-$Shortcut.Description = "Локальная расшифровка встреч"
-$Shortcut.Save()
+
+function Quote([string]$Text) { "'" + $Text.Replace("'", "''") + "'" }
+
+function New-Shortcut {
+    $Shell = New-Object -ComObject WScript.Shell
+    $Shortcut = $Shell.CreateShortcut($ShortcutPath)
+    $Shortcut.TargetPath = $Pythonw
+    $Shortcut.Arguments = "`"$Launcher`""
+    $Shortcut.WorkingDirectory = $InstallDir
+    $Shortcut.Description = "Локальная расшифровка встреч"
+    $Shortcut.Save()
+}
+
+try {
+    New-Shortcut
+} catch {
+    # PowerShell 7 передаёт COM-объекту строки в кодовой странице системы.
+    # На русской Windows «Славатор» в пути проходит, на английской — нет, и
+    # установка обрывалась здесь с «Value does not fall within the expected
+    # range», хотя программа уже была на месте. Windows PowerShell 5.1 отдаёт
+    # те же строки в Unicode, поэтому ярлык доделывает он. Скрипт для него
+    # пишем в UTF-8 с BOM: без BOM он прочитает кириллицу как мусор.
+    $Helper = Join-Path $env:TEMP "slavator-shortcut.ps1"
+    try {
+        $Body = @"
+`$shell = New-Object -ComObject WScript.Shell
+`$link = `$shell.CreateShortcut($(Quote $ShortcutPath))
+`$link.TargetPath = $(Quote $Pythonw)
+`$link.Arguments = $(Quote ('"' + $Launcher + '"'))
+`$link.WorkingDirectory = $(Quote $InstallDir)
+`$link.Description = 'Локальная расшифровка встреч'
+`$link.Save()
+"@
+        [System.IO.File]::WriteAllText($Helper, $Body, (New-Object System.Text.UTF8Encoding $true))
+        $WindowsPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+        if (Test-Path $WindowsPowerShell) {
+            & $WindowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $Helper
+        }
+    } catch {
+        # Молчим: ниже проверка, что ярлык на месте, и она скажет точнее.
+    }
+    Remove-Item $Helper -Force -ErrorAction SilentlyContinue
+}
+
+if (-not (Test-Path $ShortcutPath)) {
+    # Ярлык — удобство, а не условие работы: программа установлена и
+    # запускается и без него. Поэтому предупреждение, а не остановка.
+    Write-Warning "Ярлык не создан. Запускать вручную: $Pythonw `"$Launcher`""
+}
 
 Write-Host "`nСлаватор установлен. Данные: $SupportDir" -ForegroundColor Green
 if (-not $NoLaunch) {

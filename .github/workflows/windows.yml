@@ -85,6 +85,11 @@ jobs:
           if (-not (Test-Path $installed)) { throw "интерфейс не скопирован: $installed" }
           $legacy = Join-Path $env:LOCALAPPDATA "Programs\Славатор\legacy"
           if (Test-Path $legacy) { throw "в установку попал legacy" }
+          # Кодовая страница этой машины кириллицу не знает, и ярлык с
+          # «Славатор» в пути ломался именно здесь. Проверяем явно: сам
+          # установщик о таком только предупреждает, чтобы не рушить установку.
+          $shortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Славатор.lnk"
+          if (-not (Test-Path $shortcut)) { throw "ярлык не создан: $shortcut" }
           Write-Host "установщик отработал" -ForegroundColor Green
 
       - name: Ядро запускается установленным питоном
