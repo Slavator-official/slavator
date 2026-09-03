@@ -577,31 +577,111 @@ def speak_utf8() -> None:
             pass
 
 
+
+ICON = HERE / "ui" / "slavator.ico"
+
+
+def apply_icon(window) -> None:
+    """Поставить иконку окну.
+
+    pywebview своего способа не даёт, поэтому шлём окну сообщение WM_SETICON
+    напрямую. Без этого в панели задач висит значок питона — по нему человек
+    не найдёт свою программу среди прочих.
+    """
+    if os.name != "nt" or not ICON.exists():
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    LR_LOADFROMFILE, LR_DEFAULTSIZE, IMAGE_ICON = 0x0010, 0x0040, 1
+    WM_SETICON, ICON_SMALL, ICON_BIG = 0x0080, 0, 1
+
+    handle = user32.FindWindowW(None, APP_NAME)
+    if not handle:
+        return
+    for size, which in ((16, ICON_SMALL), (32, ICON_BIG)):
+        icon = user32.LoadImageW(None, str(ICON), IMAGE_ICON, size, size,
+                                 LR_LOADFROMFILE | LR_DEFAULTSIZE)
+        if icon:
+            user32.SendMessageW(handle, WM_SETICON, which, icon)
+
+
+LOG_FILE = SUPPORT / "logs" / "app.log"
+
+
+def note(text: str) -> None:
+    """Записать строку в журнал.
+
+    Ярлык запускает pythonw.exe, у которого нет консоли: без журнала любая
+    ошибка при старте уходит в никуда, и человек видит только то, что
+    программа не открылась.
+    """
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with LOG_FILE.open("a", encoding="utf-8") as out:
+            out.write(f"{stamp}  {text}\n")
+    except OSError:
+        pass
+
+
+def complain(text: str) -> None:
+    """Показать беду окном, раз консоли нет."""
+    note("ОШИБКА: " + text)
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(
+                None, text, f"{APP_NAME}: не удалось запустить", 0x10)
+        except Exception:  # noqa: BLE001 - последний рубеж
+            pass
+    else:
+        sys.stderr.write(text + "\n")
+
+
 def main() -> int:
+    # Проверка каталога идёт до всего прочего: она нужна там, где окна нет.
     if "--diagnose" in sys.argv[1:]:
         return diagnose()
 
     speak_utf8()
+    SUPPORT.mkdir(parents=True, exist_ok=True)
+    note(f"запуск, питон {sys.version.split()[0]}, каталог {HERE}")
+
     try:
         import webview
-    except ImportError:
-        sys.stderr.write(
-            "Не установлен pywebview. Выполните windows\\install.ps1 заново.\n")
+    except ImportError as exc:
+        complain("Не установлен pywebview или его зависимости для Windows.\n\n"
+                 f"{exc}\n\nВыполните windows\\install.ps1 заново, "
+                 "затем windows\\diagnose.ps1 — он скажет, чего не хватает.")
         return 1
 
     page = HERE / "ui" / "index.html"
     if not page.is_file():
-        sys.stderr.write(f"Не найден интерфейс: {page}\n")
+        complain(f"Не найден интерфейс: {page}")
         return 1
-
-    SUPPORT.mkdir(parents=True, exist_ok=True)
     bridge = Bridge()
     window = webview.create_window(
         APP_NAME, str(page), js_api=bridge,
         width=1240, height=820, min_size=(1080, 640),
         background_color="#0A1420")
     bridge.window = window
-    webview.start()
+    # Иконку ставим, когда окно уже создано: до этого его не найти по имени.
+    try:
+        window.events.shown += lambda: apply_icon(window)
+    except Exception as exc:  # noqa: BLE001 - без иконки жить можно
+        note(f"иконка не поставилась: {exc}")
+
+    try:
+        note("открываю окно")
+        webview.start()
+    except Exception as exc:  # noqa: BLE001 - показать причину, а не молчать
+        complain(f"Окно не открылось: {exc}\n\n"
+                 "Чаще всего не хватает движка Edge (WebView2). "
+                 "Проверьте: windows\\diagnose.ps1")
+        return 1
+    note("окно закрыто")
     return 0
 
 

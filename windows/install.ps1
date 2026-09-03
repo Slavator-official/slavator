@@ -180,12 +180,16 @@ namespace Slavator {
 
     public static class Shortcut {
         public static void Create(string path, string target, string arguments,
-                                  string workingDirectory, string description) {
+                                  string workingDirectory, string description,
+                                  string icon) {
             IShellLinkW link = (IShellLinkW)new ShellLink();
             link.SetPath(target);
             link.SetArguments(arguments);
             link.SetWorkingDirectory(workingDirectory);
             link.SetDescription(description);
+            // Без иконки в меню «Пуск» и на панели задач висит значок питона,
+            // и человек не находит свою программу среди прочих.
+            if (!String.IsNullOrEmpty(icon)) { link.SetIconLocation(icon, 0); }
             ((IPersistFile)link).Save(path, true);
         }
     }
@@ -194,9 +198,11 @@ namespace Slavator {
 }
 
 New-Item -ItemType Directory -Force -Path $Programs | Out-Null
+$IconFile = Join-Path $InstallDir "windows\ui\slavator.ico"
+if (-not (Test-Path $IconFile)) { $IconFile = "" }
 try {
     [Slavator.Shortcut]::Create($ShortcutPath, $Pythonw, "`"$Launcher`"",
-                                $InstallDir, "Локальная расшифровка встреч")
+                                $InstallDir, "Локальная расшифровка встреч", $IconFile)
 } catch {
     Write-Warning $_.Exception.Message
 }
@@ -208,6 +214,7 @@ if (-not (Test-Path $ShortcutPath)) {
 }
 
 Write-Host "`nСлаватор установлен. Данные: $SupportDir" -ForegroundColor Green
+Write-Host "Если окно не откроется — запустите windows\diagnose.ps1, он скажет почему." -ForegroundColor DarkGray
 if (-not $NoLaunch) {
     Start-Process -FilePath $Pythonw -ArgumentList "`"$Launcher`"" -WorkingDirectory $InstallDir
 }

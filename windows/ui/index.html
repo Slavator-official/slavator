@@ -891,7 +891,60 @@ function boot() {
   }, 500);
 }
 
-window.addEventListener("pywebviewready", boot);
+/* Запуск не должен зависеть от порядка событий.
+   Раньше здесь стоял только обработчик pywebviewready. На движке Edge он
+   успевает сработать РАНЬШЕ, чем разметка повесит обработчик, — и тогда не
+   запускается вообще ничего: окно показывает голый каркас без пунктов меню
+   и с пустым содержимым. Поэтому сначала смотрим, не готов ли мост уже. */
+let booted = false;
+function bootOnce() {
+  if (booted) return;
+  booted = true;
+  try {
+    boot();
+  } catch (e) {
+    showFatal("Интерфейс не запустился: " + (e && e.message ? e.message : e));
+  }
+}
+
+/** Показать беду прямо в окне: пустое окно ничего не объясняет. */
+function showFatal(text) {
+  const box = document.getElementById("screen");
+  if (!box) return;
+  document.getElementById("chatscreen").classList.add("hidden");
+  box.classList.remove("hidden");
+  box.innerHTML = `<h1>Не запустилось</h1>
+    <div class="card" style="border-color:var(--warn)">
+      <b style="font-size:14.5px">${esc(text)}</b>
+      <p class="muted" style="margin:10px 0 0;font-size:12.5px">
+        Это сообщение видно вместо интерфейса, чтобы причина не пряталась.
+        Скопируйте его целиком — по нему видно, что чинить.</p>
+    </div>`;
+}
+
+// Любая необработанная ошибка в разметке тоже должна быть видна, а не
+// оставлять белое окно.
+window.addEventListener("error", (e) => {
+  showFatal((e.message || "ошибка в интерфейсе") +
+            (e.filename ? ` (${e.filename}:${e.lineno})` : ""));
+});
+window.addEventListener("unhandledrejection", (e) => {
+  showFatal("Мост не ответил: " + (e.reason && e.reason.message ? e.reason.message : e.reason));
+});
+
+if (window.pywebview && window.pywebview.api) {
+  bootOnce();
+} else {
+  window.addEventListener("pywebviewready", bootOnce);
+  // Последняя защита: если события так и не будет, человек увидит причину,
+  // а не пустое окно, в котором непонятно, что делать.
+  setTimeout(() => {
+    if (booted) return;
+    if (window.pywebview && window.pywebview.api) bootOnce();
+    else showFatal("Мост к питону не поднялся за пять секунд. "
+                   + "Проверьте, что установлен pywebview и движок Edge (WebView2).");
+  }, 5000);
+}
 </script>
 </body>
 </html>

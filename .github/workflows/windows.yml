@@ -27,6 +27,19 @@ jobs:
       - name: Синтаксис Python
         run: python -m compileall -q core windows
 
+      - name: Иконка на месте
+        shell: pwsh
+        run: |
+          # Без иконки в панели задач висит значок питона, и человек не
+          # находит свою программу среди прочих.
+          if (-not (Test-Path windows/ui/slavator.ico)) {
+            Write-Error "нет windows/ui/slavator.ico"
+            exit 1
+          }
+          $size = (Get-Item windows/ui/slavator.ico).Length
+          if ($size -lt 1000) { Write-Error "иконка подозрительно мала: $size байт"; exit 1 }
+          Write-Host "иконка: $size байт"
+
       - name: Синтаксис PowerShell
         shell: pwsh
         run: |
