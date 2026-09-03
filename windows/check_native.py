@@ -28,7 +28,21 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 
+def speak_utf8() -> None:
+    """Консоль сборочной машины — cp1252, и первая же русская буква в print
+    валит проверку с UnicodeEncodeError раньше, чем та скажет, что не так.
+    Чиним сам поток, а не переменные окружения сборки: с PYTHONUTF8 проверка
+    перестала бы повторять то, что происходит у пользователя.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main() -> int:
+    speak_utf8()
     import dictation
     import live_capture
 
@@ -37,6 +51,7 @@ def main() -> int:
         return 1
 
     # Структура INPUT: 28 байт на 32-битном питоне, 40 на 64-битном.
+    # Меньше — значит, в union забыли самый длинный вариант, мышиный.
     size = ctypes.sizeof(dictation._Input)
     if size not in (28, 40):
         print(f"ОШИБКА: размер INPUT {size} — SendInput такое не примет")

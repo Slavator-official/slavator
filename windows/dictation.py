@@ -59,8 +59,28 @@ class _KeyBdInput(ctypes.Structure):
                 ("dwExtraInfo", ctypes.POINTER(wintypes.ULONG))]
 
 
+class _MouseInput(ctypes.Structure):
+    """Мышью мы не двигаем, но поле обязано быть.
+
+    В union у Windows три варианта, и самый длинный — мышиный. Без него
+    структура выходит короче настоящей: 32 байта вместо 40 на 64-битном
+    питоне. SendInput сверяет длину с той, что ждёт сама, и при несовпадении
+    молча возвращает 0 — диктовка не печатает ни буквы, а ошибки нигде нет.
+    """
+    _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG),
+                ("mouseData", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", ctypes.POINTER(wintypes.ULONG))]
+
+
+class _HardwareInput(ctypes.Structure):
+    _fields_ = [("uMsg", wintypes.DWORD), ("wParamL", wintypes.WORD),
+                ("wParamH", wintypes.WORD)]
+
+
 class _InputUnion(ctypes.Union):
-    _fields_ = [("ki", _KeyBdInput)]
+    _fields_ = [("ki", _KeyBdInput), ("mi", _MouseInput),
+                ("hi", _HardwareInput)]
 
 
 class _Input(ctypes.Structure):

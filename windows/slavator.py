@@ -525,7 +525,63 @@ class Bridge:
 
 # --------------------------------------------------------------------------
 
+def diagnose() -> int:
+    """Проверка развёрнутого каталога: всё ли на месте, чтобы окно открылось.
+
+    Нужна там, где окна нет: в сборке и после установки. Поэтому pywebview
+    здесь не обязателен — его отсутствие лишь отмечается, а не считается
+    поломкой: исходники могут быть в порядке до установки окружения.
+
+    Вывод — латиницей и без путей с русскими буквами. Читает его не человек,
+    а сборка и установщик, а консоль Windows по умолчанию cp1252: русская
+    строка упала бы с UnicodeEncodeError вместо ответа, чего не хватает.
+    """
+    speak_utf8()
+    missing = []
+    for name, path in (("ui", HERE / "ui" / "index.html"),
+                       ("core", CORE),
+                       ("dictation", ROOT / "core" / "dictation_worker.py")):
+        found = path.is_file()
+        print(f"{name}={'ok' if found else 'missing'}")
+        if not found:
+            missing.append(name)
+
+    try:
+        SUPPORT.mkdir(parents=True, exist_ok=True)
+        print("support=ok")
+    except OSError as exc:
+        print(f"support=fail ({exc.errno})")
+        missing.append("support")
+
+    try:
+        import webview  # noqa: F401
+        print("webview=ok")
+    except ImportError:
+        print("webview=absent")
+
+    if missing:
+        print("status=fail " + ",".join(missing))
+        return 1
+    print("status=ok")
+    return 0
+
+
+def speak_utf8() -> None:
+    """Русский текст в консоли Windows: без этого cp1252 роняет любой вывод
+    с UnicodeEncodeError, и вместо внятного сообщения человек видит трассировку.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main() -> int:
+    if "--diagnose" in sys.argv[1:]:
+        return diagnose()
+
+    speak_utf8()
     try:
         import webview
     except ImportError:
