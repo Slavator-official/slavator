@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$SkipOllama,
     [switch]$NoLaunch
 )
@@ -137,47 +137,68 @@ $Launcher = Join-Path $InstallDir "windows\slavator.py"
 $Programs = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
 $ShortcutPath = Join-Path $Programs "Славатор.lnk"
 
-function Quote([string]$Text) { "'" + $Text.Replace("'", "''") + "'" }
+# Ярлык делает IShellLinkW, а не привычный WScript.Shell. Тот переводит пути
+# в кодовую страницу системы, и на Windows с некириллической страницей
+# «Славатор» превращается в «????»: TargetPath отвечал «Value does not fall
+# within the expected range», а Save — «Unable to save shortcut». Установка
+# обрывалась на последнем шаге, когда программа уже стояла. IShellLinkW
+# принимает строки в Unicode, поэтому язык системы перестаёт что-то значить.
+if (-not ("Slavator.Shortcut" -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+using System.Text;
 
-function New-Shortcut {
-    $Shell = New-Object -ComObject WScript.Shell
-    $Shortcut = $Shell.CreateShortcut($ShortcutPath)
-    $Shortcut.TargetPath = $Pythonw
-    $Shortcut.Arguments = "`"$Launcher`""
-    $Shortcut.WorkingDirectory = $InstallDir
-    $Shortcut.Description = "Локальная расшифровка встреч"
-    $Shortcut.Save()
+namespace Slavator {
+
+    [ComImport, Guid("00021401-0000-0000-C000-000000000046")]
+    internal class ShellLink { }
+
+    [ComImport, Guid("000214F9-0000-0000-C000-000000000046"),
+     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IShellLinkW {
+        void GetPath([MarshalAs(UnmanagedType.LPWStr)] StringBuilder file, int cch, IntPtr fd, uint flags);
+        void GetIDList(out IntPtr pidl);
+        void SetIDList(IntPtr pidl);
+        void GetDescription([MarshalAs(UnmanagedType.LPWStr)] StringBuilder name, int cch);
+        void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string name);
+        void GetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] StringBuilder dir, int cch);
+        void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string dir);
+        void GetArguments([MarshalAs(UnmanagedType.LPWStr)] StringBuilder args, int cch);
+        void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string args);
+        void GetHotkey(out short hotkey);
+        void SetHotkey(short hotkey);
+        void GetShowCmd(out int show);
+        void SetShowCmd(int show);
+        void GetIconLocation([MarshalAs(UnmanagedType.LPWStr)] StringBuilder icon, int cch, out int index);
+        void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string icon, int index);
+        void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string path, uint reserved);
+        void Resolve(IntPtr window, uint flags);
+        void SetPath([MarshalAs(UnmanagedType.LPWStr)] string file);
+    }
+
+    public static class Shortcut {
+        public static void Create(string path, string target, string arguments,
+                                  string workingDirectory, string description) {
+            IShellLinkW link = (IShellLinkW)new ShellLink();
+            link.SetPath(target);
+            link.SetArguments(arguments);
+            link.SetWorkingDirectory(workingDirectory);
+            link.SetDescription(description);
+            ((IPersistFile)link).Save(path, true);
+        }
+    }
+}
+'@
 }
 
+New-Item -ItemType Directory -Force -Path $Programs | Out-Null
 try {
-    New-Shortcut
+    [Slavator.Shortcut]::Create($ShortcutPath, $Pythonw, "`"$Launcher`"",
+                                $InstallDir, "Локальная расшифровка встреч")
 } catch {
-    # PowerShell 7 передаёт COM-объекту строки в кодовой странице системы.
-    # На русской Windows «Славатор» в пути проходит, на английской — нет, и
-    # установка обрывалась здесь с «Value does not fall within the expected
-    # range», хотя программа уже была на месте. Windows PowerShell 5.1 отдаёт
-    # те же строки в Unicode, поэтому ярлык доделывает он. Скрипт для него
-    # пишем в UTF-8 с BOM: без BOM он прочитает кириллицу как мусор.
-    $Helper = Join-Path $env:TEMP "slavator-shortcut.ps1"
-    try {
-        $Body = @"
-`$shell = New-Object -ComObject WScript.Shell
-`$link = `$shell.CreateShortcut($(Quote $ShortcutPath))
-`$link.TargetPath = $(Quote $Pythonw)
-`$link.Arguments = $(Quote ('"' + $Launcher + '"'))
-`$link.WorkingDirectory = $(Quote $InstallDir)
-`$link.Description = 'Локальная расшифровка встреч'
-`$link.Save()
-"@
-        [System.IO.File]::WriteAllText($Helper, $Body, (New-Object System.Text.UTF8Encoding $true))
-        $WindowsPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-        if (Test-Path $WindowsPowerShell) {
-            & $WindowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $Helper
-        }
-    } catch {
-        # Молчим: ниже проверка, что ярлык на месте, и она скажет точнее.
-    }
-    Remove-Item $Helper -Force -ErrorAction SilentlyContinue
+    Write-Warning $_.Exception.Message
 }
 
 if (-not (Test-Path $ShortcutPath)) {

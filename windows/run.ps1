@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $SupportDir = Join-Path $env:APPDATA "Славатор"
 $VenvPython = Join-Path $SupportDir "env\Scripts\python.exe"

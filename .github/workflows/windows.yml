@@ -44,6 +44,25 @@ jobs:
           }
           if ($failed) { exit 1 }
 
+      - name: Скрипты читает и старый PowerShell
+        shell: pwsh
+        run: |
+          # Установщик пользователи запускают через powershell.exe — это
+          # Windows PowerShell 5.1, и файл без BOM он читает в кодовой
+          # странице системы. «Славатор» тогда превращается в кракозябры,
+          # и программа встаёт в папку с испорченным именем.
+          $failed = $false
+          Get-ChildItem windows -Filter *.ps1 | ForEach-Object {
+            $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+            $bom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF `
+                   -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+            if (-not $bom) {
+              Write-Error "$($_.Name) без BOM — PowerShell 5.1 прочитает кириллицу как мусор"
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
+
       - name: Мост между интерфейсом и ядром
         run: python -m pytest -q windows/test_bridge.py
 
