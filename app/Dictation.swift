@@ -810,3 +810,27 @@ extension Color {
                   blue: Double(value & 0xFF) / 255)
     }
 }
+
+// MARK: - Журнал назначения клавиши
+
+extension Dictation {
+    /// Короткая запись о том, что происходит при назначении сочетания.
+    ///
+    /// Заведена не от любви к логам: поломку записи нельзя было увидеть со
+    /// стороны — кнопка молчала одинаково и когда события не приходят, и
+    /// когда приходят, но не опознаются.
+    static func logHotkey(_ line: String) {
+        let dir = Paths.support.appending(path: "logs")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appending(path: "hotkey.log")
+        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        guard let data = "\(stamp)  \(line)\n".data(using: .utf8) else { return }
+        if let handle = try? FileHandle(forWritingTo: file) {
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+            try? handle.close()
+        } else {
+            try? data.write(to: file)
+        }
+    }
+}

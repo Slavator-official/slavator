@@ -1047,12 +1047,44 @@ extension SettingsScreen {
     }
 }
 
+/// Ловушка модификаторов: обычный NSView, которому система сама шлёт
+/// flagsChanged, когда он первый откликающийся.
+///
+/// Прямая доставка надёжнее слежки за чужими событиями: NSEvent-монитор
+/// молчал, и понять почему со стороны было нельзя. Монитор оставлен рядом
+/// вторым путём — лишним он не будет, повторы отсекаются множеством.
+private struct KeyCatcher: NSViewRepresentable {
+    var onFlags: (UInt16, NSEvent.ModifierFlags) -> Void
+
+    final class Catcher: NSView {
+        var onFlags: ((UInt16, NSEvent.ModifierFlags) -> Void)?
+        override var acceptsFirstResponder: Bool { true }
+        override func flagsChanged(with event: NSEvent) {
+            onFlags?(event.keyCode, event.modifierFlags)
+        }
+    }
+
+    func makeNSView(context: Context) -> Catcher {
+        let view = Catcher()
+        view.onFlags = onFlags
+        DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
+        return view
+    }
+
+    func updateNSView(_ view: Catcher, context: Context) {
+        view.onFlags = onFlags
+        if view.window?.firstResponder !== view {
+            DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
+        }
+    }
+}
+
 /// Назначение сочетания: нажали кнопку, подержали клавиши, отпустили.
 ///
 /// Ловим отпускание, а не нажатие: пока клавиши держат, человек ещё набирает
 /// сочетание, и «⌘» стало бы ответом раньше, чем он дошёл до «⌘⌥». Пока он
 /// держит, набранное показывается прямо на кнопке — видно, что нажатие
-/// вообще дошло.
+/// дошло.
 private struct HotkeyField: View {
     @Binding var combo: String
     @State private var recording = false
@@ -1065,6 +1097,12 @@ private struct HotkeyField: View {
         }
         .buttonStyle(QuietButton())
         .frame(width: 210)
+        .background {
+            if recording {
+                KeyCatcher(onFlags: { code, mods in take(code: code, mods: mods) })
+                    .frame(width: 1, height: 1)
+            }
+        }
         .onDisappear { finish(save: false) }
     }
 
@@ -1074,19 +1112,24 @@ private struct HotkeyField: View {
         return now.isEmpty ? "Держите клавиши" : HotCombo.label(now)
     }
 
+    private func take(code: UInt16, mods: NSEvent.ModifierFlags) {
+        Dictation.logHotkey("код \(code), модификаторы \(mods.rawValue)")
+        // Код клавиши в flagsChanged называет саму клавишу — по нему видна и
+        // сторона. Через CGEvent это делать нельзя: у NSEvent его может не
+        // оказаться вовсе, и запись молча ничего не ловила.
+        if !mods.intersection([.command, .option, .control, .shift]).isEmpty {
+            pressed.insert(code)
+        } else if !pressed.isEmpty {
+            finish(save: true)              // отпустили всё — сочетание набрано
+        }
+    }
+
     private func begin() {
         pressed = []
         recording = true
+        Dictation.logHotkey("запись начата")
         monitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
-            // Код клавиши в flagsChanged называет саму клавишу — по нему видна
-            // и сторона. Через CGEvent это делать нельзя: у NSEvent его может
-            // не оказаться вовсе, и запись молча ничего не ловила.
-            let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            if !mods.intersection([.command, .option, .control, .shift]).isEmpty {
-                pressed.insert(event.keyCode)
-            } else if !pressed.isEmpty {
-                finish(save: true)          // отпустили всё — сочетание набрано
-            }
+            take(code: event.keyCode, mods: event.modifierFlags)
             return event
         }
     }
@@ -1097,6 +1140,7 @@ private struct HotkeyField: View {
         recording = false
         guard save else { return }
         let chosen = HotCombo.tokens(fromKeyCodes: pressed)
+        Dictation.logHotkey("записано: \(chosen.isEmpty ? "ничего" : chosen)")
         if !chosen.isEmpty { combo = chosen }
     }
 }
