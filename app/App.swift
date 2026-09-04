@@ -185,6 +185,15 @@ struct Shell: View {
             .background(palette.bg)
         }
         .environment(\.palette, palette)
+        // Тему держим в двух местах сразу: SwiftUI слушает эту строку, а
+        // AppKit — NSApp.appearance. Иначе стандартные элементы остаются в
+        // теме системы, а не приложения.
+        .preferredColorScheme(library.settings.theme == "system"
+                              ? nil : (palette == .dark ? .dark : .light))
+        .onAppear { applyAppearance(library.settings.theme) }
+        .onChange(of: library.settings.theme) { _, chosen in
+            applyAppearance(chosen)
+        }
         .animation(.easeOut(duration: 0.18), value: player.isActive)
         .background(palette.bg)
     }

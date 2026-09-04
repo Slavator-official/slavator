@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Токены оформления. Значения перенесены один в один из веб-прототипа,
@@ -179,6 +180,21 @@ struct Segmented<T: Hashable>: View {
         .padding(3)
         .background(RoundedRectangle(cornerRadius: 9).fill(p.raised))
         .overlay(RoundedRectangle(cornerRadius: 9).stroke(p.line, lineWidth: 1))
+    }
+}
+
+/// Сообщить системе, в какой теме мы рисуем.
+///
+/// Палитру приложение задаёт само, но цвет заголовков, полей ввода и кнопок
+/// берётся из оформления системы — своего у них нет. Пока мы о выбранной теме
+/// молчали, на светлой macOS тёмное окно получало чёрный текст на тёмном фоне
+/// и белые поля посреди тёмных карточек.
+func applyAppearance(_ theme: String) {
+    switch theme {
+    case "light":  NSApp.appearance = NSAppearance(named: .aqua)
+    // «Авто» — это и есть «как в системе»: своего мнения у нас тут нет.
+    case "system": NSApp.appearance = nil
+    default:       NSApp.appearance = NSAppearance(named: .darkAqua)
     }
 }
 
