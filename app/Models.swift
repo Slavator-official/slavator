@@ -115,6 +115,8 @@ struct Settings: Codable {
     var dictation_model = "small"
     /// Что удерживать для диктовки. Только модификаторы — см. HotCombo.
     var dictation_hotkey = "ropt"
+    /// Что удерживать, чтобы надиктованное сразу прошло обработку.
+    var dictation_tidy_hotkey = "opt+shift"
     /// clean | structure | shrink — насколько сильно править надиктованное.
     var dictation_level = "structure"
 

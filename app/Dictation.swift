@@ -94,10 +94,11 @@ final class Dictation {
     private func installHotkey() {
         // Слежение переставляем, когда сочетание сменили: старое иначе
         // осталось бы работать, и диктовка отзывалась бы на обе клавиши.
-        let combo = settings.dictation_hotkey
+        let combo = settings.dictation_hotkey + "|" + settings.dictation_tidy_hotkey
         if hotkey != nil, combo == installedCombo { return }
         hotkey?.stop()
-        hotkey = Hotkey(combo: combo) { [weak self] down, shift in
+        hotkey = Hotkey(dictate: settings.dictation_hotkey,
+                        tidy: settings.dictation_tidy_hotkey) { [weak self] down, shift in
             DispatchQueue.main.async {
                 if down { self?.begin(mode: shift ? .tidy : .raw) } else { self?.end() }
             }
@@ -604,14 +605,38 @@ enum HotCombo {
                     .map(\.token).joined(separator: "+")
     }
 
-    /// Подпись для человека: «правый ⌥», «⌥⌘».
+    /// Подпись для человека: «правый ⌥», «⌥⇧».
+    ///
+    /// Сторону называем только у одиночной клавиши: в сочетании она и так не
+    /// проверяется, а «правый ⌥ и любой ⇧» — подпись, которую не прочесть
+    /// с одного взгляда.
     static func label(_ combo: String) -> String {
         let parts = combo.split(separator: "+").map(String.init)
         if parts.count == 1, let one = sided.first(where: { $0.token == parts[0] }) {
             return "\(one.side) \(one.sign)"
         }
-        let signs = plain.filter { parts.contains($0.token) }.map(\.sign).joined()
+        let signs = plain.compactMap { item -> String? in
+            let mine = parts.contains(item.token)
+                || sided.contains { $0.sign == item.sign && parts.contains($0.token) }
+            return mine ? item.sign : nil
+        }.joined()
         return signs.isEmpty ? "не задано" : signs
+    }
+
+    /// Сочетание по кодам физических клавиш: их сообщает NSEvent, когда
+    /// меняются модификаторы, и по ним сторона видна без лишних догадок.
+    static func tokens(fromKeyCodes codes: Set<UInt16>) -> String {
+        let byCode: [UInt16: String] = [
+            59: "lctrl", 62: "rctrl", 56: "lshift", 60: "rshift",
+            55: "lcmd",  54: "rcmd",  58: "lopt",   61: "ropt",
+        ]
+        var bits: UInt64 = 0
+        for code in codes {
+            if let token = byCode[code], let one = sided.first(where: { $0.token == token }) {
+                bits |= one.bit
+            }
+        }
+        return tokens(from: bits)
     }
 
     /// Держат ли сейчас всё, что нужно. Лишние модификаторы не мешают: ими
@@ -643,12 +668,14 @@ enum HotCombo {
 private final class Hotkey {
     private var tap: CFMachPort?
     private var loop: CFRunLoopSource?
-    private let combo: String
+    private let dictate: String
+    private let tidy: String
     private let onChange: (Bool, Bool) -> Void
     private var down = false
 
-    init(combo: String, onChange: @escaping (Bool, Bool) -> Void) {
-        self.combo = combo
+    init(dictate: String, tidy: String, onChange: @escaping (Bool, Bool) -> Void) {
+        self.dictate = dictate
+        self.tidy = tidy
         self.onChange = onChange
     }
 
@@ -681,15 +708,17 @@ private final class Hotkey {
     }
 
     private func handle(_ event: CGEvent) {
-        // Код клавиши больше не смотрим: у сочетания их несколько, и важно
-        // состояние целиком, а не то, какая из них шевельнулась последней.
-        let pressed = HotCombo.held(combo, flags: event.flags)
+        // Код клавиши не смотрим: у сочетания их несколько, и важно состояние
+        // целиком, а не то, какая из них шевельнулась последней.
+        //
+        // Обработку проверяем первой: её сочетание обычно содержит в себе
+        // сочетание диктовки (⌥ и ⌥⇧), и при обратном порядке до неё бы
+        // никогда не дошло.
+        let wantsTidy = HotCombo.held(self.tidy, flags: event.flags)
+        let pressed = wantsTidy || HotCombo.held(dictate, flags: event.flags)
         guard pressed != down else { return }
         down = pressed
-        // Обработка вызывается тем же сочетанием плюс ⇧. Если ⇧ уже внутри
-        // сочетания, различать нечего.
-        let tidy = !HotCombo.usesShift(combo) && event.flags.contains(.maskShift)
-        onChange(pressed, tidy)
+        onChange(pressed, wantsTidy)
     }
 }
 

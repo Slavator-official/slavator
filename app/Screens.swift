@@ -983,12 +983,22 @@ extension SettingsScreen {
                     }))
                     .labelsHidden()
             }
-            SettingRow(title: "Клавиша",
+            SettingRow(title: "Клавиша диктовки",
                        subtitle: "Нажмите и подержите своё сочетание: ⌘, ⌥, ⌃, ⇧ или несколько сразу") {
                 HotkeyField(combo: Binding(
                     get: { library.settings.dictation_hotkey },
                     set: { chosen in
                         library.settings.dictation_hotkey = chosen
+                        library.settings.save()
+                        dictation.refresh(settings: library.settings)
+                    }))
+            }
+            SettingRow(title: "Клавиша обработки",
+                       subtitle: "Диктовка сразу с обработкой. Обычно это клавиша диктовки плюс ⇧") {
+                HotkeyField(combo: Binding(
+                    get: { library.settings.dictation_tidy_hotkey },
+                    set: { chosen in
+                        library.settings.dictation_tidy_hotkey = chosen
                         library.settings.save()
                         dictation.refresh(settings: library.settings)
                     }))
@@ -1001,9 +1011,9 @@ extension SettingsScreen {
                             set: { library.settings.dictation_model = $0; library.settings.save() }))
                     .frame(width: 210)
             }
-            SettingRow(title: "Обработка по \(hotkeyLabel) + ⇧",
-                       subtitle: HotCombo.usesShift(library.settings.dictation_hotkey)
-                           ? "⇧ занят самой диктовкой — обработку этим сочетанием не вызвать"
+            SettingRow(title: "Что делает обработка",
+                       subtitle: library.settings.dictation_tidy_hotkey == library.settings.dictation_hotkey
+                           ? "Сочетания совпали — обработка забирает и обычную диктовку"
                            : "Убрать «э-э» и разложить перечисление списком. Нужна Ollama") {
                 Segmented(options: [("clean", "Чистка"), ("structure", "Структура"), ("shrink", "Сжатие")],
                           selection: Binding(
@@ -1040,15 +1050,17 @@ extension SettingsScreen {
 /// Назначение сочетания: нажали кнопку, подержали клавиши, отпустили.
 ///
 /// Ловим отпускание, а не нажатие: пока клавиши держат, человек ещё набирает
-/// сочетание, и «⌘» превратилось бы в ответ раньше, чем он дошёл до «⌘⌥».
+/// сочетание, и «⌘» стало бы ответом раньше, чем он дошёл до «⌘⌥». Пока он
+/// держит, набранное показывается прямо на кнопке — видно, что нажатие
+/// вообще дошло.
 private struct HotkeyField: View {
     @Binding var combo: String
     @State private var recording = false
     @State private var monitor: Any?
-    @State private var seen: UInt64 = 0
+    @State private var pressed: Set<UInt16> = []
 
     var body: some View {
-        Button(recording ? "Держите клавиши" : HotCombo.label(combo)) {
+        Button(caption) {
             if recording { finish(save: false) } else { begin() }
         }
         .buttonStyle(QuietButton())
@@ -1056,16 +1068,24 @@ private struct HotkeyField: View {
         .onDisappear { finish(save: false) }
     }
 
+    private var caption: String {
+        guard recording else { return HotCombo.label(combo) }
+        let now = HotCombo.tokens(fromKeyCodes: pressed)
+        return now.isEmpty ? "Держите клавиши" : HotCombo.label(now)
+    }
+
     private func begin() {
-        seen = 0
+        pressed = []
         recording = true
         monitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
-            // Сторону клавиши знает только CGEvent: у NSEvent флаги общие.
-            let held = (event.cgEvent?.flags.rawValue ?? 0) & HotCombo.allBits
-            if held != 0 {
-                seen |= held
-            } else if seen != 0 {
-                finish(save: true)
+            // Код клавиши в flagsChanged называет саму клавишу — по нему видна
+            // и сторона. Через CGEvent это делать нельзя: у NSEvent его может
+            // не оказаться вовсе, и запись молча ничего не ловила.
+            let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if !mods.intersection([.command, .option, .control, .shift]).isEmpty {
+                pressed.insert(event.keyCode)
+            } else if !pressed.isEmpty {
+                finish(save: true)          // отпустили всё — сочетание набрано
             }
             return event
         }
@@ -1076,7 +1096,7 @@ private struct HotkeyField: View {
         monitor = nil
         recording = false
         guard save else { return }
-        let chosen = HotCombo.tokens(from: seen)
+        let chosen = HotCombo.tokens(fromKeyCodes: pressed)
         if !chosen.isEmpty { combo = chosen }
     }
 }
