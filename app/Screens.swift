@@ -972,7 +972,7 @@ extension SettingsScreen {
             .padding(.bottom, 12)
 
             SettingRow(title: "Диктовать в любое поле",
-                       subtitle: "Держите правый ⌥ и говорите — текст появится там, где курсор") {
+                       subtitle: "Держите \(hotkeyLabel) и говорите — текст появится там, где курсор") {
                 Toggle("", isOn: Binding(
                     get: { library.settings.dictation_enabled },
                     set: { value in
@@ -983,6 +983,16 @@ extension SettingsScreen {
                     }))
                     .labelsHidden()
             }
+            SettingRow(title: "Клавиша",
+                       subtitle: "Нажмите и подержите своё сочетание: ⌘, ⌥, ⌃, ⇧ или несколько сразу") {
+                HotkeyField(combo: Binding(
+                    get: { library.settings.dictation_hotkey },
+                    set: { chosen in
+                        library.settings.dictation_hotkey = chosen
+                        library.settings.save()
+                        dictation.refresh(settings: library.settings)
+                    }))
+            }
             SettingRow(title: "Модель",
                        subtitle: "«Быстро» пишет на ходу, «точно» вставляет целиком через 3 секунды") {
                 Segmented(options: [("small", "Быстро"), ("large-v3-turbo", "Точно")],
@@ -991,8 +1001,10 @@ extension SettingsScreen {
                             set: { library.settings.dictation_model = $0; library.settings.save() }))
                     .frame(width: 210)
             }
-            SettingRow(title: "Обработка по ⌥⇧",
-                       subtitle: "Убрать «э-э» и разложить перечисление списком. Нужна Ollama") {
+            SettingRow(title: "Обработка по \(hotkeyLabel) + ⇧",
+                       subtitle: HotCombo.usesShift(library.settings.dictation_hotkey)
+                           ? "⇧ занят самой диктовкой — обработку этим сочетанием не вызвать"
+                           : "Убрать «э-э» и разложить перечисление списком. Нужна Ollama") {
                 Segmented(options: [("clean", "Чистка"), ("structure", "Структура"), ("shrink", "Сжатие")],
                           selection: Binding(
                             get: { library.settings.dictation_level },
@@ -1001,6 +1013,8 @@ extension SettingsScreen {
             }
         }
     }
+
+    private var hotkeyLabel: String { HotCombo.label(library.settings.dictation_hotkey) }
 
     private var dictationState: String {
         switch dictation.state {
@@ -1020,6 +1034,50 @@ extension SettingsScreen {
         case .needsAccess, .failed:         return p.warn
         default:                            return p.muted
         }
+    }
+}
+
+/// Назначение сочетания: нажали кнопку, подержали клавиши, отпустили.
+///
+/// Ловим отпускание, а не нажатие: пока клавиши держат, человек ещё набирает
+/// сочетание, и «⌘» превратилось бы в ответ раньше, чем он дошёл до «⌘⌥».
+private struct HotkeyField: View {
+    @Binding var combo: String
+    @State private var recording = false
+    @State private var monitor: Any?
+    @State private var seen: UInt64 = 0
+
+    var body: some View {
+        Button(recording ? "Держите клавиши" : HotCombo.label(combo)) {
+            if recording { finish(save: false) } else { begin() }
+        }
+        .buttonStyle(QuietButton())
+        .frame(width: 210)
+        .onDisappear { finish(save: false) }
+    }
+
+    private func begin() {
+        seen = 0
+        recording = true
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
+            // Сторону клавиши знает только CGEvent: у NSEvent флаги общие.
+            let held = (event.cgEvent?.flags.rawValue ?? 0) & HotCombo.allBits
+            if held != 0 {
+                seen |= held
+            } else if seen != 0 {
+                finish(save: true)
+            }
+            return event
+        }
+    }
+
+    private func finish(save: Bool) {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+        recording = false
+        guard save else { return }
+        let chosen = HotCombo.tokens(from: seen)
+        if !chosen.isEmpty { combo = chosen }
     }
 }
 

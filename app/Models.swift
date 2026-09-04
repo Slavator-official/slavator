@@ -113,6 +113,8 @@ struct Settings: Codable {
     var dictation_enabled = false
     /// small — текст идёт на ходу; large-v3-turbo — точнее, но ждать 3 секунды.
     var dictation_model = "small"
+    /// Что удерживать для диктовки. Только модификаторы — см. HotCombo.
+    var dictation_hotkey = "ropt"
     /// clean | structure | shrink — насколько сильно править надиктованное.
     var dictation_level = "structure"
 

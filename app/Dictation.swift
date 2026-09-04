@@ -89,9 +89,15 @@ final class Dictation {
                      })
     }
 
+    private var installedCombo = ""
+
     private func installHotkey() {
-        guard hotkey == nil else { return }
-        hotkey = Hotkey { [weak self] down, shift in
+        // Слежение переставляем, когда сочетание сменили: старое иначе
+        // осталось бы работать, и диктовка отзывалась бы на обе клавиши.
+        let combo = settings.dictation_hotkey
+        if hotkey != nil, combo == installedCombo { return }
+        hotkey?.stop()
+        hotkey = Hotkey(combo: combo) { [weak self] down, shift in
             DispatchQueue.main.async {
                 if down { self?.begin(mode: shift ? .tidy : .raw) } else { self?.end() }
             }
@@ -99,11 +105,14 @@ final class Dictation {
         if hotkey?.start() != true {
             state = .needsAccess
             hotkey = nil
+            installedCombo = ""
+            return
         }
+        installedCombo = combo
     }
 
     private func stopEverything() {
-        hotkey?.stop(); hotkey = nil
+        hotkey?.stop(); hotkey = nil; installedCombo = ""
         worker.stop()
         workerStarted = false
         recorder?.stop(); recorder = nil
@@ -555,15 +564,93 @@ private final class Typer {
 
 // MARK: - Горячая клавиша
 
-/// Следит за удержанием правого ⌥. Fn и двойной Control занимает системная
-/// диктовка Apple, поэтому взят правый Option: в одиночку его почти не жмут.
+/// Сочетание модификаторов, которое нужно удерживать.
+///
+/// Только модификаторы: обычную клавишу удерживать нельзя — она печаталась бы
+/// в то же поле, куда потом идёт надиктованное.
+///
+/// Сторона (левый/правый) сохраняется только у одиночной клавиши: правый ⌥
+/// сам по себе почти не нажимают, в этом и был смысл значения по умолчанию.
+/// У сочетания из двух и более сторона не важна — держать ⌘⌥ левой рукой или
+/// правой человек решает по месту, и запоминать за него не надо.
+enum HotCombo {
+    /// Маски отдельных клавиш. Их различает только CGEvent: NSEvent отдаёт
+    /// общие флаги, по которым левый ⌥ не отличить от правого.
+    private static let sided: [(token: String, bit: UInt64, sign: String, side: String)] = [
+        ("lctrl",  0x0000_0001, "⌃", "левый"),
+        ("rctrl",  0x0000_2000, "⌃", "правый"),
+        ("lshift", 0x0000_0002, "⇧", "левый"),
+        ("rshift", 0x0000_0004, "⇧", "правый"),
+        ("lcmd",   0x0000_0008, "⌘", "левый"),
+        ("rcmd",   0x0000_0010, "⌘", "правый"),
+        ("lopt",   0x0000_0020, "⌥", "левый"),
+        ("ropt",   0x0000_0040, "⌥", "правый"),
+    ]
+
+    /// Те же клавиши, когда сторона не важна. Порядок — как на клавиатуре.
+    private static let plain: [(token: String, mask: CGEventFlags, sign: String)] = [
+        ("ctrl", .maskControl, "⌃"), ("opt", .maskAlternate, "⌥"),
+        ("shift", .maskShift, "⇧"), ("cmd", .maskCommand, "⌘"),
+    ]
+
+    static let allBits: UInt64 = sided.reduce(0) { $0 | $1.bit }
+
+    /// Во что превратить нажатое: одна клавиша — со стороной, несколько — без.
+    static func tokens(from raw: UInt64) -> String {
+        let held = sided.filter { raw & $0.bit != 0 }
+        if held.isEmpty { return "" }
+        if held.count == 1 { return held[0].token }
+        return plain.filter { item in held.contains { $0.sign == item.sign } }
+                    .map(\.token).joined(separator: "+")
+    }
+
+    /// Подпись для человека: «правый ⌥», «⌥⌘».
+    static func label(_ combo: String) -> String {
+        let parts = combo.split(separator: "+").map(String.init)
+        if parts.count == 1, let one = sided.first(where: { $0.token == parts[0] }) {
+            return "\(one.side) \(one.sign)"
+        }
+        let signs = plain.filter { parts.contains($0.token) }.map(\.sign).joined()
+        return signs.isEmpty ? "не задано" : signs
+    }
+
+    /// Держат ли сейчас всё, что нужно. Лишние модификаторы не мешают: ими
+    /// как раз переключается обработка.
+    static func held(_ combo: String, flags: CGEventFlags) -> Bool {
+        let parts = combo.split(separator: "+").map(String.init)
+        if parts.isEmpty { return false }
+        for token in parts {
+            if let one = sided.first(where: { $0.token == token }) {
+                if flags.rawValue & one.bit == 0 { return false }
+            } else if let any = plain.first(where: { $0.token == token }) {
+                if !flags.contains(any.mask) { return false }
+            } else {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// Занят ли ⇧ самим сочетанием: тогда обработку им уже не вызвать.
+    static func usesShift(_ combo: String) -> Bool {
+        combo.split(separator: "+").contains { $0.hasSuffix("shift") }
+    }
+}
+
+/// Следит за удержанием выбранного сочетания. Fn и двойной Control занимает
+/// системная диктовка Apple, поэтому по умолчанию взят правый ⌥: в одиночку
+/// его почти не жмут.
 private final class Hotkey {
     private var tap: CFMachPort?
     private var loop: CFRunLoopSource?
+    private let combo: String
     private let onChange: (Bool, Bool) -> Void
     private var down = false
 
-    init(onChange: @escaping (Bool, Bool) -> Void) { self.onChange = onChange }
+    init(combo: String, onChange: @escaping (Bool, Bool) -> Void) {
+        self.combo = combo
+        self.onChange = onChange
+    }
 
     func start() -> Bool {
         let mask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
@@ -594,12 +681,15 @@ private final class Hotkey {
     }
 
     private func handle(_ event: CGEvent) {
-        let code = event.getIntegerValueField(.keyboardEventKeycode)
-        guard code == 61 else { return }                       // правый ⌥
-        let pressed = event.flags.contains(.maskAlternate)
+        // Код клавиши больше не смотрим: у сочетания их несколько, и важно
+        // состояние целиком, а не то, какая из них шевельнулась последней.
+        let pressed = HotCombo.held(combo, flags: event.flags)
         guard pressed != down else { return }
         down = pressed
-        onChange(pressed, event.flags.contains(.maskShift))
+        // Обработка вызывается тем же сочетанием плюс ⇧. Если ⇧ уже внутри
+        // сочетания, различать нечего.
+        let tidy = !HotCombo.usesShift(combo) && event.flags.contains(.maskShift)
+        onChange(pressed, tidy)
     }
 }
 
