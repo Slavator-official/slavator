@@ -8,6 +8,10 @@
    Приложение на маке и на Windows обязано быть одним продуктом, а не двумя
    похожими: цвет здесь — не украшение, а часть узнавания. */
 :root {
+  /* Тема объявляется и браузеру: у флажков, полей ввода и полос прокрутки
+     своего цвета нет, и без этой строки они остаются светлыми посреди тёмного
+     окна. Ровно та же беда была на маке, только там об этом не знал AppKit. */
+  color-scheme: dark;
   --bg:#0A1420; --sidebar:#0C1826; --surface:#101E2E; --raised:#16263A; --row:#132339;
   --line:#1E3350; --line2:#182A42;
   --text:#F2F6FC; --muted:#90A0B5; --faint:#63758C;
@@ -18,6 +22,7 @@
   --sp6:#7B96C4; --sp7:#D97BA8; --sp8:#9AAF3E; --sp9:#4FA3D9; --sp10:#BE9A6E;
 }
 html[data-theme="light"] {
+  color-scheme: light;
   --bg:#F4F6FA; --sidebar:#FFFFFF; --surface:#FFFFFF; --raised:#F8FAFD; --row:#F8FAFD;
   --line:#E2E8F2; --line2:#EDF1F7;
   --text:#0B1F33; --muted:#63707F; --faint:#8794A3;
