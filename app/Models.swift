@@ -112,6 +112,8 @@ struct Settings: Codable {
     // MARK: быстрый доступ
     /// Значок в строке меню: начать запись, не открывая окно.
     var menubar_enabled = true
+    /// Следить, не началась ли встреча, и предлагать её записать.
+    var meeting_watch_enabled = false
 
     // MARK: диктовка
     var dictation_enabled = false
@@ -148,6 +150,7 @@ struct Settings: Codable {
         keep_diagnostics = read(.keep_diagnostics, keep_diagnostics)
         my_name = read(.my_name, my_name)
         menubar_enabled = read(.menubar_enabled, menubar_enabled)
+        meeting_watch_enabled = read(.meeting_watch_enabled, meeting_watch_enabled)
         dictation_enabled = read(.dictation_enabled, dictation_enabled)
         dictation_model = read(.dictation_model, dictation_model)
         dictation_hotkey = read(.dictation_hotkey, dictation_hotkey)

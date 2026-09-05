@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 @main
 struct SlavatorApp: App {
@@ -34,6 +35,9 @@ struct SlavatorApp: App {
                 // Переключатели быстрого доступа действуют сразу: значок и
                 // наблюдение за встречей включаются без перезапуска.
                 .onChange(of: library.settings.menubar_enabled) { _, _ in
+                    delegate.apply(settings: library.settings)
+                }
+                .onChange(of: library.settings.meeting_watch_enabled) { _, _ in
                     delegate.apply(settings: library.settings)
                 }
                 // Возвращение в программу — момент, когда стоит перечитать
@@ -80,18 +84,30 @@ func stopAndProcess(capture: LiveCapture, pipeline: Pipeline, library: Library) 
 ///
 /// Сделано на AppKit намеренно: MenuBarExtra из SwiftUI тянет символы,
 /// которых нет в macOS 14, а приложение обязано там работать.
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
+                         UNUserNotificationCenterDelegate {
     private var item: NSStatusItem?
     private weak var dictation: Dictation?
     private weak var capture: LiveCapture?
     private weak var library: Library?
     private weak var pipeline: Pipeline?
+    private let watch = MeetingWatch()
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Делегата ставят до первого уведомления, иначе нажатие кнопки в нём
+        // некому обработать.
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        UNUserNotificationCenter.current().delegate = self
+    }
+
     func attach(dictation: Dictation, capture: LiveCapture,
                 pipeline: Pipeline, library: Library) {
         self.dictation = dictation
         self.capture = capture
         self.pipeline = pipeline
         self.library = library
+        watch.isRecording = { [weak capture] in capture?.isRecording ?? false }
+        watch.onRecord = { [weak self] in self?.startListening() }
         apply(settings: library.settings)
     }
 
@@ -99,6 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// каждое переключение в настройках.
     func apply(settings: Settings) {
         if settings.menubar_enabled { addItem() } else { removeItem() }
+        if settings.meeting_watch_enabled { watch.start() } else { watch.stop() }
     }
 
     // MARK: значок
@@ -130,6 +147,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                      seconds / 60, seconds % 60)))
             menu.addItem(entry("Остановить и обработать", #selector(stopListening)))
         } else {
+            if let holder = watch.holder {
+                menu.addItem(note("Микрофон занял \(holder)"))
+            }
             menu.addItem(entry("Записать встречу", #selector(startFromMenu)))
         }
         menu.addItem(.separator())
@@ -177,6 +197,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func openApp() {
         NSApp.activate(ignoringOtherApps: true)
         NSApp.windows.first?.makeKeyAndOrderFront(nil)
+    }
+
+    // MARK: уведомления
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler done: @escaping () -> Void) {
+        // Запись начинает только кнопка. Нажатие на само уведомление
+        // открывает программу: соглашаться за человека нельзя.
+        if response.actionIdentifier == MeetingWatch.action {
+            DispatchQueue.main.async { [weak self] in self?.watch.recordTapped() }
+        } else if response.actionIdentifier == UNNotificationDefaultActionIdentifier {
+            DispatchQueue.main.async { [weak self] in self?.openApp() }
+        }
+        done()
+    }
+
+    /// Показывать, даже когда Славатор впереди: человек в это время смотрит
+    /// в окно встречи, а не сюда.
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler done: @escaping (UNNotificationPresentationOptions) -> Void) {
+        done([.banner])
     }
 }
 

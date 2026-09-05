@@ -914,6 +914,14 @@ struct SettingsScreen: View {
                         set: { library.settings.menubar_enabled = $0; library.settings.save() }))
                         .labelsHidden().toggleStyle(.switch)
                 }
+                Divider().overlay(p.line2)
+                SettingRow(title: "Предлагать запись, когда начинается встреча",
+                           subtitle: "Славатор заметит, что микрофон занят звонком, и спросит одним уведомлением") {
+                    Toggle("", isOn: Binding(
+                        get: { library.settings.meeting_watch_enabled },
+                        set: { library.settings.meeting_watch_enabled = $0; library.settings.save() }))
+                        .labelsHidden().toggleStyle(.switch)
+                }
             }
 
             Card {
