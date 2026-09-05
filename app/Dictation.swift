@@ -64,7 +64,9 @@ final class Dictation {
         // Разрешение могли выдать только что, в Системных настройках. Верить
         // прошлой проверке нельзя: карточка так и висела «нужен доступ»,
         // хотя доступ уже был.
-        guard Typer.hasAccess(prompt: false) else {
+        let allowed = Typer.hasAccess(prompt: false)
+        Dictation.logHotkey("доступ к вводу: \(allowed ? "есть" : "нет")")
+        guard allowed else {
             stopEverything()
             state = .needsAccess
             return
@@ -98,9 +100,20 @@ final class Dictation {
         if hotkey != nil, combo == installedCombo { return }
         hotkey?.stop()
         hotkey = Hotkey(dictate: settings.dictation_hotkey,
-                        tidy: settings.dictation_tidy_hotkey) { [weak self] down, shift in
+                        tidy: settings.dictation_tidy_hotkey) { [weak self] down, wantsTidy in
             DispatchQueue.main.async {
-                if down { self?.begin(mode: shift ? .tidy : .raw) } else { self?.end() }
+                guard let self else { return }
+                guard down else { self.end(); return }
+                if case .listening = self.state {
+                    // Обработку выбирают той же клавишей плюс ⇧, а нажать их
+                    // одновременно нельзя: fn всегда успевает первой, и
+                    // диктовка начиналась обычной. Пока ничего не напечатано,
+                    // разрешаем передумать — обработка всё равно печатает
+                    // только в конце, так что терять нечего.
+                    if self.typed.isEmpty { self.mode = wantsTidy ? .tidy : .raw }
+                } else {
+                    self.begin(mode: wantsTidy ? .tidy : .raw)
+                }
             }
         }
         if hotkey?.start() != true {
@@ -556,6 +569,12 @@ private final class Typer {
                 down.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: pointer.baseAddress)
                 up.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: pointer.baseAddress)
             }
+            // Клавишу диктовки человек всё это время держит, и её флаг
+            // уезжал вместе с буквой. Одни программы такое проглатывали,
+            // другие — нет: в браузере текст появлялся, в приложениях на
+            // Electron исчезал молча. Событию модификаторы не нужны.
+            down.flags = []
+            up.flags = []
             down.post(tap: .cghidEventTap)
             up.post(tap: .cghidEventTap)
             usleep(1200)
@@ -681,6 +700,7 @@ private final class Hotkey {
     private let tidy: String
     private let onChange: (Bool, Bool) -> Void
     private var down = false
+    private var tidyNow = false
 
     init(dictate: String, tidy: String, onChange: @escaping (Bool, Bool) -> Void) {
         self.dictate = dictate
@@ -725,8 +745,17 @@ private final class Hotkey {
         // никогда не дошло.
         let wantsTidy = HotCombo.held(self.tidy, flags: event.flags)
         let pressed = wantsTidy || HotCombo.held(dictate, flags: event.flags)
-        guard pressed != down else { return }
+        if pressed == down {
+            // Клавишу держат, но набор модификаторов изменился: добавили ⇧
+            // к уже нажатой fn. Это выбор обработки, и о нём надо сказать.
+            if down, wantsTidy != tidyNow {
+                tidyNow = wantsTidy
+                onChange(true, wantsTidy)
+            }
+            return
+        }
         down = pressed
+        tidyNow = wantsTidy
         onChange(pressed, wantsTidy)
     }
 }

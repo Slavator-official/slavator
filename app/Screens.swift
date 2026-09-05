@@ -967,7 +967,16 @@ extension SettingsScreen {
             HStack(spacing: 10) {
                 Text("Диктовка").font(Kind.head(16))
                 Spacer()
-                Text(dictationState).font(Kind.body(12.5)).foregroundStyle(dictationColour)
+                // Когда не хватает доступа, надпись — кнопка: искать нужный
+                // раздел в Системных настройках человек не обязан.
+                if case .needsAccess = dictation.state {
+                    Button(dictationState) { openAccessibility() }
+                        .buttonStyle(.plain)
+                        .font(Kind.body(12.5)).foregroundStyle(dictationColour)
+                        .underline()
+                } else {
+                    Text(dictationState).font(Kind.body(12.5)).foregroundStyle(dictationColour)
+                }
             }
             .padding(.bottom, 12)
 
@@ -1025,6 +1034,12 @@ extension SettingsScreen {
     }
 
     private var hotkeyLabel: String { HotCombo.label(library.settings.dictation_hotkey) }
+
+    private func openAccessibility() {
+        dictation.requestAccess()
+        let pane = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        if let url = URL(string: pane) { NSWorkspace.shared.open(url) }
+    }
 
     private var dictationState: String {
         switch dictation.state {
