@@ -281,9 +281,25 @@ final class Dictation {
     /// неприкосновенно, поэтому просто дописываем хвост.
     private func commit(_ target: String) {
         guard mode == .raw, target.count > typed.count else { return }
-        let delta = String(target.dropFirst(typed.count))
+        // Дописываем то, чего ещё нет на экране, отсчитывая от общего начала,
+        // а не от длины напечатанного. Модель иногда правит начало фразы —
+        // «Это» превращается в «Эта», — и слепое отсечение по длине съедало
+        // ровно столько первых букв нового текста, сколько было в старом.
+        let common = Self.commonPrefix(typed, target)
+        let delta = String(target.dropFirst(common.count))
+        guard !delta.isEmpty else { return }
         typer.type(delta)
         typed = target
+    }
+
+    /// Общее начало двух расшифровок одной и той же речи.
+    static func commonPrefix(_ a: String, _ b: String) -> String {
+        var result = ""
+        for (left, right) in zip(a, b) {
+            if left != right { break }
+            result.append(left)
+        }
+        return result
     }
 
     private func finish(raw: String = "") {
@@ -528,8 +544,13 @@ private final class Recorder {
     /// теряла начало. Со стороны это выглядело как «иногда обрезает».
     func reset() {
         lock.lock()
+        // Оставляем запас перед срезом: фраза закрылась по тишине, значит эти
+        // доли секунды — молчание, и распознаватель получит нормальный заход,
+        // а не обрывок слова. Без запаса первое слово новой фразы регулярно
+        // терялось: кусок начинался ровно на звуке.
+        let keep = 5600                       // 0,35 с при 16 кГц
         if taken > 0, taken <= samples.count {
-            samples.removeFirst(taken)
+            samples.removeFirst(max(0, taken - keep))
         } else {
             samples.removeAll(keepingCapacity: true)
         }
