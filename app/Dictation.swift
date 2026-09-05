@@ -447,6 +447,9 @@ private final class Worker {
 private final class Recorder {
     private let engine = AVAudioEngine()
     private var samples: [Int16] = []
+    /// Сколько отсчётов ушло в последний снимок: ровно их и забываем, когда
+    /// фраза закрыта. Всё, что записалось позже, ещё не напечатано.
+    private var taken = 0
     private let lock = NSLock()
     private var converter: AVAudioConverter?
     private var file: URL?
@@ -518,17 +521,28 @@ private final class Recorder {
     }
 
     /// Начать фразу заново: прошлая уже напечатана целиком.
+    ///
+    /// Выбрасываем ровно то, что ушло в снимок, а не всё подряд. Распознавание
+    /// занимает доли секунды, и человек в это время продолжает говорить —
+    /// прежний сброс стирал эти слова вместе с уже напечатанными, и фраза
+    /// теряла начало. Со стороны это выглядело как «иногда обрезает».
     func reset() {
         lock.lock()
-        samples.removeAll(keepingCapacity: true)
+        if taken > 0, taken <= samples.count {
+            samples.removeFirst(taken)
+        } else {
+            samples.removeAll(keepingCapacity: true)
+        }
+        taken = 0
         lastLoud = Date()
-        heard = false
+        // Хвост мог остаться со речью — тогда фраза уже началась.
+        heard = samples.contains { abs($0) > 500 }
         lock.unlock()
     }
 
     /// Полный WAV со всем, что записано на этот момент.
     func snapshot() -> URL? {
-        lock.lock(); let data = samples; lock.unlock()
+        lock.lock(); let data = samples; taken = data.count; lock.unlock()
         guard data.count > 1600 else { return nil }        // меньше 0,1 с — нечего слать
 
         let url = file ?? FileManager.default.temporaryDirectory
