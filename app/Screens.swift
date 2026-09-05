@@ -283,18 +283,7 @@ struct MainScreen: View {
     /// Остановка сразу отправляет запись в обычную обработку: живой режим и
     /// файл сходятся в один пайплайн, иначе качество разъедется.
     private func finishRecording() {
-        guard let url = capture.stop() else { return }
-        let voice = capture.systemTrack != nil ? capture.microphoneTrack : nil
-        if capture.seconds < 3 {
-            try? FileManager.default.removeItem(at: url)
-            if let voice { try? FileManager.default.removeItem(at: voice) }
-            showAlert("Слишком короткая запись", "Записано меньше трёх секунд — обрабатывать нечего.")
-            return
-        }
-        picked = url
-        // Микрофон уходит отдельной дорожкой: ваш голос не смешивается с
-        // собеседниками и не требует опознания.
-        pipeline.run(input: url, library: library, voiceTrack: voice)
+        picked = stopAndProcess(capture: capture, pipeline: pipeline, library: library)
     }
 
     /// Обработка идёт долго — час записи считается десятки минут. Без
@@ -913,6 +902,17 @@ struct SettingsScreen: View {
                                 get: { library.settings.theme },
                                 set: { library.settings.theme = $0; library.settings.save(); library.reload() }))
                         .frame(width: 260)
+                }
+            }
+
+            Card {
+                Text("Быстрый доступ").font(Kind.head(16)).padding(.bottom, 12)
+                SettingRow(title: "Значок в строке меню",
+                           subtitle: "Начать запись, не открывая окно") {
+                    Toggle("", isOn: Binding(
+                        get: { library.settings.menubar_enabled },
+                        set: { library.settings.menubar_enabled = $0; library.settings.save() }))
+                        .labelsHidden().toggleStyle(.switch)
                 }
             }
 

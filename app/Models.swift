@@ -109,6 +109,10 @@ struct Settings: Codable {
     /// Как подписывать ваши реплики с микрофонной дорожки.
     var my_name = "Вы"
 
+    // MARK: быстрый доступ
+    /// Значок в строке меню: начать запись, не открывая окно.
+    var menubar_enabled = true
+
     // MARK: диктовка
     var dictation_enabled = false
     /// small — текст идёт на ходу; large-v3-turbo — точнее, но ждать 3 секунды.
@@ -143,6 +147,7 @@ struct Settings: Codable {
         widget_output_dir = read(.widget_output_dir, widget_output_dir)
         keep_diagnostics = read(.keep_diagnostics, keep_diagnostics)
         my_name = read(.my_name, my_name)
+        menubar_enabled = read(.menubar_enabled, menubar_enabled)
         dictation_enabled = read(.dictation_enabled, dictation_enabled)
         dictation_model = read(.dictation_model, dictation_model)
         dictation_hotkey = read(.dictation_hotkey, dictation_hotkey)

@@ -28,7 +28,13 @@ struct SlavatorApp: App {
                     // ползёт на загруженных ядрах.
                     dictation.onBusyChanged = { busy in pipeline.suspend(busy) }
                     dictation.refresh(settings: library.settings)
-                    delegate.attach(dictation: dictation)
+                    delegate.attach(dictation: dictation, capture: capture,
+                                    pipeline: pipeline, library: library)
+                }
+                // Переключатели быстрого доступа действуют сразу: значок и
+                // наблюдение за встречей включаются без перезапуска.
+                .onChange(of: library.settings.menubar_enabled) { _, _ in
+                    delegate.apply(settings: library.settings)
                 }
                 // Возвращение в программу — момент, когда стоит перечитать
                 // разрешения: их выдают в Системных настройках, снаружи.
@@ -48,34 +54,124 @@ enum Screen: Hashable {
     case person(String)
 }
 
-/// Значок в строке меню. Сделан на AppKit намеренно: MenuBarExtra из SwiftUI
-/// тянет символы, которых нет в macOS 14, а приложение обязано там работать.
-final class AppDelegate: NSObject, NSApplicationDelegate {
+/// Остановить запись и отдать её в обработку.
+///
+/// Одна дорога для всех кнопок остановки — главного экрана, строки меню и
+/// виджета. Свой вариант у каждой кнопки неминуемо разъехался бы в мелочах:
+/// где-то забыли убрать слишком короткую запись, где-то не передали
+/// микрофонную дорожку.
+@discardableResult
+func stopAndProcess(capture: LiveCapture, pipeline: Pipeline, library: Library) -> URL? {
+    guard let url = capture.stop() else { return nil }
+    let voice = capture.systemTrack != nil ? capture.microphoneTrack : nil
+    if capture.seconds < 3 {
+        try? FileManager.default.removeItem(at: url)
+        if let voice { try? FileManager.default.removeItem(at: voice) }
+        showAlert("Слишком короткая запись", "Записано меньше трёх секунд — обрабатывать нечего.")
+        return nil
+    }
+    // Микрофон уходит отдельной дорожкой: ваш голос не смешивается с
+    // собеседниками и не требует опознания.
+    pipeline.run(input: url, library: library, voiceTrack: voice)
+    return url
+}
+
+/// Значок в строке меню и предложение записать начавшуюся встречу.
+///
+/// Сделано на AppKit намеренно: MenuBarExtra из SwiftUI тянет символы,
+/// которых нет в macOS 14, а приложение обязано там работать.
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var item: NSStatusItem?
     private weak var dictation: Dictation?
-
-    func attach(dictation: Dictation) {
+    private weak var capture: LiveCapture?
+    private weak var library: Library?
+    private weak var pipeline: Pipeline?
+    func attach(dictation: Dictation, capture: LiveCapture,
+                pipeline: Pipeline, library: Library) {
         self.dictation = dictation
+        self.capture = capture
+        self.pipeline = pipeline
+        self.library = library
+        apply(settings: library.settings)
+    }
+
+    /// Что из быстрого доступа включено. Вызывается и при запуске, и на
+    /// каждое переключение в настройках.
+    func apply(settings: Settings) {
+        if settings.menubar_enabled { addItem() } else { removeItem() }
+    }
+
+    // MARK: значок
+
+    private func addItem() {
         guard item == nil else { return }
         let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        status.button?.image = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "Славатор")
+        status.button?.image = NSImage(systemSymbolName: "mic.fill",
+                                       accessibilityDescription: "Славатор")
         status.button?.image?.isTemplate = true
-        status.menu = buildMenu()
+        let menu = NSMenu()
+        menu.delegate = self
+        status.menu = menu
         item = status
     }
 
-    private func buildMenu() -> NSMenu {
-        let menu = NSMenu()
-        let hint = NSMenuItem(title: "Держите правый ⌥ — говорите", action: nil, keyEquivalent: "")
-        hint.isEnabled = false
-        menu.addItem(hint)
+    private func removeItem() {
+        if let item { NSStatusBar.system.removeStatusItem(item) }
+        item = nil
+    }
+
+    /// Меню собирается в момент открытия: запись могла начаться или кончиться
+    /// после того, как значок появился.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        if capture?.isRecording == true {
+            let seconds = Int(capture?.seconds ?? 0)
+            menu.addItem(note(String(format: "Идёт запись — %d:%02d",
+                                     seconds / 60, seconds % 60)))
+            menu.addItem(entry("Остановить и обработать", #selector(stopListening)))
+        } else {
+            menu.addItem(entry("Записать встречу", #selector(startFromMenu)))
+        }
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Открыть Славатор", action: #selector(openApp), keyEquivalent: "0"))
+        menu.addItem(note("Держите правый ⌥ — говорите"))
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "Выйти", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        menu.addItem(quit)
-        menu.items.forEach { $0.target = $0.action == #selector(openApp) ? self : $0.target }
-        return menu
+        menu.addItem(entry("Открыть Славатор", #selector(openApp)))
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Выйти",
+                                action: #selector(NSApplication.terminate(_:)),
+                                keyEquivalent: "q"))
+    }
+
+    private func note(_ title: String) -> NSMenuItem {
+        let line = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        line.isEnabled = false
+        return line
+    }
+
+    private func entry(_ title: String, _ action: Selector) -> NSMenuItem {
+        let line = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        line.target = self
+        return line
+    }
+
+    // MARK: запись
+
+    @objc private func startFromMenu() { startListening() }
+
+    /// Звонок, а не только микрофон: предложение возникает ровно тогда, когда
+    /// собеседники звучат из динамиков, и записывать одну свою половину
+    /// разговора бессмысленно.
+    private func startListening() {
+        guard let capture, let library, !capture.isRecording else { return }
+        capture.start(source: .meeting,
+                      folder: URL(fileURLWithPath: library.settings.results_dir))
+        openApp()
+    }
+
+    @objc private func stopListening() {
+        guard let capture, let pipeline, let library else { return }
+        stopAndProcess(capture: capture, pipeline: pipeline, library: library)
+        openApp()
     }
 
     @objc private func openApp() {
