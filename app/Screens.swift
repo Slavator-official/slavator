@@ -915,6 +915,14 @@ struct SettingsScreen: View {
                         .labelsHidden().toggleStyle(.switch)
                 }
                 Divider().overlay(p.line2)
+                SettingRow(title: "Виджет на рабочем столе",
+                           subtitle: "Кнопка записи поверх обоев, под окнами — как системные виджеты") {
+                    Toggle("", isOn: Binding(
+                        get: { library.settings.widget_enabled },
+                        set: { library.settings.widget_enabled = $0; library.settings.save() }))
+                        .labelsHidden().toggleStyle(.switch)
+                }
+                Divider().overlay(p.line2)
                 SettingRow(title: "Предлагать запись, когда начинается встреча",
                            subtitle: "Славатор заметит, что микрофон занят звонком, и спросит одним уведомлением") {
                     Toggle("", isOn: Binding(

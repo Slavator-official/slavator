@@ -22,7 +22,7 @@ command -v swiftc >/dev/null || fail "нет swiftc — поставьте Comma
 
 SOURCES=(Theme.swift Models.swift Doctor.swift Ribbon.swift Player.swift Pipeline.swift
          SystemAudio.swift MeetingWatch.swift LiveCapture.swift Dictation.swift Chat.swift
-         Enroll.swift Screens.swift App.swift)
+         Enroll.swift Screens.swift DeskWidget.swift App.swift)
 for f in "${SOURCES[@]}"; do
     [[ -f "$SWIFT/$f" ]] || fail "нет исходника: $SWIFT/$f"
 done

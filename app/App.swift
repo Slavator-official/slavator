@@ -40,6 +40,9 @@ struct SlavatorApp: App {
                 .onChange(of: library.settings.meeting_watch_enabled) { _, _ in
                     delegate.apply(settings: library.settings)
                 }
+                .onChange(of: library.settings.widget_enabled) { _, _ in
+                    delegate.apply(settings: library.settings)
+                }
                 // Возвращение в программу — момент, когда стоит перечитать
                 // разрешения: их выдают в Системных настройках, снаружи.
                 .onReceive(NotificationCenter.default.publisher(
@@ -91,6 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private weak var capture: LiveCapture?
     private weak var library: Library?
     private weak var pipeline: Pipeline?
+    private var widget: DeskWidget?
     private let watch = MeetingWatch()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -116,6 +120,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     func apply(settings: Settings) {
         if settings.menubar_enabled { addItem() } else { removeItem() }
         if settings.meeting_watch_enabled { watch.start() } else { watch.stop() }
+        if settings.widget_enabled { addWidget() } else { removeWidget() }
     }
 
     // MARK: значок
@@ -192,6 +197,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         guard let capture, let pipeline, let library else { return }
         stopAndProcess(capture: capture, pipeline: pipeline, library: library)
         openApp()
+    }
+
+    // MARK: виджет
+
+    private func addWidget() {
+        guard widget == nil, let capture, let pipeline, let library else { return }
+        widget = DeskWidget(library: library, capture: capture, pipeline: pipeline)
+        widget?.show()
+    }
+
+    private func removeWidget() {
+        widget?.close()
+        widget = nil
     }
 
     @objc private func openApp() {
