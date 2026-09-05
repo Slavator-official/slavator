@@ -1110,7 +1110,10 @@ private struct HotkeyField: View {
         Button(caption) {
             if recording { finish(save: false) } else { begin() }
         }
-        .buttonStyle(QuietButton())
+        // Ширина и правый край — как у соседних переключателей: строки
+        // настроек должны стоять по одной линии, иначе список выглядит
+        // собранным на скорую руку.
+        .buttonStyle(QuietButton(wide: true))
         .frame(width: 210)
         .background {
             if recording {
