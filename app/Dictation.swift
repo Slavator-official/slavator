@@ -144,6 +144,11 @@ final class Dictation {
 
     private func begin(mode: Mode) {
         guard case .idle = state else { return }
+        // Греем прямо сейчас: модель поднимается секунды, и человек как раз
+        // эти секунды говорит. К концу фразы она уже в памяти, а ждать её
+        // с готовым текстом на руках — та самая заминка, из-за которой
+        // обработка выглядела сломанной.
+        worker.warm()
         self.mode = mode
         lastText = ""; typed = ""; spoken = ""; seconds = 0
         state = .listening
@@ -408,6 +413,11 @@ private final class Worker {
 
     func transcribe(path: URL, done: @escaping (String) -> Void) {
         send(["cmd": "transcribe", "path": path.path]) { text, _ in done(text) }
+    }
+
+    /// Поднять языковую модель в память, не дожидаясь ответа.
+    func warm() {
+        send(["cmd": "warm"], reply: nil)
     }
 
     func tidy(text: String, level: String, done: @escaping (String, Bool) -> Void) {

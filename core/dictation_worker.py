@@ -35,6 +35,10 @@ OLLAMA_MODEL = os.environ.get("MEETING_TRANSCRIBER_LLM", "qwen3:8b")
 # Обработка идёт после того, как человек отпустил клавишу, и он ждёт.
 # Лучше отдать сырой текст, чем заставить смотреть в пустое поле.
 TIDY_TIMEOUT = int(os.environ.get("SLAVATOR_TIDY_TIMEOUT", "45"))
+# Сколько модель ждёт в памяти после последней правки. Полчаса — разумная
+# середина: рабочий день диктуют раз в несколько минут, а держать пять
+# гигабайт вечно ради этого незачем.
+KEEP_ALIVE = os.environ.get("SLAVATOR_KEEP_ALIVE", "30m")
 
 
 # Выдумки Whisper на тишине. Список повторяет тот, что в ядре
@@ -190,7 +194,7 @@ def warm() -> None:
     """
     payload = {
         "model": OLLAMA_MODEL, "stream": False, "think": False,
-        "keep_alive": "10m",
+        "keep_alive": KEEP_ALIVE,
         "messages": [{"role": "user", "content": "ок"}],
     }
     request = urllib.request.Request(
@@ -215,7 +219,7 @@ def tidy(text: str, level: str) -> tuple:
         # короткой фразы занимала 24,7 с, без них - 2,2 с. Качество
         # добирается примером в задании, а не рассуждениями.
         "think": False,
-        "keep_alive": "10m",
+        "keep_alive": KEEP_ALIVE,
         "options": {"temperature": 0.1},
         "messages": [
             {"role": "system", "content": system + " Отвечай ТОЛЬКО готовым текстом, без пояснений."},
@@ -326,6 +330,12 @@ def main() -> int:
                 send({"id": command.get("id"), "text": "", "error": str(exc)[:200]})
                 continue
             send({"id": command.get("id"), "text": repair(text, glossary, fixer)})
+            continue
+
+        if name == "warm":
+            # Ответа не ждём: прогрев идёт в стороне, пока человек говорит.
+            threading.Thread(target=warm, daemon=True).start()
+            send({"id": command.get("id"), "text": "", "ok": True})
             continue
 
         if name == "tidy":
