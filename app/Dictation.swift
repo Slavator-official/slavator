@@ -589,7 +589,12 @@ enum HotCombo {
     ]
 
     /// Те же клавиши, когда сторона не важна. Порядок — как на клавиатуре.
+    ///
+    /// fn стоит особняком: стороны у неё нет, и системная диктовка Apple
+    /// висит на ней же. Мы её всё равно разрешаем — человек вправе занять
+    /// её собой, раз системную диктовку не использует.
     private static let plain: [(token: String, mask: CGEventFlags, sign: String)] = [
+        ("fn", .maskSecondaryFn, "fn"),
         ("ctrl", .maskControl, "⌃"), ("opt", .maskAlternate, "⌥"),
         ("shift", .maskShift, "⇧"), ("cmd", .maskCommand, "⌘"),
     ]
@@ -629,14 +634,18 @@ enum HotCombo {
         let byCode: [UInt16: String] = [
             59: "lctrl", 62: "rctrl", 56: "lshift", 60: "rshift",
             55: "lcmd",  54: "rcmd",  58: "lopt",   61: "ropt",
+            63: "fn",
         ]
-        var bits: UInt64 = 0
-        for code in codes {
-            if let token = byCode[code], let one = sided.first(where: { $0.token == token }) {
-                bits |= one.bit
-            }
-        }
-        return tokens(from: bits)
+        let held = codes.compactMap { byCode[$0] }
+        if held.isEmpty { return "" }
+        if held.count == 1 { return held[0] }
+        // В сочетании сторона не проверяется — обобщаем до знака клавиши,
+        // а порядок берём с клавиатуры, чтобы подпись не прыгала.
+        return plain.filter { item in
+            held.contains(item.token)
+                || sided.contains { $0.token != item.token && held.contains($0.token)
+                                    && $0.sign == item.sign }
+        }.map(\.token).joined(separator: "+")
     }
 
     /// Держат ли сейчас всё, что нужно. Лишние модификаторы не мешают: ими
@@ -656,7 +665,7 @@ enum HotCombo {
         return true
     }
 
-    /// Занят ли ⇧ самим сочетанием: тогда обработку им уже не вызвать.
+    /// Занят ли ⇧ самим сочетанием.
     static func usesShift(_ combo: String) -> Bool {
         combo.split(separator: "+").contains { $0.hasSuffix("shift") }
     }

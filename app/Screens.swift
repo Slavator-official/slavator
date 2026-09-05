@@ -984,7 +984,7 @@ extension SettingsScreen {
                     .labelsHidden()
             }
             SettingRow(title: "Клавиша диктовки",
-                       subtitle: "Нажмите и подержите своё сочетание: ⌘, ⌥, ⌃, ⇧ или несколько сразу") {
+                       subtitle: "Нажмите и подержите своё сочетание: ⌘, ⌥, ⌃, ⇧, fn или несколько сразу") {
                 HotkeyField(combo: Binding(
                     get: { library.settings.dictation_hotkey },
                     set: { chosen in
@@ -1117,7 +1117,7 @@ private struct HotkeyField: View {
         // Код клавиши в flagsChanged называет саму клавишу — по нему видна и
         // сторона. Через CGEvent это делать нельзя: у NSEvent его может не
         // оказаться вовсе, и запись молча ничего не ловила.
-        if !mods.intersection([.command, .option, .control, .shift]).isEmpty {
+        if !mods.intersection([.command, .option, .control, .shift, .function]).isEmpty {
             pressed.insert(code)
         } else if !pressed.isEmpty {
             finish(save: true)              // отпустили всё — сочетание набрано
