@@ -1023,7 +1023,7 @@ extension SettingsScreen {
             SettingRow(title: "Что делает обработка",
                        subtitle: library.settings.dictation_tidy_hotkey == library.settings.dictation_hotkey
                            ? "Сочетания совпали — обработка забирает и обычную диктовку"
-                           : "Убрать «э-э» и разложить перечисление списком. Нужна Ollama") {
+                           : "Убрать «ну» и «вот», согласовать окончания, сократить лишнее. Нужна Ollama") {
                 Segmented(options: [("clean", "Чистка"), ("structure", "Структура"), ("shrink", "Сжатие")],
                           selection: Binding(
                             get: { library.settings.dictation_level },
