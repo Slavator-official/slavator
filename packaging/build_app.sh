@@ -21,7 +21,8 @@ fail() { printf '\033[31mОШИБКА:\033[0m %s\n' "$1" >&2; exit 1; }
 command -v swiftc >/dev/null || fail "нет swiftc — поставьте Command Line Tools"
 
 SOURCES=(Theme.swift Models.swift Doctor.swift Ribbon.swift Player.swift Pipeline.swift
-         SystemAudio.swift LiveCapture.swift Dictation.swift Chat.swift Enroll.swift Screens.swift App.swift)
+         SystemAudio.swift MeetingWatch.swift LiveCapture.swift Dictation.swift Chat.swift
+         Enroll.swift Screens.swift DeskWidget.swift App.swift)
 for f in "${SOURCES[@]}"; do
     [[ -f "$SWIFT/$f" ]] || fail "нет исходника: $SWIFT/$f"
 done

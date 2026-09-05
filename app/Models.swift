@@ -109,6 +109,12 @@ struct Settings: Codable {
     /// Как подписывать ваши реплики с микрофонной дорожки.
     var my_name = "Вы"
 
+    // MARK: быстрый доступ
+    /// Значок в строке меню: начать запись, не открывая окно.
+    var menubar_enabled = true
+    /// Следить, не началась ли встреча, и предлагать её записать.
+    var meeting_watch_enabled = false
+
     // MARK: диктовка
     var dictation_enabled = false
     /// small — текст идёт на ходу; large-v3-turbo — точнее, но ждать 3 секунды.
@@ -122,6 +128,36 @@ struct Settings: Codable {
 
     /// Языковая модель: и для резюме встреч, и для чата.
     var llm_model = "qwen3:8b"
+
+    init() {}
+
+    /// Настройки читаются по одному ключу, а не файлом целиком.
+    ///
+    /// Файл, записанный прежней версией, не знает ключей, добавленных позже.
+    /// Синтезированный декодер на таком файле бросает ошибку на весь объект, а
+    /// `load()` молча возвращает умолчания — и человек из-за одного нового
+    /// переключателя теряет и имя, и папку результатов, и назначенные клавиши.
+    /// Здесь каждое поле падает на своё умолчание, а остальные доживают.
+    init(from decoder: Decoder) throws {
+        let box = try decoder.container(keyedBy: CodingKeys.self)
+        func read<T: Decodable>(_ key: CodingKeys, _ fallback: T) -> T {
+            ((try? box.decodeIfPresent(T.self, forKey: key)) ?? nil) ?? fallback
+        }
+        theme = read(.theme, theme)
+        results_dir = read(.results_dir, results_dir)
+        widget_enabled = read(.widget_enabled, widget_enabled)
+        widget_output_dir = read(.widget_output_dir, widget_output_dir)
+        keep_diagnostics = read(.keep_diagnostics, keep_diagnostics)
+        my_name = read(.my_name, my_name)
+        menubar_enabled = read(.menubar_enabled, menubar_enabled)
+        meeting_watch_enabled = read(.meeting_watch_enabled, meeting_watch_enabled)
+        dictation_enabled = read(.dictation_enabled, dictation_enabled)
+        dictation_model = read(.dictation_model, dictation_model)
+        dictation_hotkey = read(.dictation_hotkey, dictation_hotkey)
+        dictation_tidy_hotkey = read(.dictation_tidy_hotkey, dictation_tidy_hotkey)
+        dictation_level = read(.dictation_level, dictation_level)
+        llm_model = read(.llm_model, llm_model)
+    }
 
     static func load() -> Settings {
         guard let data = try? Data(contentsOf: Paths.settings),

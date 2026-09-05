@@ -283,18 +283,7 @@ struct MainScreen: View {
     /// Остановка сразу отправляет запись в обычную обработку: живой режим и
     /// файл сходятся в один пайплайн, иначе качество разъедется.
     private func finishRecording() {
-        guard let url = capture.stop() else { return }
-        let voice = capture.systemTrack != nil ? capture.microphoneTrack : nil
-        if capture.seconds < 3 {
-            try? FileManager.default.removeItem(at: url)
-            if let voice { try? FileManager.default.removeItem(at: voice) }
-            showAlert("Слишком короткая запись", "Записано меньше трёх секунд — обрабатывать нечего.")
-            return
-        }
-        picked = url
-        // Микрофон уходит отдельной дорожкой: ваш голос не смешивается с
-        // собеседниками и не требует опознания.
-        pipeline.run(input: url, library: library, voiceTrack: voice)
+        picked = stopAndProcess(capture: capture, pipeline: pipeline, library: library)
     }
 
     /// Обработка идёт долго — час записи считается десятки минут. Без
@@ -917,6 +906,33 @@ struct SettingsScreen: View {
             }
 
             Card {
+                Text("Быстрый доступ").font(Kind.head(16)).padding(.bottom, 12)
+                SettingRow(title: "Значок в строке меню",
+                           subtitle: "Начать запись, не открывая окно") {
+                    Toggle("", isOn: Binding(
+                        get: { library.settings.menubar_enabled },
+                        set: { library.settings.menubar_enabled = $0; library.settings.save() }))
+                        .labelsHidden().toggleStyle(.switch)
+                }
+                Divider().overlay(p.line2)
+                SettingRow(title: "Виджет на рабочем столе",
+                           subtitle: "Кнопка записи поверх обоев, под окнами — как системные виджеты") {
+                    Toggle("", isOn: Binding(
+                        get: { library.settings.widget_enabled },
+                        set: { library.settings.widget_enabled = $0; library.settings.save() }))
+                        .labelsHidden().toggleStyle(.switch)
+                }
+                Divider().overlay(p.line2)
+                SettingRow(title: "Предлагать запись, когда начинается встреча",
+                           subtitle: "Славатор заметит, что микрофон занят звонком, и спросит одним уведомлением") {
+                    Toggle("", isOn: Binding(
+                        get: { library.settings.meeting_watch_enabled },
+                        set: { library.settings.meeting_watch_enabled = $0; library.settings.save() }))
+                        .labelsHidden().toggleStyle(.switch)
+                }
+            }
+
+            Card {
                 Text("Хранение данных").font(Kind.head(16)).padding(.bottom, 12)
                 SettingRow(title: "Папка для результатов", subtitle: library.settings.results_dir) {
                     Button("Изменить") { chooseFolder() }.buttonStyle(QuietButton())
@@ -1110,7 +1126,10 @@ private struct HotkeyField: View {
         Button(caption) {
             if recording { finish(save: false) } else { begin() }
         }
-        .buttonStyle(QuietButton())
+        // Ширина и правый край — как у соседних переключателей: строки
+        // настроек должны стоять по одной линии, иначе список выглядит
+        // собранным на скорую руку.
+        .buttonStyle(QuietButton(wide: true))
         .frame(width: 210)
         .background {
             if recording {
