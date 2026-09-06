@@ -1971,7 +1971,8 @@ MAP_TEMPLATE = """Это фрагмент {index} из {total} стеногра�
   "decisions": ["принятые решения"],
   "todos": [{{"task": "что сделать", "owner": "кто именно, из имён в стенограмме", "due": "срок или пустая строка"}}],
   "risks": ["риски и проблемы"],
-  "questions": ["открытые вопросы без ответа"]
+  "questions": ["открытые вопросы без ответа"],
+  "mentioned": ["имена людей, о которых говорили"]
 }}
 
 Правила:
@@ -1999,7 +2000,8 @@ REDUCE_TEMPLATE = """Ниже - разборы последовательных 
   "decisions": ["решения"],
   "todos": [{{"task": "...", "owner": "...", "due": "..."}}],
   "risks": ["риски"],
-  "questions": ["открытые вопросы"]
+  "questions": ["открытые вопросы"],
+  "mentioned": ["имена людей, о которых говорили"]
 }}
 
 Разборы фрагментов:
@@ -2106,6 +2108,38 @@ def _merge_unique(target: list[str], items: Iterable[Any]) -> None:
             target[hit] = text
 
 
+def mentioned_people(values: Iterable[Any], participants: Sequence[str]) -> list[str]:
+    """Кого называли на встрече, но кто сам не говорил.
+
+    Имена модель вылавливает исправно, и раньше они попадали в список
+    участников - вместе с теми, кого в комнате не было. Выбрасывать их жалко:
+    «Саша обещал прислать» - это тоже след поручения. Поэтому они идут своим
+    блоком, а из списка вычитаются все, кто говорил.
+
+    «Иван» и «Иван Муравлев» - один человек; из двух форм остаётся полная.
+    Для имён вложение засчитывается любой длины, в отличие от пунктов
+    протокола: имена коротки по природе.
+    """
+    known = [_normalized(name) for name in participants]
+    result: list[str] = []
+    for value in values:
+        text = " ".join(str(value).split())
+        key = _normalized(text)
+        if not key or len(text) > 60:
+            continue
+        if any(key == other or key in other or other in key for other in known):
+            continue
+        for index, existing in enumerate(result):
+            other = _normalized(existing)
+            if key == other or key in other or other in key:
+                if len(text) > len(existing):
+                    result[index] = text
+                break
+        else:
+            result.append(text)
+    return result
+
+
 def reduce_partials(partials: list[dict[str, Any]]) -> dict[str, Any]:
     """Свести разборы фрагментов в итоговый протокол.
 
@@ -2193,6 +2227,11 @@ def analyze_meeting(utterances: list[Utterance], extra_dir: Path) -> dict[str, A
         "questions": [],
         "todos": [],
     }
+    analysis["mentioned"] = mentioned_people(
+        [name for source in [final] + partials for name in (source.get("mentioned") or [])],
+        speakers,
+    )
+
     for key in ("topics", "decisions", "risks", "questions"):
         _merge_unique(analysis[key], final.get(key, []))
         for partial in partials:
@@ -2285,6 +2324,11 @@ def write_summary_docx(path: Path, analysis: dict[str, Any], warnings: list[str]
         document.add_heading("Участники", level=1)
         document.add_paragraph(", ".join(participants))
 
+    mentioned = analysis.get("mentioned") or []
+    if mentioned:
+        document.add_heading("Упоминались", level=1)
+        document.add_paragraph(", ".join(mentioned))
+
     document.add_heading("Резюме", level=1)
     document.add_paragraph(analysis.get("summary", ""))
 
@@ -2337,6 +2381,7 @@ def write_mindmap(path: Path, analysis: dict[str, Any]) -> None:
         lines.append("")
 
     block("Участники", analysis.get("participants") or [])
+    block("Упоминались", analysis.get("mentioned") or [])
     block("Темы", analysis.get("topics") or [])
     block("Решения", analysis.get("decisions") or [])
 
@@ -2588,14 +2633,14 @@ def run_pipeline(
             state.analysis = {
                 "title": source.stem,
                 "summary": "",
-                "participants": sorted({item.label for item in utterances}),
+                "participants": list(display_names(utterances).values()),
             }
     else:
         log("Анализ встречи пропущен (--no-summary)")
         state.analysis = {
             "title": source.stem,
             "summary": "",
-            "participants": sorted({item.label for item in utterances}),
+            "participants": list(display_names(utterances).values()),
         }
 
     stage_start("documents")
