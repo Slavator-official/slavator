@@ -925,7 +925,9 @@ struct SettingsScreen: View {
                 if library.settings.widget_enabled {
                     Divider().overlay(p.line2)
                     SettingRow(title: "Размер виджета") {
-                        Segmented(options: [("small", "Маленький"), ("medium", "Средний"),
+                        // «Значок», а не «маленький»: это не уменьшенная копия
+                        // остальных, а другой вид — одна кнопка без подписей.
+                        Segmented(options: [("small", "Значок"), ("medium", "Средний"),
                                             ("large", "Большой")],
                                   selection: Binding(
                                     get: { library.settings.widget_size },

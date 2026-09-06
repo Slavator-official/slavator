@@ -15,7 +15,7 @@ enum WidgetSize: String {
 
     var size: NSSize {
         switch self {
-        case .small:  return NSSize(width: 196, height: 46)
+        case .small:  return NSSize(width: 68, height: 68)
         case .medium: return NSSize(width: 212, height: 86)
         case .large:  return NSSize(width: 326, height: 188)
         }
@@ -23,7 +23,8 @@ enum WidgetSize: String {
 
     var padding: CGFloat {
         switch self {
-        case .small:  return 8
+        // Маленький — сама кнопка целиком, поля ей не нужны.
+        case .small:  return 0
         case .medium: return 9
         case .large:  return 16
         }
@@ -31,7 +32,7 @@ enum WidgetSize: String {
 
     var corner: CGFloat {
         switch self {
-        case .small:  return 12
+        case .small:  return 20
         case .medium: return 14
         case .large:  return 16
         }
@@ -105,6 +106,7 @@ private struct DeskWidgetView: View {
     let kind: WidgetSize
     @State private var source = "sys"
     @State private var pulse = false
+    @State private var hovering = false
 
     private var p: Palette { library.palette }
 
@@ -122,30 +124,55 @@ private struct DeskWidgetView: View {
         .padding(kind.padding)
         .frame(width: kind.size.width, height: kind.size.height,
                alignment: kind == .large ? .topLeading : .center)
-        .background(p.surface)
+        .background(kind == .small && hovering ? p.raised : p.surface)
         .overlay(RoundedRectangle(cornerRadius: kind.corner).stroke(p.line2, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: kind.corner))
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.14), value: hovering)
         .environment(\.palette, p)
     }
 
-    // MARK: маленький — одна кнопка
+    // MARK: маленький — один значок
 
-    /// Выбора источника здесь нет: на одну строку он не встаёт. Пишется
-    /// звонок — то, ради чего виджет и заводят; «только микрофон» остаётся
-    /// в размерах побольше и в самой программе.
+    /// Ни подписи, ни выбора источника: на рабочем столе это просто значок,
+    /// по которому нажимают, — как у диктофонов, что живут рядом с обоями.
+    /// Что он делает, говорит подсказка при наведении; пишется звонок — то,
+    /// ради чего виджет и заводят.
     private var smallIdle: some View {
-        Button("Начать слушать") { start(microphone: false) }
-            .buttonStyle(PrimaryButton(wide: true))
+        Button { start(microphone: false) } label: {
+            Image(systemName: "mic")
+                .font(.system(size: 26, weight: .regular))
+                .foregroundStyle(p.accent)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Записать встречу")
     }
 
+    /// Во время записи значок становится квадратом остановки, а под ним идёт
+    /// время: без него непонятно, слушает виджет или просто горит красным.
     private var smallRecording: some View {
-        HStack(spacing: 8) {
-            dot
-            Text(clock).font(.system(size: 15, weight: .semibold))
-                .monospacedDigit().foregroundStyle(p.text)
-            Spacer(minLength: 0)
-            Button("Стоп") { stop() }.buttonStyle(QuietButton())
+        Button { stop() } label: {
+            VStack(spacing: 2) {
+                Image(systemName: "stop.fill")
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(p.warn)
+                Text(clock).font(.system(size: 11, weight: .semibold))
+                    .monospacedDigit().foregroundStyle(p.muted)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .help("Остановить и обработать")
+        // Кольцо вместо мигающей точки: на значке такого размера точке негде
+        // стоять, а обводка видна и не спорит с содержимым.
+        .overlay(RoundedRectangle(cornerRadius: kind.corner)
+            .stroke(p.warn, lineWidth: 2).opacity(pulse ? 0.25 : 0.9)
+            .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true),
+                       value: pulse))
+        .onAppear { pulse = true }
     }
 
     // MARK: средний — источник и действие
