@@ -2152,13 +2152,25 @@ def analyze_meeting(utterances: list[Utterance], extra_dir: Path) -> dict[str, A
     log(f"    фрагментов для анализа: {len(chunks)} (num_ctx={OLLAMA_NUM_CTX})")
 
     partials: list[dict[str, Any]] = []
+    failed = 0
     for index, chunk in enumerate(chunks, start=1):
         stage_pct("summary", (index - 1) / (len(chunks) + 1), f"фрагмент {index} из {len(chunks)}")
-        raw = ollama_chat(
-            MAP_SYSTEM,
-            MAP_TEMPLATE.format(index=index, total=len(chunks), chunk=chunk),
-        )
-        partials.append(parse_json_response(raw))
+        try:
+            raw = ollama_chat(
+                MAP_SYSTEM,
+                MAP_TEMPLATE.format(index=index, total=len(chunks), chunk=chunk),
+            )
+            partials.append(parse_json_response(raw))
+        except LLMError as exc:
+            # Один испорченный ответ не стоит всего разбора: на часовой встрече
+            # фрагментов пять-десять, и терять их все из-за одного - значит
+            # выбросить двадцать минут счёта и остаться вовсе без протокола.
+            failed += 1
+            warn(f"Фрагмент {index} из {len(chunks)} разобрать не удалось: {exc}")
+    if not partials:
+        raise LLMError("Ни один фрагмент встречи разобрать не удалось.")
+    if failed:
+        log(f"    фрагментов пропущено: {failed}")
 
     write_json(extra_dir / "initial_analysis.json", partials)
 
@@ -2171,8 +2183,10 @@ def analyze_meeting(utterances: list[Utterance], extra_dir: Path) -> dict[str, A
     analysis: dict[str, Any] = {
         "title": str(final.get("title", "")).strip(),
         "summary": str(final.get("summary", "")).strip(),
-        "participants": [str(v).strip() for v in final.get("participants", []) if str(v).strip()]
-        or speakers,
+        # Участники берутся из стенограммы, а не из ответа модели. Модель
+        # исправно вписывала сюда всех, кого на встрече упомянули - людей,
+        # которых в комнате не было. Кто говорил, мы знаем точно.
+        "participants": speakers,
         "topics": [],
         "decisions": [],
         "risks": [],
@@ -2205,7 +2219,15 @@ def analyze_meeting(utterances: list[Utterance], extra_dir: Path) -> dict[str, A
             )
 
     if not analysis["summary"]:
-        raise LLMError("Модель не сформировала резюме встречи.")
+        # Модель иногда возвращает всё, кроме связного текста. Выбрасывать
+        # из-за одного поля готовый разбор - терять и решения, и поручения,
+        # ради которых всё и считалось.
+        head = analysis["decisions"][:3] or analysis["topics"][:3]
+        if not head:
+            raise LLMError("Модель не сформировала резюме встречи.")
+        analysis["summary"] = ("Связного резюме модель не составила. Коротко: "
+                               + "; ".join(head) + ".")
+        warn("Резюме собрано из решений и тем: связного текста модель не дала.")
 
     log(
         f"    решений: {len(analysis['decisions'])}, "
