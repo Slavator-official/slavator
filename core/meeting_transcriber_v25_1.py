@@ -2006,17 +2006,44 @@ REDUCE_TEMPLATE = """Ниже - разборы последовательных 
 {parts}"""
 
 
-def transcript_as_text(utterances: Sequence[Utterance]) -> str:
+def display_names(utterances: Sequence[Utterance]) -> dict[str, str]:
+    """Как называть говорящих в документах и в задании для модели.
+
+    Опознанные идут своим именем, остальные - «Участник 1», «Участник 2» по
+    порядку появления. SPEAKER_00 годится внутри программы, но наружу такой
+    метке ходу нет: она утекала в резюме, в список участников и в графу
+    «Исполнитель», где поручение на SPEAKER_00 не значит ничего. Модель тоже
+    видит человеческие подписи - что она перепишет в ответ, то и прочтёт
+    человек.
+    """
+    names: dict[str, str] = {}
+    unknown = 0
+    for item in utterances:
+        key = item.speaker_id or ""
+        if key in names:
+            continue
+        if item.speaker_name:
+            names[key] = item.speaker_name
+        else:
+            unknown += 1
+            names[key] = f"Участник {unknown}"
+    return names
+
+
+def transcript_as_text(utterances: Sequence[Utterance],
+                       names: Optional[dict[str, str]] = None) -> str:
     """Стенограмма С МЕТКАМИ СПИКЕРОВ.
 
     TD-01: прежняя версия отдавала в LLM голый текст без имён, из-за чего
     модель физически не могла определить владельца поручения - при том что
     summary обязан этого владельца назвать.
     """
+    names = names if names is not None else display_names(utterances)
     lines = []
     for item in utterances:
         stamp = time.strftime("%H:%M:%S", time.gmtime(max(0, item.start)))
-        lines.append(f"[{stamp}] {item.label}: {item.text}")
+        who = names.get(item.speaker_id or "", item.label)
+        lines.append(f"[{stamp}] {who}: {item.text}")
     return "\n".join(lines)
 
 
@@ -2046,17 +2073,81 @@ def chunk_transcript(text: str, num_ctx: int) -> list[str]:
 
 
 def _merge_unique(target: list[str], items: Iterable[Any]) -> None:
-    seen = {_normalized(str(value)) for value in target}
+    """Добавить пункты, отсеяв повторы.
+
+    Разбор по фрагментам даёт один и тот же пункт разными словами: «решили
+    резолвить на бэке» и «резолвинг будет происходить на стороне бэка».
+    Точное сравнение их не ловит, и протокол распухал повторами. Пункт
+    считается повтором и тогда, когда одна формулировка целиком входит в
+    другую; из двух остаётся подробная.
+
+    Вложение засчитывается только для строк подлиннее: короткое «риски»
+    иначе поглотило бы все пункты, где это слово встретилось.
+    """
+    keys = [_normalized(str(value)) for value in target]
     for value in items:
         text = str(value).strip()
         key = _normalized(text)
-        if text and key not in seen:
-            seen.add(key)
+        if not text:
+            continue
+        hit = None
+        for index, existing in enumerate(keys):
+            same = key == existing
+            nested = (min(len(key), len(existing)) >= 12
+                      and (key in existing or existing in key))
+            if same or nested:
+                hit = index
+                break
+        if hit is None:
+            keys.append(key)
             target.append(text)
+        elif len(key) > len(keys[hit]):
+            keys[hit] = key
+            target[hit] = text
+
+
+def reduce_partials(partials: list[dict[str, Any]]) -> dict[str, Any]:
+    """Свести разборы фрагментов в итоговый протокол.
+
+    Разборы уходили в модель одним куском и с отступами. На часовой встрече
+    это ещё влезало в окно, на трёхчасовой - уже нет, а llama.cpp запущен со
+    сдвигом контекста: лишнее не вызывает ошибку, а молча выпадает с начала.
+    Итог выглядел исправным, но первая половина встречи в него не попадала.
+
+    Поэтому: отступы убраны, а если разборы всё равно не влезают - они
+    сводятся группами, и сведённое сводится ещё раз.
+    """
+    budget = max(2000, int((OLLAMA_NUM_CTX - 1500) * 3 * 0.5))
+    text = json.dumps(partials, ensure_ascii=False)
+    if len(partials) == 1 or len(text) <= budget:
+        return parse_json_response(
+            ollama_chat(REDUCE_SYSTEM, REDUCE_TEMPLATE.format(parts=text)))
+
+    groups: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    size = 0
+    for part in partials:
+        piece = len(json.dumps(part, ensure_ascii=False))
+        if current and size + piece > budget:
+            groups.append(current)
+            current, size = [], 0
+        current.append(part)
+        size += piece
+    if current:
+        groups.append(current)
+    # Дробить дальше некуда - один разбор сам по себе больше окна. Отдаём как
+    # есть: обрезанный ответ лучше бесконечного деления.
+    if len(groups) <= 1:
+        return parse_json_response(
+            ollama_chat(REDUCE_SYSTEM, REDUCE_TEMPLATE.format(parts=text)))
+
+    log(f"    разборов много, свожу в {len(groups)} захода")
+    return reduce_partials([reduce_partials(group) for group in groups])
 
 
 def analyze_meeting(utterances: list[Utterance], extra_dir: Path) -> dict[str, Any]:
-    text = transcript_as_text(utterances)
+    names = display_names(utterances)
+    text = transcript_as_text(utterances, names)
     chunks = chunk_transcript(text, OLLAMA_NUM_CTX)
     log(f"    фрагментов для анализа: {len(chunks)} (num_ctx={OLLAMA_NUM_CTX})")
 
@@ -2075,12 +2166,8 @@ def analyze_meeting(utterances: list[Utterance], extra_dir: Path) -> dict[str, A
         stage_pct("summary", 0.6, "итоговое резюме")
     else:
         stage_pct("summary", len(chunks) / (len(chunks) + 1), "сведение фрагментов")
-    raw = ollama_chat(
-        REDUCE_SYSTEM,
-        REDUCE_TEMPLATE.format(parts=json.dumps(partials, ensure_ascii=False, indent=2)),
-    )
-    final = parse_json_response(raw)
-    speakers = sorted({item.label for item in utterances})
+    final = reduce_partials(partials)
+    speakers = list(dict.fromkeys(names.values()))
     analysis: dict[str, Any] = {
         "title": str(final.get("title", "")).strip(),
         "summary": str(final.get("summary", "")).strip(),
@@ -2150,10 +2237,12 @@ def write_transcript_docx(path: Path, utterances: list[Utterance], title: str) -
     document.add_heading(title or "Стенограмма встречи", level=0)
     document.add_paragraph(datetime.now().strftime("Обработано: %d.%m.%Y %H:%M"))
 
+    names = display_names(utterances)
     current = None
     for item in utterances:
-        if item.label != current:
-            current = item.label
+        who = names.get(item.speaker_id or "", item.label)
+        if who != current:
+            current = who
             heading = document.add_paragraph()
             run = heading.add_run(current)
             run.bold = True
