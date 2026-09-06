@@ -1983,6 +1983,29 @@ MAP_TEMPLATE = """Это фрагмент {index} из {total} стеногра�
 Фрагмент стенограммы:
 {chunk}"""
 
+SOLO_TEMPLATE = """Это полная стенограмма встречи.
+
+Верни JSON строго такой структуры:
+{{
+  "title": "короткое название встречи",
+  "summary": "связное резюме встречи, 5-10 предложений",
+  "topics": ["обсуждавшиеся темы"],
+  "decisions": ["принятые решения"],
+  "todos": [{{"task": "что сделать", "owner": "кто именно, из имён в стенограмме", "due": "срок или пустая строка"}}],
+  "risks": ["риски и проблемы"],
+  "questions": ["открытые вопросы без ответа"],
+  "mentioned": ["имена людей, о которых говорили"]
+}}
+
+Правила:
+- owner бери ТОЛЬКО из имён говорящих в стенограмме; если исполнитель не назван, ставь "".
+- не выдумывай факты, которых нет в тексте;
+- пустой список лучше, чем придуманный пункт.
+
+Стенограмма:
+{chunk}"""
+
+
 REDUCE_SYSTEM = (
     "Ты сводишь частичные разборы одной встречи в итоговый протокол на русском языке. "
     "Отвечай ТОЛЬКО валидным JSON."
@@ -2185,6 +2208,17 @@ def analyze_meeting(utterances: list[Utterance], extra_dir: Path) -> dict[str, A
     chunks = chunk_transcript(text, OLLAMA_NUM_CTX)
     log(f"    фрагментов для анализа: {len(chunks)} (num_ctx={OLLAMA_NUM_CTX})")
 
+    if len(chunks) == 1:
+        # Разбор и сведение одним запросом. Прежде модель звали дважды:
+        # сперва разобрать единственный фрагмент, потом свести его самого с
+        # собой. На встрече до получаса это ровно вдвое дольше без всякой
+        # пользы — а на этой машине каждый запрос стоит минуты.
+        stage_pct("summary", 0.2, "разбор встречи")
+        final = parse_json_response(
+            ollama_chat(MAP_SYSTEM, SOLO_TEMPLATE.format(chunk=chunks[0])))
+        write_json(extra_dir / "initial_analysis.json", [final])
+        return _collect(final, [], utterances, names)
+
     partials: list[dict[str, Any]] = []
     failed = 0
     for index, chunk in enumerate(chunks, start=1):
@@ -2208,11 +2242,14 @@ def analyze_meeting(utterances: list[Utterance], extra_dir: Path) -> dict[str, A
 
     write_json(extra_dir / "initial_analysis.json", partials)
 
-    if len(partials) == 1:
-        stage_pct("summary", 0.6, "итоговое резюме")
-    else:
-        stage_pct("summary", len(chunks) / (len(chunks) + 1), "сведение фрагментов")
+    stage_pct("summary", len(chunks) / (len(chunks) + 1), "сведение фрагментов")
     final = reduce_partials(partials)
+    return _collect(final, partials, utterances, names)
+
+
+def _collect(final: dict[str, Any], partials: list[dict[str, Any]],
+             utterances: list[Utterance], names: dict[str, str]) -> dict[str, Any]:
+    """Собрать итоговый разбор из ответа модели и частичных разборов."""
     speakers = list(dict.fromkeys(names.values()))
     analysis: dict[str, Any] = {
         "title": str(final.get("title", "")).strip(),

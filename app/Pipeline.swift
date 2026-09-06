@@ -146,7 +146,15 @@ final class Pipeline {
         process.executableURL = Paths.venvPython
         process.arguments = arguments
         process.currentDirectoryURL = Paths.core.deletingLastPathComponent()
-        process.environment = Paths.coreEnvironment()
+        var env = Paths.coreEnvironment()
+        // Выбранная модель доходит до обработки. Раньше её знал только чат:
+        // ядро брало модель из config.env, записанного при установке, и
+        // переключить её можно было лишь правкой файла руками. На этой машине
+        // от размера модели зависит время резюме — разница в разы.
+        if !library.settings.llm_model.isEmpty {
+            env["MEETING_TRANSCRIBER_LLM"] = library.settings.llm_model
+        }
+        process.environment = env
 
         let pipe = Pipe()
         process.standardOutput = pipe
