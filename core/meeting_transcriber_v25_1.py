@@ -1967,7 +1967,7 @@ MAP_TEMPLATE = """Это фрагмент {index} из {total} стеногра�
 
 Верни JSON строго такой структуры:
 {{
-  "topics": ["обсуждавшиеся темы"],
+  "notes": [{{"topic": "тема разговора", "points": ["что именно по ней сказали: суть, цифры, имена, договорённости"]}}],
   "decisions": ["принятые решения"],
   "todos": [{{"task": "что сделать", "owner": "кто именно, из имён в стенограмме", "due": "срок или пустая строка"}}],
   "risks": ["риски и проблемы"],
@@ -1977,6 +1977,8 @@ MAP_TEMPLATE = """Это фрагмент {index} из {total} стеногра�
 
 Правила:
 - owner бери ТОЛЬКО из имён говорящих в стенограмме; если исполнитель не назван, ставь "".
+- points пиши предложениями по существу: что решили, какие числа и сроки назвали, кто
+  что предложил. «Обсудили сроки» - бесполезный пункт, «Сроки сдвинули на 20.08» - полезный.
 - не выдумывай факты, которых нет в тексте;
 - пустой список лучше, чем придуманный пункт.
 
@@ -1989,7 +1991,7 @@ SOLO_TEMPLATE = """Это полная стенограмма встречи.
 {{
   "title": "короткое название встречи",
   "summary": "связное резюме встречи, 5-10 предложений",
-  "topics": ["обсуждавшиеся темы"],
+  "notes": [{{"topic": "тема разговора", "points": ["что именно по ней сказали: суть, цифры, имена, договорённости"]}}],
   "decisions": ["принятые решения"],
   "todos": [{{"task": "что сделать", "owner": "кто именно, из имён в стенограмме", "due": "срок или пустая строка"}}],
   "risks": ["риски и проблемы"],
@@ -1999,6 +2001,8 @@ SOLO_TEMPLATE = """Это полная стенограмма встречи.
 
 Правила:
 - owner бери ТОЛЬКО из имён говорящих в стенограмме; если исполнитель не назван, ставь "".
+- points пиши предложениями по существу: что решили, какие числа и сроки назвали, кто
+  что предложил. «Обсудили сроки» - бесполезный пункт, «Сроки сдвинули на 20.08» - полезный.
 - не выдумывай факты, которых нет в тексте;
 - пустой список лучше, чем придуманный пункт.
 
@@ -2019,7 +2023,7 @@ REDUCE_TEMPLATE = """Ниже - разборы последовательных 
   "title": "короткое название встречи",
   "summary": "связное резюме встречи, 5-10 предложений",
   "participants": ["имена участников из стенограммы"],
-  "topics": ["темы"],
+  "notes": [{{"topic": "тема разговора", "points": ["что именно по ней сказали"]}}],
   "decisions": ["решения"],
   "todos": [{{"task": "...", "owner": "...", "due": "..."}}],
   "risks": ["риски"],
@@ -2163,6 +2167,33 @@ def mentioned_people(values: Iterable[Any], participants: Sequence[str]) -> list
     return result
 
 
+def _merge_notes(target: list[dict[str, Any]], items: Iterable[Any]) -> None:
+    """Собрать темы с их содержанием, склеивая одинаковые.
+
+    Одна тема встречается в нескольких фрагментах: сама она повторяется, а
+    сказанное по ней у каждого фрагмента своё. Поэтому темы сравниваются как
+    пункты протокола, а содержание к найденной теме дописывается.
+    """
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        topic = str(item.get("topic", "")).strip()
+        if not topic:
+            continue
+        points = [str(v).strip() for v in (item.get("points") or []) if str(v).strip()]
+        key = _normalized(topic)
+        for existing in target:
+            other = _normalized(existing["topic"])
+            if key == other or (min(len(key), len(other)) >= 12
+                                and (key in other or other in key)):
+                _merge_unique(existing["points"], points)
+                break
+        else:
+            fresh: list[str] = []
+            _merge_unique(fresh, points)
+            target.append({"topic": topic, "points": fresh})
+
+
 def reduce_partials(partials: list[dict[str, Any]]) -> dict[str, Any]:
     """Свести разборы фрагментов в итоговый протокол.
 
@@ -2258,6 +2289,7 @@ def _collect(final: dict[str, Any], partials: list[dict[str, Any]],
         # исправно вписывала сюда всех, кого на встрече упомянули - людей,
         # которых в комнате не было. Кто говорил, мы знаем точно.
         "participants": speakers,
+        "notes": [],
         "topics": [],
         "decisions": [],
         "risks": [],
@@ -2269,10 +2301,16 @@ def _collect(final: dict[str, Any], partials: list[dict[str, Any]],
         speakers,
     )
 
-    for key in ("topics", "decisions", "risks", "questions"):
+    for key in ("decisions", "risks", "questions"):
         _merge_unique(analysis[key], final.get(key, []))
         for partial in partials:
             _merge_unique(analysis[key], partial.get(key, []))
+
+    for source in [final] + partials:
+        _merge_notes(analysis["notes"], source.get("notes") or [])
+    # Плоский список тем остаётся: по нему живут документы, которым
+    # содержание темы не нужно.
+    analysis["topics"] = [note["topic"] for note in analysis["notes"]]
 
     seen_tasks: set[str] = set()
     for source in [final] + partials:
@@ -2369,8 +2407,15 @@ def write_summary_docx(path: Path, analysis: dict[str, Any], warnings: list[str]
     document.add_heading("Резюме", level=1)
     document.add_paragraph(analysis.get("summary", ""))
 
+    notes = analysis.get("notes") or []
+    if notes:
+        document.add_heading("Обсуждавшиеся темы", level=1)
+        for note in notes:
+            document.add_paragraph(str(note.get("topic", "")), style="List Bullet")
+            for point in note.get("points") or []:
+                document.add_paragraph(str(point), style="List Bullet 2")
+
     sections = [
-        ("Обсуждавшиеся темы", "topics"),
         ("Принятые решения", "decisions"),
         ("Риски и проблемы", "risks"),
         ("Открытые вопросы", "questions"),
@@ -2406,36 +2451,68 @@ def write_summary_docx(path: Path, analysis: dict[str, Any], warnings: list[str]
     document.save(str(path))
 
 
-def write_mindmap(path: Path, analysis: dict[str, Any]) -> None:
-    lines = [f"# {analysis.get('title') or 'Встреча'}", ""]
+def write_mindmap(path: Path, analysis: dict[str, Any],
+                  meta: Optional[dict[str, Any]] = None) -> None:
+    """Майндкарта встречи.
 
-    def block(title: str, values: Sequence[Any]) -> None:
-        if not values:
-            return
-        lines.append(f"## {title}")
-        for value in values:
-            lines.append(f"- {value}")
+    Плоский список из заголовка и однострочных пунктов майндмап-программы
+    рисуют россыпью одинаковых коробок: у веток нет глубины, а темой служит
+    ярлык в три слова, по которому через неделю не вспомнить, о чём была
+    речь. Поэтому карта повторяет строение протокола, а под каждой темой
+    висит то, что по ней сказали.
+    """
+    meta = meta or {}
+    day = str(meta.get("date") or "").strip()
+    title = analysis.get("title") or "Встреча"
+    lines = [f"# {day + ' ' if day else ''}{title}", ""]
+
+    lines.append("## Информация о встрече")
+    if day:
+        lines.append(f"- Дата: {day}")
+    seconds = float(meta.get("duration") or 0)
+    if seconds > 0:
+        lines.append(f"- Длительность: {max(1, round(seconds / 60))} мин")
+    if analysis.get("participants"):
+        lines.append(f"- Участники: {', '.join(analysis['participants'])}")
+    if analysis.get("mentioned"):
+        lines.append(f"- Упоминались: {', '.join(analysis['mentioned'])}")
+    lines.append("")
+
+    notes = analysis.get("notes") or []
+    if notes:
+        lines.append("## Заметки о встрече")
+        for note in notes:
+            lines.append(f"- {note.get('topic', '')}")
+            for point in note.get("points") or []:
+                lines.append(f"  - {point}")
         lines.append("")
 
-    block("Участники", analysis.get("participants") or [])
-    block("Упоминались", analysis.get("mentioned") or [])
-    block("Темы", analysis.get("topics") or [])
-    block("Решения", analysis.get("decisions") or [])
+    if analysis.get("decisions"):
+        lines.append("## Решения")
+        lines += [f"- {value}" for value in analysis["decisions"]]
+        lines.append("")
 
     todos = analysis.get("todos") or []
     if todos:
-        lines.append("## Поручения")
+        lines.append("## Дальнейшие шаги")
         for todo in todos:
             owner = str(todo.get("owner", "")).strip() or "не назначен"
             due = str(todo.get("due", "")).strip()
-            suffix = f" (срок: {due})" if due else ""
-            lines.append(f"- {todo.get('task', '')} — {owner}{suffix}")
+            lines.append(f"- {todo.get('task', '')}")
+            lines.append(f"  - {owner}" + (f", срок: {due}" if due else ""))
         lines.append("")
 
-    block("Риски", analysis.get("risks") or [])
-    block("Открытые вопросы", analysis.get("questions") or [])
+    questions = analysis.get("questions") or []
+    risks = analysis.get("risks") or []
+    if questions or risks:
+        lines.append("## Осталось нерешённым")
+        for value in questions:
+            lines.append(f"- Вопрос без ответа: {value}")
+        for value in risks:
+            lines.append(f"- Риск: {value}")
+        lines.append("")
 
-    path.write_text("\n".join(lines), encoding="utf-8")
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -2685,7 +2762,9 @@ def run_pipeline(
     write_transcript_docx(paths.out_dir / TRANSCRIPT_DOCX, utterances, title)
     if with_summary:
         write_summary_docx(paths.out_dir / SUMMARY_DOCX, state.analysis, warnings)
-        write_mindmap(paths.out_dir / MINDMAP_MD, state.analysis)
+        write_mindmap(paths.out_dir / MINDMAP_MD, state.analysis,
+                      {"date": datetime.now().strftime("%Y-%m-%d"),
+                       "duration": state.duration})
         write_json(paths.extra_dir / "final_analysis.json", state.analysis)
 
     if not keep_audio:
@@ -2755,7 +2834,9 @@ def summarize_existing(result_dir: Path) -> int:
     warnings = list(data.get("warnings", []))
     title = analysis.get("title") or result_dir.name.removesuffix("_result")
     write_summary_docx(result_dir / SUMMARY_DOCX, analysis, warnings)
-    write_mindmap(result_dir / MINDMAP_MD, analysis)
+    write_mindmap(result_dir / MINDMAP_MD, analysis,
+                  {"date": str(data.get("created_at", ""))[:10],
+                   "duration": data.get("duration")})
     write_json(extra_dir / "final_analysis.json", analysis)
     # Заголовок стенограммы до анализа был техническим - именем файла.
     # Теперь известно настоящее название встречи, и документ стоит обновить.
