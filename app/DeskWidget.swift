@@ -14,7 +14,7 @@ final class DeskWidget: NSPanel, NSWindowDelegate {
     private static let place = "ru.slavator.widget.origin"
 
     init(library: Library, capture: LiveCapture, pipeline: Pipeline) {
-        super.init(contentRect: NSRect(x: 0, y: 0, width: 326, height: 188),
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 212, height: 86),
                    styleMask: [.borderless, .nonactivatingPanel],
                    backing: .buffered, defer: false)
         isOpaque = false
@@ -68,67 +68,54 @@ private struct DeskWidgetView: View {
     private var p: Palette { library.palette }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        // Ровно две строки: выбор источника и действие. Ни заголовка, ни
+        // пояснения — на рабочем столе виджет соседствует с обоями и чужими
+        // значками, и каждая лишняя строка там дороже, чем в окне. Что делает
+        // кнопка, сказано на самой кнопке.
+        VStack(spacing: 7) {
             if capture.isRecording { recording } else { idle }
         }
-        .padding(16)
-        .frame(width: 326, height: 188, alignment: .topLeading)
+        .padding(9)
+        .frame(width: 212, height: 86)
         .background(p.surface)
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(p.line2, lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(p.line2, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 14))
         .environment(\.palette, p)
     }
 
-    private var idle: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: "mic")
-                    .font(.system(size: 19)).foregroundStyle(p.accent2).frame(width: 26)
-                Text("Слушать встречу").font(Kind.strong(14.5)).foregroundStyle(p.text)
-                Spacer()
-            }
-            Segmented(options: [("sys", "Звонок"), ("mic", "Только микрофон")],
-                      selection: $source)
-                .padding(.top, 12)
-            Text(source == "sys"
-                 ? "Собеседников из динамиков и вас с микрофона"
-                 : "Только микрофон — для встречи в одной комнате")
-                .font(Kind.body(12)).foregroundStyle(p.muted)
-                .padding(.top, 6)
-            Spacer(minLength: 0)
-            Button("Начать слушать") {
-                capture.start(source: source == "mic" ? .microphone : .meeting,
-                              folder: URL(fileURLWithPath: library.settings.results_dir))
-            }
-            .buttonStyle(PrimaryButton(wide: true))
-            if let failure = capture.failure {
-                Text(failure).font(Kind.body(11)).foregroundStyle(p.warn)
-                    .lineLimit(2).padding(.top, 8)
-            }
+    @ViewBuilder private var idle: some View {
+        // «Только микрофон» ужато до «Микрофона»: в две колонки такой ширины
+        // длинная подпись сжимает соседнюю.
+        Segmented(options: [("sys", "Звонок"), ("mic", "Микрофон")],
+                  selection: $source, compact: true)
+        Button(capture.failure == nil ? "Начать слушать" : "Повторить") {
+            capture.start(source: source == "mic" ? .microphone : .meeting,
+                          folder: URL(fileURLWithPath: library.settings.results_dir))
         }
+        .buttonStyle(PrimaryButton(wide: true))
+        // Причину отказа целиком показывает окно: здесь для неё нет места, а
+        // обрезанная на полуслове ошибка хуже её отсутствия.
+        .help(capture.failure ?? "")
     }
 
-    private var recording: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 10) {
-                Circle().fill(p.warn).frame(width: 9, height: 9)
-                    .opacity(pulse ? 0.35 : 1)
-                    .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true),
-                               value: pulse)
-                Text("Идёт запись").font(Kind.strong(14.5)).foregroundStyle(p.text)
-                Spacer()
-            }
-            Text(clock).font(Kind.title(30)).foregroundStyle(p.text)
-                .monospacedDigit().padding(.top, 8)
-            Text(source == "mic" ? "Только микрофон" : "Звонок")
-                .font(Kind.body(12)).foregroundStyle(p.muted)
+    @ViewBuilder private var recording: some View {
+        HStack(spacing: 8) {
+            Circle().fill(p.warn).frame(width: 8, height: 8)
+                .opacity(pulse ? 0.35 : 1)
+                .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true),
+                           value: pulse)
+            Text(clock).font(.system(size: 17, weight: .semibold))
+                .monospacedDigit().foregroundStyle(p.text)
             Spacer(minLength: 0)
-            Button("Остановить и обработать") {
-                stopAndProcess(capture: capture, pipeline: pipeline, library: library)
-            }
-            .buttonStyle(QuietButton(wide: true))
+            Text(source == "mic" ? "микрофон" : "звонок")
+                .font(Kind.body(11)).foregroundStyle(p.muted)
         }
+        .frame(height: 31)
         .onAppear { pulse = true }
+        Button("Остановить") {
+            stopAndProcess(capture: capture, pipeline: pipeline, library: library)
+        }
+        .buttonStyle(QuietButton(wide: true))
     }
 
     private var clock: String {
