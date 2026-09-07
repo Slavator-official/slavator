@@ -559,7 +559,12 @@ extension RecordsScreen {
     /// единственный, которому нужна языковая модель. Пока его не просили,
     /// в колонке стоит кнопка, а не прочерк.
     @ViewBuilder func summaryButton(for record: Record) -> some View {
-        if record.summary != nil {
+        // Резюме выключено в настройках — кнопки нет. Уже собранное резюме
+        // при этом остаётся доступным: выключатель про будущую работу, а не
+        // про то, чтобы прятать сделанное.
+        if !library.settings.make_summary && record.summary == nil {
+            EmptyView()
+        } else if record.summary != nil {
             fileButton(record.summary, hint: "Открыть резюме встречи")
         } else if pipeline.isRunning {
             Text("занято").font(Kind.body(12.5)).foregroundStyle(library.palette.faint)
@@ -942,6 +947,41 @@ struct SettingsScreen: View {
                         get: { library.settings.meeting_watch_enabled },
                         set: { library.settings.meeting_watch_enabled = $0; library.settings.save() }))
                         .labelsHidden().toggleStyle(.switch)
+                }
+            }
+
+            Card {
+                Text("Что собирать после расшифровки").font(Kind.head(16))
+                Text("Чем больше разделов, тем дольше считается резюме: модель пишет ровно то, что у неё просят")
+                    .font(Kind.body(12.5)).foregroundStyle(p.muted).padding(.bottom, 12)
+                SettingRow(title: "Резюме встречи",
+                           subtitle: "Разбор языковой моделью — самая долгая часть обработки") {
+                    Toggle("", isOn: Binding(
+                        get: { library.settings.make_summary },
+                        set: { library.settings.make_summary = $0; library.settings.save() }))
+                        .labelsHidden().toggleStyle(.switch)
+                }
+                Divider().overlay(p.line2)
+                SettingRow(title: "Майндкарта",
+                           subtitle: "Файл 03_mindmap.md — открывается майндмап-программами") {
+                    Toggle("", isOn: Binding(
+                        get: { library.settings.make_mindmap },
+                        set: { library.settings.make_mindmap = $0; library.settings.save() }))
+                        .labelsHidden().toggleStyle(.switch)
+                }
+                if library.settings.make_summary {
+                    Divider().overlay(p.line2)
+                    Text("Разделы протокола").font(Kind.body(13)).foregroundStyle(p.muted)
+                        .padding(.top, 10)
+                    ForEach(SummaryBlock.all) { block in
+                        SettingRow(title: block.title, subtitle: block.hint) {
+                            Toggle("", isOn: Binding(
+                                get: { library.settings.hasBlock(block.id) },
+                                set: { library.settings.setBlock(block.id, $0)
+                                       library.settings.save() }))
+                                .labelsHidden().toggleStyle(.switch)
+                        }
+                    }
                 }
             }
 

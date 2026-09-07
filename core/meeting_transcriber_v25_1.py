@@ -1963,76 +1963,143 @@ MAP_SYSTEM = (
     "Перед каждой репликой указано имя говорящего. Отвечай ТОЛЬКО валидным JSON."
 )
 
-MAP_TEMPLATE = """Это фрагмент {index} из {total} стенограммы встречи.
-
-Верни JSON строго такой структуры:
-{{
-  "notes": [{{"topic": "тема разговора", "points": ["что именно по ней сказали: суть, цифры, имена, договорённости"]}}],
-  "decisions": ["принятые решения"],
-  "todos": [{{"task": "что сделать", "owner": "кто именно, из имён в стенограмме", "due": "срок или пустая строка"}}],
-  "risks": ["риски и проблемы"],
-  "questions": ["открытые вопросы без ответа"],
-  "mentioned": ["имена людей, о которых говорили"]
-}}
-
-Правила:
-- owner бери ТОЛЬКО из имён говорящих в стенограмме; если исполнитель не назван, ставь "".
-- points пиши предложениями по существу: что решили, какие числа и сроки назвали, кто
-  что предложил. «Обсудили сроки» - бесполезный пункт, «Сроки сдвинули на 20.08» - полезный.
-- не выдумывай факты, которых нет в тексте;
-- пустой список лучше, чем придуманный пункт.
-
-Фрагмент стенограммы:
-{chunk}"""
-
-SOLO_TEMPLATE = """Это полная стенограмма встречи.
-
-Верни JSON строго такой структуры:
-{{
-  "title": "короткое название встречи",
-  "summary": "связное резюме встречи, 5-10 предложений",
-  "notes": [{{"topic": "тема разговора", "points": ["что именно по ней сказали: суть, цифры, имена, договорённости"]}}],
-  "decisions": ["принятые решения"],
-  "todos": [{{"task": "что сделать", "owner": "кто именно, из имён в стенограмме", "due": "срок или пустая строка"}}],
-  "risks": ["риски и проблемы"],
-  "questions": ["открытые вопросы без ответа"],
-  "mentioned": ["имена людей, о которых говорили"]
-}}
-
-Правила:
-- owner бери ТОЛЬКО из имён говорящих в стенограмме; если исполнитель не назван, ставь "".
-- points пиши предложениями по существу: что решили, какие числа и сроки назвали, кто
-  что предложил. «Обсудили сроки» - бесполезный пункт, «Сроки сдвинули на 20.08» - полезный.
-- не выдумывай факты, которых нет в тексте;
-- пустой список лучше, чем придуманный пункт.
-
-Стенограмма:
-{chunk}"""
-
-
 REDUCE_SYSTEM = (
     "Ты сводишь частичные разборы одной встречи в итоговый протокол на русском языке. "
     "Отвечай ТОЛЬКО валидным JSON."
 )
 
-REDUCE_TEMPLATE = """Ниже - разборы последовательных фрагментов одной встречи.
-Объедини их, убрав дубли и противоречия.
+# Блоки протокола.
+#
+# Каждый блок - это строка схемы для модели и раздел в документе. Выключенный
+# блок у модели не спрашивается вовсе, и ответ становится короче ровно на
+# него. Это не только про вкус: сочинение ответа - самая долгая часть разбора,
+# и половина выключенных блоков это половина времени.
+#
+# Порядок словаря - порядок разделов в документах.
+SUMMARY_BLOCKS: dict[str, dict[str, Any]] = {
+    "info": {
+        "title": "Информация о встрече",
+        # Дата, длительность и участники берутся из стенограммы. У модели
+        # спрашиваются только те, кого упоминали, но кто сам не говорил.
+        "schema": ['"mentioned": ["имена людей, о которых говорили"]'],
+    },
+    "summary": {
+        "title": "Резюме",
+        "schema": ['"summary": "связное резюме встречи, 5-10 предложений"'],
+        "final_only": True,     # по фрагменту резюме не пишут, только по целому
+    },
+    "notes": {
+        "title": "Заметки о встрече",
+        "schema": ['"notes": [{"topic": "тема разговора", "points": '
+                   '["что именно по ней сказали: суть, цифры, имена, договорённости"]}]'],
+    },
+    "decisions": {
+        "title": "Решения",
+        "schema": ['"decisions": ["принятые решения"]'],
+    },
+    "todos": {
+        "title": "Дальнейшие шаги",
+        "schema": ['"todos": [{"task": "что сделать", '
+                   '"owner": "кто именно, из имён в стенограмме", '
+                   '"due": "срок или пустая строка"}]'],
+    },
+    "open": {
+        "title": "Осталось нерешённым",
+        "schema": ['"questions": ["открытые вопросы без ответа"]',
+                   '"risks": ["риски и проблемы"]'],
+    },
+    "numbers": {
+        "title": "Цифры и сроки",
+        "schema": ['"numbers": ["названные числа, суммы, даты и сроки - '
+                   'каждое с тем, к чему относится"]'],
+    },
+    "disputes": {
+        "title": "Разногласия",
+        "schema": ['"disputes": [{"point": "в чём разошлись", '
+                   '"sides": ["кто и какую позицию занял"]}]'],
+    },
+    "quotes": {
+        "title": "Дословно",
+        "schema": ['"quotes": [{"who": "имя говорящего", "text": "фраза дословно"}]'],
+    },
+    "next": {
+        "title": "Следующая встреча",
+        "schema": ['"next_meeting": "когда договорились встретиться и о чём, '
+                   'или пустая строка"'],
+        "final_only": True,
+    },
+    "blockers": {
+        "title": "Чего ждём от других",
+        "schema": ['"blockers": ["чего ждут от людей вне встречи: от кого и чего именно"]'],
+    },
+    "timeline": {
+        "title": "Хронология",
+        "schema": ['"timeline": [{"time": "чч:мм:сс", '
+                   '"what": "что происходило в этот момент встречи"}]'],
+    },
+}
 
-Верни JSON строго такой структуры:
-{{
-  "title": "короткое название встречи",
-  "summary": "связное резюме встречи, 5-10 предложений",
-  "participants": ["имена участников из стенограммы"],
-  "notes": [{{"topic": "тема разговора", "points": ["что именно по ней сказали"]}}],
-  "decisions": ["решения"],
-  "todos": [{{"task": "...", "owner": "...", "due": "..."}}],
-  "risks": ["риски"],
-  "questions": ["открытые вопросы"],
-  "mentioned": ["имена людей, о которых говорили"]
-}}
+DEFAULT_BLOCKS = ["info", "summary", "notes", "decisions", "todos", "open"]
 
-Разборы фрагментов:
-{parts}"""
+# Майндкарту можно не строить: кому-то нужен только документ.
+MAKE_MINDMAP = os.environ.get("MEETING_TRANSCRIBER_MINDMAP", "1") not in ("0", "false", "no")
+
+
+def chosen_blocks() -> list[str]:
+    """Какие блоки собирать. Порядок всегда канонический, а не как записали."""
+    raw = os.environ.get("MEETING_TRANSCRIBER_SUMMARY_BLOCKS", "").strip()
+    if not raw:
+        return list(DEFAULT_BLOCKS)
+    asked = {name.strip() for name in raw.split(",") if name.strip()}
+    picked = [name for name in SUMMARY_BLOCKS if name in asked]
+    return picked or list(DEFAULT_BLOCKS)
+
+
+RULES = """Правила:
+- owner бери ТОЛЬКО из имён говорящих в стенограмме; если исполнитель не назван, ставь "".
+- points пиши предложениями по существу: что решили, какие числа и сроки назвали, кто
+  что предложил. «Обсудили сроки» - бесполезный пункт, «Сроки сдвинули на 20.08» - полезный.
+- не выдумывай факты, которых нет в тексте;
+- пустой список лучше, чем придуманный пункт."""
+
+
+def _schema(blocks: Sequence[str], final: bool) -> str:
+    """Схема ответа из включённых блоков.
+
+    Собирается строкой, а не шаблоном с подстановкой: в схеме фигурные скобки
+    на каждой строке, и экранировать их ради format() значит переписывать
+    схему дважды.
+    """
+    lines: list[str] = []
+    if final:
+        lines.append('"title": "короткое название встречи"')
+    for name in blocks:
+        block = SUMMARY_BLOCKS[name]
+        if block.get("final_only") and not final:
+            continue
+        lines.extend(block["schema"])
+    if not lines:
+        lines.append('"title": "короткое название встречи"')
+    return "{\n  " + ",\n  ".join(lines) + "\n}"
+
+
+def map_prompt(index: int, total: int, chunk: str, blocks: Sequence[str]) -> str:
+    return (f"Это фрагмент {index} из {total} стенограммы встречи.\n\n"
+            f"Верни JSON строго такой структуры:\n{_schema(blocks, final=False)}\n\n"
+            f"{RULES}\n\nФрагмент стенограммы:\n{chunk}")
+
+
+def solo_prompt(chunk: str, blocks: Sequence[str]) -> str:
+    return ("Это полная стенограмма встречи.\n\n"
+            f"Верни JSON строго такой структуры:\n{_schema(blocks, final=True)}\n\n"
+            f"{RULES}\n\nСтенограмма:\n{chunk}")
+
+
+def reduce_prompt(parts: str, blocks: Sequence[str]) -> str:
+    return ("Ниже - разборы последовательных фрагментов одной встречи.\n"
+            "Объедини их, убрав дубли и противоречия.\n\n"
+            f"Верни JSON строго такой структуры:\n{_schema(blocks, final=True)}\n\n"
+            f"Разборы фрагментов:\n{parts}")
 
 
 def display_names(utterances: Sequence[Utterance]) -> dict[str, str]:
@@ -2194,7 +2261,8 @@ def _merge_notes(target: list[dict[str, Any]], items: Iterable[Any]) -> None:
             target.append({"topic": topic, "points": fresh})
 
 
-def reduce_partials(partials: list[dict[str, Any]]) -> dict[str, Any]:
+def reduce_partials(partials: list[dict[str, Any]],
+                    blocks: Sequence[str]) -> dict[str, Any]:
     """Свести разборы фрагментов в итоговый протокол.
 
     Разборы уходили в модель одним куском и с отступами. На часовой встрече
@@ -2209,7 +2277,7 @@ def reduce_partials(partials: list[dict[str, Any]]) -> dict[str, Any]:
     text = json.dumps(partials, ensure_ascii=False)
     if len(partials) == 1 or len(text) <= budget:
         return parse_json_response(
-            ollama_chat(REDUCE_SYSTEM, REDUCE_TEMPLATE.format(parts=text)))
+            ollama_chat(REDUCE_SYSTEM, reduce_prompt(text, blocks)))
 
     groups: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
@@ -2227,13 +2295,16 @@ def reduce_partials(partials: list[dict[str, Any]]) -> dict[str, Any]:
     # есть: обрезанный ответ лучше бесконечного деления.
     if len(groups) <= 1:
         return parse_json_response(
-            ollama_chat(REDUCE_SYSTEM, REDUCE_TEMPLATE.format(parts=text)))
+            ollama_chat(REDUCE_SYSTEM, reduce_prompt(text, blocks)))
 
     log(f"    разборов много, свожу в {len(groups)} захода")
-    return reduce_partials([reduce_partials(group) for group in groups])
+    return reduce_partials([reduce_partials(group, blocks) for group in groups], blocks)
 
 
-def analyze_meeting(utterances: list[Utterance], extra_dir: Path) -> dict[str, Any]:
+def analyze_meeting(utterances: list[Utterance], extra_dir: Path,
+                    blocks: Optional[Sequence[str]] = None) -> dict[str, Any]:
+    blocks = list(blocks) if blocks else chosen_blocks()
+    log(f"    разделы: {', '.join(SUMMARY_BLOCKS[b]['title'] for b in blocks)}")
     names = display_names(utterances)
     text = transcript_as_text(utterances, names)
     chunks = chunk_transcript(text, OLLAMA_NUM_CTX)
@@ -2246,9 +2317,9 @@ def analyze_meeting(utterances: list[Utterance], extra_dir: Path) -> dict[str, A
         # пользы — а на этой машине каждый запрос стоит минуты.
         stage_pct("summary", 0.2, "разбор встречи")
         final = parse_json_response(
-            ollama_chat(MAP_SYSTEM, SOLO_TEMPLATE.format(chunk=chunks[0])))
+            ollama_chat(MAP_SYSTEM, solo_prompt(chunks[0], blocks)))
         write_json(extra_dir / "initial_analysis.json", [final])
-        return _collect(final, [], utterances, names)
+        return _collect(final, [], utterances, names, blocks)
 
     partials: list[dict[str, Any]] = []
     failed = 0
@@ -2257,7 +2328,7 @@ def analyze_meeting(utterances: list[Utterance], extra_dir: Path) -> dict[str, A
         try:
             raw = ollama_chat(
                 MAP_SYSTEM,
-                MAP_TEMPLATE.format(index=index, total=len(chunks), chunk=chunk),
+                map_prompt(index, len(chunks), chunk, blocks),
             )
             partials.append(parse_json_response(raw))
         except LLMError as exc:
@@ -2274,12 +2345,13 @@ def analyze_meeting(utterances: list[Utterance], extra_dir: Path) -> dict[str, A
     write_json(extra_dir / "initial_analysis.json", partials)
 
     stage_pct("summary", len(chunks) / (len(chunks) + 1), "сведение фрагментов")
-    final = reduce_partials(partials)
-    return _collect(final, partials, utterances, names)
+    final = reduce_partials(partials, blocks)
+    return _collect(final, partials, utterances, names, blocks)
 
 
 def _collect(final: dict[str, Any], partials: list[dict[str, Any]],
-             utterances: list[Utterance], names: dict[str, str]) -> dict[str, Any]:
+             utterances: list[Utterance], names: dict[str, str],
+             blocks: Sequence[str]) -> dict[str, Any]:
     """Собрать итоговый разбор из ответа модели и частичных разборов."""
     speakers = list(dict.fromkeys(names.values()))
     analysis: dict[str, Any] = {
@@ -2295,13 +2367,20 @@ def _collect(final: dict[str, Any], partials: list[dict[str, Any]],
         "risks": [],
         "questions": [],
         "todos": [],
+        "numbers": [],
+        "blockers": [],
+        "disputes": [],
+        "quotes": [],
+        "timeline": [],
+        "next_meeting": str(final.get("next_meeting", "")).strip(),
+        "blocks": list(blocks),
     }
     analysis["mentioned"] = mentioned_people(
         [name for source in [final] + partials for name in (source.get("mentioned") or [])],
         speakers,
     )
 
-    for key in ("decisions", "risks", "questions"):
+    for key in ("decisions", "risks", "questions", "numbers", "blockers"):
         _merge_unique(analysis[key], final.get(key, []))
         for partial in partials:
             _merge_unique(analysis[key], partial.get(key, []))
@@ -2332,7 +2411,50 @@ def _collect(final: dict[str, Any], partials: list[dict[str, Any]],
                 }
             )
 
-    if not analysis["summary"]:
+    for source in [final] + partials:
+        for row in source.get("disputes") or []:
+            if not isinstance(row, dict):
+                continue
+            point = str(row.get("point", "")).strip()
+            if not point:
+                continue
+            sides = [str(v).strip() for v in (row.get("sides") or []) if str(v).strip()]
+            for existing in analysis["disputes"]:
+                if _normalized(existing["point"]) == _normalized(point):
+                    _merge_unique(existing["sides"], sides)
+                    break
+            else:
+                fresh: list[str] = []
+                _merge_unique(fresh, sides)
+                analysis["disputes"].append({"point": point, "sides": fresh})
+
+    seen_moments: set[str] = set()
+    for source in [final] + partials:
+        for row in source.get("timeline") or []:
+            if not isinstance(row, dict):
+                continue
+            what = str(row.get("what", "")).strip()
+            when = str(row.get("time", "")).strip()
+            key = _normalized(f"{when} {what}")
+            if not what or key in seen_moments:
+                continue
+            seen_moments.add(key)
+            analysis["timeline"].append({"time": when, "what": what})
+    analysis["timeline"].sort(key=lambda row: row["time"])
+
+    seen_quotes: set[str] = set()
+    for source in [final] + partials:
+        for row in source.get("quotes") or []:
+            if not isinstance(row, dict):
+                continue
+            text = str(row.get("text", "")).strip()
+            key = _normalized(text)
+            if not text or key in seen_quotes:
+                continue
+            seen_quotes.add(key)
+            analysis["quotes"].append({"who": str(row.get("who", "")).strip(), "text": text})
+
+    if "summary" in blocks and not analysis["summary"]:
         # Модель иногда возвращает всё, кроме связного текста. Выбрасывать
         # из-за одного поля готовый разбор - терять и решения, и поручения,
         # ради которых всё и считалось.
@@ -2365,6 +2487,148 @@ def _docx():
             "Не установлен python-docx.", "pip install python-docx"
         ) from exc
     return __import__("docx")
+
+
+def write_transcript_docx(path: Path, utterances: list[Utterance], title: str) -> None:
+    docx = _docx()
+    document = docx.Document()
+    document.add_heading(title or "Стенограмма встречи", level=0)
+    document.add_paragraph(datetime.now().strftime("Обработано: %d.%m.%Y %H:%M"))
+
+    names = display_names(utterances)
+    current = None
+    for item in utterances:
+        who = names.get(item.speaker_id or "", item.label)
+        if who != current:
+            current = who
+            heading = document.add_paragraph()
+            run = heading.add_run(current)
+            run.bold = True
+        stamp = time.strftime("%H:%M:%S", time.gmtime(max(0, item.start)))
+        document.add_paragraph(f"[{stamp}] {item.text}")
+
+    document.save(str(path))
+
+
+def _block_rows(analysis: dict[str, Any], name: str) -> list[tuple[int, str]]:
+    """Содержимое блока как плоские строки с уровнем вложенности.
+
+    Один и тот же разбор идёт и в документ, и в майндкарту. Разметка у них
+    разная, а содержание обязано совпадать - иначе два источника правды
+    разъедутся на первой же правке.
+    """
+    rows: list[tuple[int, str]] = []
+    if name == "info":
+        if analysis.get("participants"):
+            rows.append((0, "Участники: " + ", ".join(analysis["participants"])))
+        if analysis.get("mentioned"):
+            rows.append((0, "Упоминались: " + ", ".join(analysis["mentioned"])))
+    elif name == "notes":
+        for note in analysis.get("notes") or []:
+            rows.append((0, str(note.get("topic", ""))))
+            rows += [(1, str(point)) for point in note.get("points") or []]
+    elif name == "todos":
+        for todo in analysis.get("todos") or []:
+            rows.append((0, str(todo.get("task", ""))))
+            owner = str(todo.get("owner", "")).strip() or "не назначен"
+            due = str(todo.get("due", "")).strip()
+            rows.append((1, owner + (f", срок: {due}" if due else "")))
+    elif name == "open":
+        rows += [(0, f"Вопрос без ответа: {v}") for v in analysis.get("questions") or []]
+        rows += [(0, f"Риск: {v}") for v in analysis.get("risks") or []]
+    elif name == "disputes":
+        for row in analysis.get("disputes") or []:
+            rows.append((0, str(row.get("point", ""))))
+            rows += [(1, str(side)) for side in row.get("sides") or []]
+    elif name == "quotes":
+        for row in analysis.get("quotes") or []:
+            who = str(row.get("who", "")).strip()
+            rows.append((0, (f"{who}: " if who else "") + f"«{row.get('text', '')}»"))
+    elif name == "timeline":
+        for row in analysis.get("timeline") or []:
+            when = str(row.get("time", "")).strip()
+            rows.append((0, (f"{when} — " if when else "") + str(row.get("what", ""))))
+    elif name == "next":
+        if analysis.get("next_meeting"):
+            rows.append((0, str(analysis["next_meeting"])))
+    elif name == "summary":
+        if analysis.get("summary"):
+            rows.append((0, str(analysis["summary"])))
+    else:
+        rows += [(0, str(value)) for value in analysis.get(name) or []]
+    return rows
+
+
+def write_summary_docx(path: Path, analysis: dict[str, Any], warnings: list[str]) -> None:
+    docx = _docx()
+    document = docx.Document()
+    document.add_heading(analysis.get("title") or "Итоги встречи", level=0)
+    document.add_paragraph(datetime.now().strftime("Обработано: %d.%m.%Y %H:%M"))
+
+    for name in analysis.get("blocks") or DEFAULT_BLOCKS:
+        rows = _block_rows(analysis, name)
+        if not rows:
+            continue
+        document.add_heading(SUMMARY_BLOCKS[name]["title"], level=1)
+        # Резюме и договорённость о следующей встрече - связный текст, ему
+        # маркер списка не нужен.
+        if name in ("summary", "next"):
+            document.add_paragraph(rows[0][1])
+            continue
+        if name == "todos":
+            table = document.add_table(rows=1, cols=3)
+            table.style = "Table Grid"
+            header = table.rows[0].cells
+            header[0].text, header[1].text, header[2].text = "Задача", "Исполнитель", "Срок"
+            for todo in analysis.get("todos") or []:
+                row = table.add_row().cells
+                row[0].text = str(todo.get("task", ""))
+                row[1].text = str(todo.get("owner", "")) or "не назначен"
+                row[2].text = str(todo.get("due", "")) or "-"
+            continue
+        for level, text in rows:
+            document.add_paragraph(text, style="List Bullet" if level == 0 else "List Bullet 2")
+
+    if warnings:
+        document.add_heading("Замечания к обработке", level=1)
+        for message in warnings:
+            document.add_paragraph(str(message), style="List Bullet")
+
+    document.save(str(path))
+
+
+def write_mindmap(path: Path, analysis: dict[str, Any],
+                  meta: Optional[dict[str, Any]] = None) -> None:
+    """Майндкарта встречи.
+
+    Плоский список из заголовка и однострочных пунктов майндмап-программы
+    рисуют россыпью одинаковых коробок: у веток нет глубины, а темой служит
+    ярлык в три слова, по которому через неделю не вспомнить, о чём была
+    речь. Поэтому карта повторяет строение протокола, а под каждой темой
+    висит то, что по ней сказали.
+    """
+    meta = meta or {}
+    day = str(meta.get("date") or "").strip()
+    title = analysis.get("title") or "Встреча"
+    lines = [f"# {day + ' ' if day else ''}{title}", ""]
+
+    for name in analysis.get("blocks") or DEFAULT_BLOCKS:
+        rows = _block_rows(analysis, name)
+        head: list[str] = []
+        if name == "info":
+            if day:
+                head.append(f"- Дата: {day}")
+            seconds = float(meta.get("duration") or 0)
+            if seconds > 0:
+                head.append(f"- Длительность: {max(1, round(seconds / 60))} мин")
+        if not rows and not head:
+            continue
+        lines.append(f"## {SUMMARY_BLOCKS[name]['title']}")
+        lines += head
+        lines += [("  " * level) + f"- {text}" for level, text in rows]
+        lines.append("")
+
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
 def write_transcript_docx(path: Path, utterances: list[Utterance], title: str) -> None:
@@ -2762,9 +3026,10 @@ def run_pipeline(
     write_transcript_docx(paths.out_dir / TRANSCRIPT_DOCX, utterances, title)
     if with_summary:
         write_summary_docx(paths.out_dir / SUMMARY_DOCX, state.analysis, warnings)
-        write_mindmap(paths.out_dir / MINDMAP_MD, state.analysis,
-                      {"date": datetime.now().strftime("%Y-%m-%d"),
-                       "duration": state.duration})
+        if MAKE_MINDMAP:
+            write_mindmap(paths.out_dir / MINDMAP_MD, state.analysis,
+                          {"date": datetime.now().strftime("%Y-%m-%d"),
+                           "duration": state.duration})
         write_json(paths.extra_dir / "final_analysis.json", state.analysis)
 
     if not keep_audio:
@@ -2834,9 +3099,10 @@ def summarize_existing(result_dir: Path) -> int:
     warnings = list(data.get("warnings", []))
     title = analysis.get("title") or result_dir.name.removesuffix("_result")
     write_summary_docx(result_dir / SUMMARY_DOCX, analysis, warnings)
-    write_mindmap(result_dir / MINDMAP_MD, analysis,
-                  {"date": str(data.get("created_at", ""))[:10],
-                   "duration": data.get("duration")})
+    if MAKE_MINDMAP:
+        write_mindmap(result_dir / MINDMAP_MD, analysis,
+                      {"date": str(data.get("created_at", ""))[:10],
+                       "duration": data.get("duration")})
     write_json(extra_dir / "final_analysis.json", analysis)
     # Заголовок стенограммы до анализа был техническим - именем файла.
     # Теперь известно настоящее название встречи, и документ стоит обновить.
@@ -3102,6 +3368,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--language", default=None, help="язык записи (ru, en, auto)")
     parser.add_argument("--no-diarization", action="store_true", help="без разделения на спикеров")
     parser.add_argument("--no-summary", action="store_true", help="без анализа через Ollama")
+    parser.add_argument("--no-mindmap", action="store_true", help="без майндкарты")
     parser.add_argument("--keep-audio", action="store_true", help="не удалять рабочий WAV")
     parser.add_argument("--my-voice", type=Path, default=None,
                         help="отдельная дорожка с вашим голосом (микрофон)")
@@ -3132,6 +3399,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     speak_utf8()
     args = build_parser().parse_args(argv)
+    # Флаг сильнее окружения: окружение приходит из настроек приложения, а
+    # флагом пользуются руками, и разовое решение должно побеждать.
+    if args.no_mindmap:
+        globals()["MAKE_MINDMAP"] = False
     if args.language:
         WHISPER_LANGUAGE = args.language
 

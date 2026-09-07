@@ -117,6 +117,15 @@ struct Settings: Codable {
     /// Следить, не началась ли встреча, и предлагать её записать.
     var meeting_watch_enabled = false
 
+    // MARK: что собирать после расшифровки
+    /// Собирать резюме языковой моделью. Расшифровка ценна и без него.
+    var make_summary = true
+    /// Строить майндкарту.
+    var make_mindmap = true
+    /// Разделы протокола через запятую. Чего здесь нет, у модели не
+    /// спрашивается вовсе — и ответ она пишет ровно на столько же короче.
+    var summary_blocks = "info,summary,notes,decisions,todos,open"
+
     // MARK: диктовка
     var dictation_enabled = false
     /// small — текст идёт на ходу; large-v3-turbo — точнее, но ждать 3 секунды.
@@ -154,6 +163,9 @@ struct Settings: Codable {
         menubar_enabled = read(.menubar_enabled, menubar_enabled)
         widget_size = read(.widget_size, widget_size)
         meeting_watch_enabled = read(.meeting_watch_enabled, meeting_watch_enabled)
+        make_summary = read(.make_summary, make_summary)
+        make_mindmap = read(.make_mindmap, make_mindmap)
+        summary_blocks = read(.summary_blocks, summary_blocks)
         dictation_enabled = read(.dictation_enabled, dictation_enabled)
         dictation_model = read(.dictation_model, dictation_model)
         dictation_hotkey = read(.dictation_hotkey, dictation_hotkey)
@@ -175,6 +187,24 @@ struct Settings: Codable {
         try? data.write(to: Paths.settings, options: .atomic)
     }
 
+    var chosenBlocks: [String] {
+        summary_blocks.split(separator: ",").map {
+            $0.trimmingCharacters(in: .whitespaces)
+        }.filter { !$0.isEmpty }
+    }
+
+    func hasBlock(_ id: String) -> Bool { chosenBlocks.contains(id) }
+
+    /// Порядок разделов всегда канонический, а не тот, в котором их включали:
+    /// иначе протокол у одного человека начинался бы с поручений, а у
+    /// другого - с рисков, и сравнить их было бы нельзя.
+    mutating func setBlock(_ id: String, _ on: Bool) {
+        var picked = Set(chosenBlocks)
+        if on { picked.insert(id) } else { picked.remove(id) }
+        summary_blocks = SummaryBlock.all.map(\.id).filter { picked.contains($0) }
+            .joined(separator: ",")
+    }
+
     var palette: Palette {
         switch theme {
         case "light": return .light
@@ -190,6 +220,44 @@ func NSAppearanceIsDark() -> Bool {
     }
     return false
 }
+
+/// Разделы протокола.
+///
+/// Список повторяет SUMMARY_BLOCKS в ядре. Держать его в двух местах
+/// приходится: ядро одно на три платформы и о SwiftUI ничего не знает, а
+/// подписи человеку нужны здесь. Порядок обязан совпадать.
+struct SummaryBlock: Identifiable {
+    let id: String
+    let title: String
+    let hint: String
+
+    static let all: [SummaryBlock] = [
+        .init(id: "info", title: "Информация о встрече",
+              hint: "Дата, длительность, участники и кого упоминали"),
+        .init(id: "summary", title: "Резюме",
+              hint: "Связный пересказ встречи на 5–10 предложений"),
+        .init(id: "notes", title: "Заметки о встрече",
+              hint: "Темы и то, что по каждой сказали"),
+        .init(id: "decisions", title: "Решения", hint: "Что решили"),
+        .init(id: "todos", title: "Дальнейшие шаги",
+              hint: "Задача, исполнитель, срок"),
+        .init(id: "open", title: "Осталось нерешённым",
+              hint: "Вопросы без ответа и риски"),
+        .init(id: "numbers", title: "Цифры и сроки",
+              hint: "Названные числа, суммы и даты — каждое с тем, к чему относится"),
+        .init(id: "disputes", title: "Разногласия",
+              hint: "В чём разошлись и кто какую позицию занял"),
+        .init(id: "quotes", title: "Дословно",
+              hint: "Ключевые фразы с автором"),
+        .init(id: "timeline", title: "Хронология",
+              hint: "Что когда происходило по времени встречи"),
+        .init(id: "next", title: "Следующая встреча",
+              hint: "О чём и когда договорились встретиться"),
+        .init(id: "blockers", title: "Чего ждём от других",
+              hint: "Зависимости от людей вне встречи"),
+    ]
+}
+
 
 // MARK: - Люди
 

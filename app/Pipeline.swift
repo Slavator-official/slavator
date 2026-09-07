@@ -154,6 +154,11 @@ final class Pipeline {
         if !library.settings.llm_model.isEmpty {
             env["MEETING_TRANSCRIBER_LLM"] = library.settings.llm_model
         }
+        // Чего в списке нет, у модели не спрашивается вовсе. Это не только про
+        // вкус: сочинение ответа — самая долгая часть разбора, и половина
+        // выключенных разделов это почти половина времени.
+        env["MEETING_TRANSCRIBER_SUMMARY_BLOCKS"] = library.settings.summary_blocks
+        env["MEETING_TRANSCRIBER_MINDMAP"] = library.settings.make_mindmap ? "1" : "0"
         process.environment = env
 
         let pipe = Pipe()
