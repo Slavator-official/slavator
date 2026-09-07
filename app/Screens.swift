@@ -293,7 +293,7 @@ struct MainScreen: View {
             HStack(alignment: .top, spacing: 14) {
                 VStack(alignment: .leading, spacing: 3) {
                     Eyebrow(text: "Обработка")
-                    Text(pipeline.stage).font(Kind.head(17)).padding(.top, 2)
+                    Text(pipeline.stage).font(Kind.head(17)).foregroundStyle(p.text).padding(.top, 2)
                     if !pipeline.detail.isEmpty {
                         Text(pipeline.detail).font(Kind.body(13)).foregroundStyle(p.muted)
                     }
@@ -336,7 +336,7 @@ struct MainScreen: View {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 4) {
                         Eyebrow(text: "Последняя встреча")
-                        Text(record.title).font(Kind.head(17)).lineLimit(1)
+                        Text(record.title).font(Kind.head(17)).foregroundStyle(p.text).lineLimit(1)
                     }
                     Spacer()
                     Button("Все записи") { screen = .records }
@@ -370,7 +370,7 @@ struct MainScreen: View {
     private var unknownCard: some View {
         Card {
             HStack {
-                Text(unknownTitle).font(Kind.head(16))
+                Text(unknownTitle).font(Kind.head(16)).foregroundStyle(p.text)
                 Spacer()
                 Button("Открыть") { screen = .newVoices }
                     .buttonStyle(.plain).font(Kind.body(13)).foregroundStyle(p.accent2)
@@ -565,7 +565,7 @@ extension RecordsScreen {
         if !library.settings.make_summary && record.summary == nil {
             EmptyView()
         } else if record.summary != nil {
-            fileButton(record.summary, hint: "Открыть резюме встречи")
+            fileButton(record.summary, hint: "Открыть саммари встречи")
         } else if pipeline.isRunning {
             Text("занято").font(Kind.body(12.5)).foregroundStyle(library.palette.faint)
         } else {
@@ -578,7 +578,7 @@ extension RecordsScreen {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("Собрать резюме, решения и поручения по этой встрече")
+            .help("Собрать саммари: решения, поручения и заметки")
         }
     }
 
@@ -605,7 +605,7 @@ struct SpeakersScreen: View {
             ScreenTitle(text: "Спикеры")
             Card {
                 HStack {
-                    Text("Все люди").font(Kind.head(16))
+                    Text("Все люди").font(Kind.head(16)).foregroundStyle(p.text)
                     Spacer()
                     if !library.unknown.isEmpty {
                         Button("Новые голоса · \(library.unknown.count)") { screen = .newVoices }
@@ -840,7 +840,7 @@ struct PersonScreen: View {
                     Spacer()
                 }
                 Card {
-                    Text("Образцы голоса").font(Kind.head(16)).padding(.bottom, 14)
+                    Text("Образцы голоса").font(Kind.head(16)).foregroundStyle(p.text).padding(.bottom, 14)
                     let samples = sampleFiles(person)
                     if samples.isEmpty {
                         Text("Образцов пока нет").font(Kind.body(13.5)).foregroundStyle(p.muted)
@@ -894,7 +894,7 @@ struct SettingsScreen: View {
             dictationCard
 
             Card {
-                Text("Общее").font(Kind.head(16)).padding(.bottom, 12)
+                Text("Общее").font(Kind.head(16)).foregroundStyle(p.text).padding(.bottom, 12)
                 SettingRow(title: "Ваше имя",
                            subtitle: "Так подписываются ваши реплики при записи звонка") {
                     TextField("Вы", text: Binding(
@@ -914,7 +914,7 @@ struct SettingsScreen: View {
             }
 
             Card {
-                Text("Быстрый доступ").font(Kind.head(16)).padding(.bottom, 12)
+                Text("Быстрый доступ").font(Kind.head(16)).foregroundStyle(p.text).padding(.bottom, 12)
                 SettingRow(title: "Значок в строке меню",
                            subtitle: "Начать запись, не открывая окно") {
                     Toggle("", isOn: Binding(
@@ -954,13 +954,13 @@ struct SettingsScreen: View {
             }
 
             Card {
-                Text("Что собирать после расшифровки").font(Kind.head(16))
-                Text("Чем больше разделов, тем дольше считается резюме: модель пишет ровно то, что у неё просят")
+                Text("Артефакты").font(Kind.head(16)).foregroundStyle(p.text)
+                Text("Что появится в папке встречи. Чем больше разделов, тем дольше счёт")
                     .font(Kind.body(12.5)).foregroundStyle(p.muted).padding(.bottom, 12)
                 // Резюме здесь главное, а не первое по алфавиту: майндкарта
                 // рисуется из того же разбора и без него не существует.
                 // Поставить её выше значило бы обещать карту без резюме.
-                SettingRow(title: "Резюме встречи",
+                SettingRow(title: "Саммари встречи",
                            subtitle: "Разбор языковой моделью — самая долгая часть обработки") {
                     Toggle("", isOn: Binding(
                         get: { library.settings.make_summary },
@@ -982,7 +982,7 @@ struct SettingsScreen: View {
             }
 
             Card {
-                Text("Хранение данных").font(Kind.head(16)).padding(.bottom, 12)
+                Text("Хранение данных").font(Kind.head(16)).foregroundStyle(p.text).padding(.bottom, 12)
                 SettingRow(title: "Папка для результатов", subtitle: library.settings.results_dir) {
                     Button("Изменить") { chooseFolder() }.buttonStyle(QuietButton())
                 }
@@ -997,7 +997,7 @@ struct SettingsScreen: View {
             }
 
             Card {
-                Text("Термины команды").font(Kind.head(16)).padding(.bottom, 12)
+                Text("Термины команды").font(Kind.head(16)).foregroundStyle(p.text).padding(.bottom, 12)
                 SettingRow(title: "Словарь", subtitle: "\(glossaryCount) терминов") {
                     Button("Открыть") { NSWorkspace.shared.open(Paths.glossary) }
                         .buttonStyle(QuietButton())
@@ -1015,11 +1015,16 @@ struct SettingsScreen: View {
             Button { blocksOpen.toggle() } label: {
                 HStack(spacing: 20) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Разделы протокола").font(Kind.body(14))
-                        Text("Включено \(library.settings.chosenBlocks.count) из \(SummaryBlock.all.count)")
+                        Text("Настройка разделов саммари").font(Kind.body(14))
+                        Text("Под себя, выбирая нужное")
                             .font(Kind.body(12.5)).foregroundStyle(p.muted)
                     }
                     Spacer()
+                    // Счётчик переехал из подписи сюда: подпись теперь про
+                    // смысл, а состояние всё равно надо видеть свёрнутым - и
+                    // видеть словами, а не одним цветом.
+                    Text("\(library.settings.chosenBlocks.count) из \(SummaryBlock.all.count)")
+                        .font(Kind.body(12.5)).foregroundStyle(p.faint)
                     Image(systemName: blocksOpen ? "chevron.up" : "chevron.down")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(p.muted)
@@ -1067,7 +1072,7 @@ extension SettingsScreen {
     var dictationCard: some View {
         Card {
             HStack(spacing: 10) {
-                Text("Диктовка").font(Kind.head(16))
+                Text("Диктовка").font(Kind.head(16)).foregroundStyle(p.text)
                 Spacer()
                 // Когда не хватает доступа, надпись — кнопка: искать нужный
                 // раздел в Системных настройках человек не обязан.
@@ -1274,7 +1279,7 @@ private struct SettingRow<Trailing: View>: View {
     var body: some View {
         HStack(spacing: 20) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(Kind.body(14))
+                Text(title).font(Kind.body(14)).foregroundStyle(p.text)
                 if let subtitle {
                     Text(subtitle).font(Kind.body(12.5)).foregroundStyle(p.muted)
                         .lineLimit(1).truncationMode(.middle)
