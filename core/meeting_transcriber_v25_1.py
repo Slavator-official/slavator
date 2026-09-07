@@ -2545,7 +2545,10 @@ def _block_rows(analysis: dict[str, Any], name: str) -> list[tuple[int, str]]:
             who = str(row.get("who", "")).strip()
             rows.append((0, (f"{who}: " if who else "") + f"«{row.get('text', '')}»"))
     elif name == "timeline":
-        for row in analysis.get("timeline") or []:
+        # Сортировка здесь, а не только при сборке: отрисовщик не знает, откуда
+        # пришли данные, а хронология не по порядку - хуже её отсутствия.
+        for row in sorted(analysis.get("timeline") or [],
+                          key=lambda item: str(item.get("time", ""))):
             when = str(row.get("time", "")).strip()
             rows.append((0, (f"{when} — " if when else "") + str(row.get("what", ""))))
     elif name == "next":
@@ -2626,154 +2629,6 @@ def write_mindmap(path: Path, analysis: dict[str, Any],
         lines.append(f"## {SUMMARY_BLOCKS[name]['title']}")
         lines += head
         lines += [("  " * level) + f"- {text}" for level, text in rows]
-        lines.append("")
-
-    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-
-
-def write_transcript_docx(path: Path, utterances: list[Utterance], title: str) -> None:
-    docx = _docx()
-    document = docx.Document()
-    document.add_heading(title or "Стенограмма встречи", level=0)
-    document.add_paragraph(datetime.now().strftime("Обработано: %d.%m.%Y %H:%M"))
-
-    names = display_names(utterances)
-    current = None
-    for item in utterances:
-        who = names.get(item.speaker_id or "", item.label)
-        if who != current:
-            current = who
-            heading = document.add_paragraph()
-            run = heading.add_run(current)
-            run.bold = True
-        stamp = time.strftime("%H:%M:%S", time.gmtime(max(0, item.start)))
-        document.add_paragraph(f"[{stamp}] {item.text}")
-
-    document.save(str(path))
-
-
-def write_summary_docx(path: Path, analysis: dict[str, Any], warnings: list[str]) -> None:
-    docx = _docx()
-    document = docx.Document()
-    document.add_heading(analysis.get("title") or "Итоги встречи", level=0)
-    document.add_paragraph(datetime.now().strftime("Обработано: %d.%m.%Y %H:%M"))
-
-    participants = analysis.get("participants") or []
-    if participants:
-        document.add_heading("Участники", level=1)
-        document.add_paragraph(", ".join(participants))
-
-    mentioned = analysis.get("mentioned") or []
-    if mentioned:
-        document.add_heading("Упоминались", level=1)
-        document.add_paragraph(", ".join(mentioned))
-
-    document.add_heading("Резюме", level=1)
-    document.add_paragraph(analysis.get("summary", ""))
-
-    notes = analysis.get("notes") or []
-    if notes:
-        document.add_heading("Обсуждавшиеся темы", level=1)
-        for note in notes:
-            document.add_paragraph(str(note.get("topic", "")), style="List Bullet")
-            for point in note.get("points") or []:
-                document.add_paragraph(str(point), style="List Bullet 2")
-
-    sections = [
-        ("Принятые решения", "decisions"),
-        ("Риски и проблемы", "risks"),
-        ("Открытые вопросы", "questions"),
-    ]
-    for heading, key in sections:
-        values = analysis.get(key) or []
-        if not values:
-            continue
-        document.add_heading(heading, level=1)
-        for value in values:
-            document.add_paragraph(str(value), style="List Bullet")
-
-    todos = analysis.get("todos") or []
-    if todos:
-        document.add_heading("Поручения", level=1)
-        table = document.add_table(rows=1, cols=3)
-        table.style = "Table Grid"
-        header = table.rows[0].cells
-        header[0].text = "Задача"
-        header[1].text = "Исполнитель"
-        header[2].text = "Срок"
-        for todo in todos:
-            row = table.add_row().cells
-            row[0].text = str(todo.get("task", ""))
-            row[1].text = str(todo.get("owner", "")) or "не назначен"
-            row[2].text = str(todo.get("due", "")) or "-"
-
-    if warnings:
-        document.add_heading("Замечания к обработке", level=1)
-        for message in warnings:
-            document.add_paragraph(str(message), style="List Bullet")
-
-    document.save(str(path))
-
-
-def write_mindmap(path: Path, analysis: dict[str, Any],
-                  meta: Optional[dict[str, Any]] = None) -> None:
-    """Майндкарта встречи.
-
-    Плоский список из заголовка и однострочных пунктов майндмап-программы
-    рисуют россыпью одинаковых коробок: у веток нет глубины, а темой служит
-    ярлык в три слова, по которому через неделю не вспомнить, о чём была
-    речь. Поэтому карта повторяет строение протокола, а под каждой темой
-    висит то, что по ней сказали.
-    """
-    meta = meta or {}
-    day = str(meta.get("date") or "").strip()
-    title = analysis.get("title") or "Встреча"
-    lines = [f"# {day + ' ' if day else ''}{title}", ""]
-
-    lines.append("## Информация о встрече")
-    if day:
-        lines.append(f"- Дата: {day}")
-    seconds = float(meta.get("duration") or 0)
-    if seconds > 0:
-        lines.append(f"- Длительность: {max(1, round(seconds / 60))} мин")
-    if analysis.get("participants"):
-        lines.append(f"- Участники: {', '.join(analysis['participants'])}")
-    if analysis.get("mentioned"):
-        lines.append(f"- Упоминались: {', '.join(analysis['mentioned'])}")
-    lines.append("")
-
-    notes = analysis.get("notes") or []
-    if notes:
-        lines.append("## Заметки о встрече")
-        for note in notes:
-            lines.append(f"- {note.get('topic', '')}")
-            for point in note.get("points") or []:
-                lines.append(f"  - {point}")
-        lines.append("")
-
-    if analysis.get("decisions"):
-        lines.append("## Решения")
-        lines += [f"- {value}" for value in analysis["decisions"]]
-        lines.append("")
-
-    todos = analysis.get("todos") or []
-    if todos:
-        lines.append("## Дальнейшие шаги")
-        for todo in todos:
-            owner = str(todo.get("owner", "")).strip() or "не назначен"
-            due = str(todo.get("due", "")).strip()
-            lines.append(f"- {todo.get('task', '')}")
-            lines.append(f"  - {owner}" + (f", срок: {due}" if due else ""))
-        lines.append("")
-
-    questions = analysis.get("questions") or []
-    risks = analysis.get("risks") or []
-    if questions or risks:
-        lines.append("## Осталось нерешённым")
-        for value in questions:
-            lines.append(f"- Вопрос без ответа: {value}")
-        for value in risks:
-            lines.append(f"- Риск: {value}")
         lines.append("")
 
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")

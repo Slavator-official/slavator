@@ -883,6 +883,9 @@ struct SettingsScreen: View {
     @Bindable var library: Library
     var dictation: Dictation
     @Environment(\.palette) private var p
+    /// Разделов двенадцать: развёрнутыми они заслоняют собой всю страницу
+    /// настроек, а меняют их редко.
+    @State private var blocksOpen = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -954,6 +957,9 @@ struct SettingsScreen: View {
                 Text("Что собирать после расшифровки").font(Kind.head(16))
                 Text("Чем больше разделов, тем дольше считается резюме: модель пишет ровно то, что у неё просят")
                     .font(Kind.body(12.5)).foregroundStyle(p.muted).padding(.bottom, 12)
+                // Резюме здесь главное, а не первое по алфавиту: майндкарта
+                // рисуется из того же разбора и без него не существует.
+                // Поставить её выше значило бы обещать карту без резюме.
                 SettingRow(title: "Резюме встречи",
                            subtitle: "Разбор языковой моделью — самая долгая часть обработки") {
                     Toggle("", isOn: Binding(
@@ -961,27 +967,17 @@ struct SettingsScreen: View {
                         set: { library.settings.make_summary = $0; library.settings.save() }))
                         .labelsHidden().toggleStyle(.switch)
                 }
-                Divider().overlay(p.line2)
-                SettingRow(title: "Майндкарта",
-                           subtitle: "Файл 03_mindmap.md — открывается майндмап-программами") {
-                    Toggle("", isOn: Binding(
-                        get: { library.settings.make_mindmap },
-                        set: { library.settings.make_mindmap = $0; library.settings.save() }))
-                        .labelsHidden().toggleStyle(.switch)
-                }
                 if library.settings.make_summary {
                     Divider().overlay(p.line2)
-                    Text("Разделы протокола").font(Kind.body(13)).foregroundStyle(p.muted)
-                        .padding(.top, 10)
-                    ForEach(SummaryBlock.all) { block in
-                        SettingRow(title: block.title, subtitle: block.hint) {
-                            Toggle("", isOn: Binding(
-                                get: { library.settings.hasBlock(block.id) },
-                                set: { library.settings.setBlock(block.id, $0)
-                                       library.settings.save() }))
-                                .labelsHidden().toggleStyle(.switch)
-                        }
+                    SettingRow(title: "Майндкарта встречи",
+                               subtitle: "Файл 03_mindmap.md из того же разбора — открывается майндмап-программами") {
+                        Toggle("", isOn: Binding(
+                            get: { library.settings.make_mindmap },
+                            set: { library.settings.make_mindmap = $0; library.settings.save() }))
+                            .labelsHidden().toggleStyle(.switch)
                     }
+                    Divider().overlay(p.line2)
+                    blocksDisclosure
                 }
             }
 
@@ -1005,6 +1001,43 @@ struct SettingsScreen: View {
                 SettingRow(title: "Словарь", subtitle: "\(glossaryCount) терминов") {
                     Button("Открыть") { NSWorkspace.shared.open(Paths.glossary) }
                         .buttonStyle(QuietButton())
+                }
+            }
+        }
+    }
+
+    /// Разделы протокола: свёрнуты по умолчанию.
+    ///
+    /// Стрелка и подпись «включено N из 12» говорят состояние словами, а не
+    /// одним цветом, и вся строка целиком - зона нажатия.
+    private var blocksDisclosure: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button { blocksOpen.toggle() } label: {
+                HStack(spacing: 20) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Разделы протокола").font(Kind.body(14))
+                        Text("Включено \(library.settings.chosenBlocks.count) из \(SummaryBlock.all.count)")
+                            .font(Kind.body(12.5)).foregroundStyle(p.muted)
+                    }
+                    Spacer()
+                    Image(systemName: blocksOpen ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(p.muted)
+                }
+                .padding(.vertical, 11)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if blocksOpen {
+                ForEach(SummaryBlock.all) { block in
+                    SettingRow(title: block.title, subtitle: block.hint) {
+                        Toggle("", isOn: Binding(
+                            get: { library.settings.hasBlock(block.id) },
+                            set: { library.settings.setBlock(block.id, $0)
+                                   library.settings.save() }))
+                            .labelsHidden().toggleStyle(.switch)
+                    }
                 }
             }
         }
