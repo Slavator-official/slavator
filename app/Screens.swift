@@ -624,11 +624,18 @@ struct SpeakersScreen: View {
                             RowBox {
                                 PlayDot(size: 28) { playSample(person) }
                                 Avatar(text: person.initials, colour: library.color(for: person))
-                                VStack(alignment: .leading, spacing: 1) {
+                                VStack(alignment: .leading, spacing: 4) {
                                     Text(person.name).font(Kind.strong(14.5))
-                                    if !person.subtitle.isEmpty {
-                                        Text(person.subtitle).font(Kind.body(12.5))
-                                            .foregroundStyle(p.muted).lineLimit(1)
+                                    // Должность и компания - два разных факта,
+                                    // и точка между ними их только склеивала.
+                                    // Тегами видно, что это признаки человека,
+                                    // а не продолжение имени.
+                                    if !person.tags.isEmpty {
+                                        HStack(spacing: 5) {
+                                            ForEach(person.tags, id: \.self) { tag in
+                                                Tag(text: tag)
+                                            }
+                                        }
                                     }
                                 }
                                 Spacer(minLength: 8)
@@ -828,6 +835,7 @@ struct PersonScreen: View {
     @State private var company = ""
     @State private var problem = ""
     @State private var saved = false
+    @State private var editing = false
 
     private var person: Speaker? { library.speakers.first { $0.key == key } }
 
@@ -842,14 +850,26 @@ struct PersonScreen: View {
             if let person {
                 HStack(spacing: 14) {
                     Avatar(text: person.initials, colour: library.color(for: person), size: 54)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(person.name).font(Kind.title(20))
-                        if !person.subtitle.isEmpty {
-                            Text(person.subtitle).font(Kind.body(13.5)).foregroundStyle(p.muted)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(person.name).font(Kind.title(20)).foregroundStyle(p.text)
+                        if !person.tags.isEmpty {
+                            HStack(spacing: 5) {
+                                ForEach(person.tags, id: \.self) { tag in Tag(text: tag) }
+                            }
                         }
                     }
                     Spacer()
+                    Button(editing ? "Отмена" : "Редактировать") {
+                        if editing {
+                            fill()          // вернуть как было
+                            problem = ""
+                        }
+                        editing.toggle()
+                        saved = false
+                    }
+                    .buttonStyle(QuietButton())
                 }
+                if editing {
                 Card {
                     Text("Кто это").font(Kind.head(16)).foregroundStyle(p.text).padding(.bottom, 6)
                     SettingRow(title: "Имя") { field($name, "Имя и фамилия") }
@@ -871,12 +891,14 @@ struct PersonScreen: View {
                                                           position: position,
                                                           company: company) ?? ""
                             saved = problem.isEmpty
+                            if saved { editing = false }
                         }
                         .buttonStyle(PrimaryButton())
                         .disabled(!changed)
                         .opacity(changed ? 1 : 0.45)
                     }
                     .padding(.top, 12)
+                }
                 }
 
                 Card {
@@ -910,6 +932,7 @@ struct PersonScreen: View {
         .onChange(of: key) { _, _ in
             problem = ""
             saved = false
+            editing = false
             fill()
         }
     }

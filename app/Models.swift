@@ -282,6 +282,11 @@ struct Speaker: Identifiable, Hashable {
             .compactMap { $0.first.map(String.init) }.joined().uppercased()
     }
 
+    /// Должность и компания по отдельности: в списке они показываются тегами.
+    var tags: [String] {
+        [position, company].filter { !$0.isEmpty }
+    }
+
     var subtitle: String {
         [position, company].filter { !$0.isEmpty }.joined(separator: " · ")
     }
