@@ -24,6 +24,7 @@ def _same_person(left: str, right: str) -> bool:
     return key(left) == key(right)
 
 
+@dataclass
 class Speaker:
     key: str
     name: str
@@ -34,7 +35,6 @@ class Speaker:
     created_at: str = ""
     updated_at: str = ""
 
-@dataclass
 @dataclass
 class UnknownVoice:
     voice_id: str
@@ -58,6 +58,18 @@ class SpeakerService:
         self.samples_dir.mkdir(parents=True, exist_ok=True)
         self.meta_path = self.profiles_dir / "profiles.json"
         self.assignments_path = self.profiles_dir / "voice_assignments.json"
+
+    def samples_for(self, key: str) -> Path:
+        """Единственное место, где живут образцы голоса человека.
+
+        Папка называется ровно ключом профиля. Приложение открывает
+        samples/<ключ из profiles.json> и ничего не вычисляет — стоит при
+        записи «привести ключ к безопасному виду», и запись уходит в одну
+        папку, а чтение идёт из другой.
+        """
+        path = self.samples_dir / key
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     def _load_json(self, path: Path, default: Any):
         if not path.exists():
@@ -166,9 +178,7 @@ class SpeakerService:
         speaker = self.get_speaker(speaker_key)
         if speaker is None:
             raise KeyError("Спикер не найден")
-        safe_key = "".join(c if c.isalnum() or c in "_-" else "_" for c in speaker_key)
-        target_dir = self.samples_dir / safe_key
-        target_dir.mkdir(parents=True, exist_ok=True)
+        target_dir = self.samples_for(speaker_key)
         target = target_dir / f"{uuid.uuid4().hex}.wav"
         shutil.copy2(voice.wav_path, target)
         assignments = self._assignments()
@@ -240,8 +250,7 @@ class SpeakerService:
                         if sp.name == display:
                             return sp
 
-        target_dir = self.samples_dir / key
-        target_dir.mkdir(parents=True, exist_ok=True)
+        target_dir = self.samples_for(key)
         shutil.copy2(wav_path, target_dir / f"{uuid.uuid4().hex}.wav")
         profiles[key] = {
             "name": name,

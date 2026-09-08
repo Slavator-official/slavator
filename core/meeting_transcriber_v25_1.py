@@ -1061,6 +1061,12 @@ def save_profiles(profiles_dir: Path, profiles: dict[str, Any]) -> None:
 
 
 def safe_key(value: str) -> str:
+    """Сделать ключ профиля из ИМЕНИ человека.
+
+    Только для создания ключа. Искать по готовому ключу файлы этой функцией
+    нельзя: преобразование при записи и отсутствие его при чтении разводят
+    запись и чтение по разным папкам.
+    """
     key = "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in value).strip("_")
     return key or "speaker"
 
@@ -1098,7 +1104,15 @@ def embeddings_dir(profiles_dir: Path) -> Path:
 
 
 def samples_dir(profiles_dir: Path, key: str) -> Path:
-    path = profiles_dir / "samples" / safe_key(key)
+    # Папка называется ровно ключом профиля, без преобразований.
+    #
+    # Договор с приложением: оно открывает samples/<ключ из profiles.json> и
+    # ничего не вычисляет. Любая «нормализация» ключа при записи означает, что
+    # писали в одну папку, а читают из другой — так уже случалось, и человек
+    # видел «5 образцов» при пустой странице. Приводить строку к безопасному
+    # виду можно только при СОЗДАНИИ ключа из имени, а не при поиске файлов
+    # по готовому ключу.
+    path = profiles_dir / "samples" / key
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -1181,7 +1195,9 @@ def rebuild_embedding(profiles_dir: Path, key: str) -> bool:
         return False
 
     mean = np.mean(np.stack(vectors), axis=0).astype("float32")
-    target = embeddings_dir(profiles_dir) / f"{safe_key(key)}.npy"
+    # Тоже ровно ключ: имя файла отпечатка должно однозначно следовать из
+    # ключа, иначе два профиля с похожими ключами перезапишут друг друга.
+    target = embeddings_dir(profiles_dir) / f"{key}.npy"
     np.save(target, mean, allow_pickle=False)
 
     profiles = load_profiles(profiles_dir)
