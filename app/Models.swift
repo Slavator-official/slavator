@@ -470,6 +470,55 @@ final class Library {
         return color(for: turn, in: record)
     }
 
+    /// Сохранить, кем мы считаем этого человека.
+    ///
+    /// Переписываем profiles.json, трогая ровно три поля: рядом лежат ссылка
+    /// на отпечаток голоса и служебные отметки движка — потерять их значит
+    /// потерять сам голос. Возвращает текст ошибки или nil, если всё вышло.
+    func saveSpeaker(key: String, name: String, position: String, company: String) -> String? {
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return "Имя не может быть пустым" }
+        if let clash = speakers.first(where: { $0.key != key && Self.samePerson($0.name, clean) }) {
+            return "«\(clash.name)» уже есть в списке — получатся два человека вместо одного"
+        }
+        let path = Paths.profiles.appending(path: "profiles.json")
+        guard let data = try? Data(contentsOf: path),
+              var raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var row = raw[key] as? [String: Any]
+        else { return "Не удалось прочитать профили" }
+
+        row["name"] = clean
+        row["position"] = position.trimmingCharacters(in: .whitespacesAndNewlines)
+        row["company"] = company.trimmingCharacters(in: .whitespacesAndNewlines)
+        let stamp = DateFormatter()
+        stamp.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"   // как пишет ядро
+        row["updated_at"] = stamp.string(from: Date())
+        raw[key] = row
+
+        guard let out = try? JSONSerialization.data(
+                withJSONObject: raw, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]),
+              (try? out.write(to: path, options: .atomic)) != nil
+        else { return "Не удалось сохранить профили" }
+        reload()
+        return nil
+    }
+
+    /// Одно ли это имя.
+    ///
+    /// Правило повторяет speaker_service: «й» без надстрочного знака и «ё»
+    /// через «е» не должны считаться разными людьми — ровно на этом профили
+    /// уже задваивались.
+    static func samePerson(_ left: String, _ right: String) -> Bool {
+        func key(_ value: String) -> String {
+            value.lowercased()
+                .replacingOccurrences(of: "ё", with: "е")
+                .replacingOccurrences(of: "й", with: "и")
+                .replacingOccurrences(of: "_", with: " ")
+                .split(separator: " ").joined(separator: " ")
+        }
+        return key(left) == key(right)
+    }
+
     // MARK: разбор файлов
 
     static func readSpeakers() -> [Speaker] {

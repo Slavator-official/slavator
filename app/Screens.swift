@@ -823,7 +823,18 @@ struct PersonScreen: View {
     @Binding var screen: Screen
     @Environment(\.palette) private var p
 
+    @State private var name = ""
+    @State private var position = ""
+    @State private var company = ""
+    @State private var problem = ""
+    @State private var saved = false
+
     private var person: Speaker? { library.speakers.first { $0.key == key } }
+
+    private var changed: Bool {
+        guard let person else { return false }
+        return name != person.name || position != person.position || company != person.company
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -839,6 +850,35 @@ struct PersonScreen: View {
                     }
                     Spacer()
                 }
+                Card {
+                    Text("Кто это").font(Kind.head(16)).foregroundStyle(p.text).padding(.bottom, 6)
+                    SettingRow(title: "Имя") { field($name, "Имя и фамилия") }
+                    Divider().overlay(p.line2)
+                    SettingRow(title: "Должность") { field($position, "например, CTO") }
+                    Divider().overlay(p.line2)
+                    SettingRow(title: "Компания") { field($company, "например, РТЛабс") }
+                    if !problem.isEmpty {
+                        Text(problem).font(Kind.body(12.5)).foregroundStyle(p.warn)
+                            .padding(.top, 10)
+                    }
+                    HStack(spacing: 10) {
+                        Spacer()
+                        if saved, !changed {
+                            Text("Сохранено").font(Kind.body(12.5)).foregroundStyle(p.muted)
+                        }
+                        Button("Сохранить") {
+                            problem = library.saveSpeaker(key: key, name: name,
+                                                          position: position,
+                                                          company: company) ?? ""
+                            saved = problem.isEmpty
+                        }
+                        .buttonStyle(PrimaryButton())
+                        .disabled(!changed)
+                        .opacity(changed ? 1 : 0.45)
+                    }
+                    .padding(.top, 12)
+                }
+
                 Card {
                     Text("Образцы голоса").font(Kind.head(16)).foregroundStyle(p.text).padding(.bottom, 14)
                     let samples = sampleFiles(person)
@@ -865,6 +905,32 @@ struct PersonScreen: View {
                 Text("Человек не найден").font(Kind.body()).foregroundStyle(p.muted)
             }
         }
+        .onAppear { fill() }
+        // Переход к другому человеку — то же окно, другие данные.
+        .onChange(of: key) { _, _ in
+            problem = ""
+            saved = false
+            fill()
+        }
+    }
+
+    private func field(_ value: Binding<String>, _ hint: String) -> some View {
+        TextField(hint, text: value)
+            .textFieldStyle(.roundedBorder)
+            .frame(width: 260)
+            .onChange(of: value.wrappedValue) { _, _ in
+                // Прошлая ошибка относилась к прошлому тексту.
+                problem = ""
+                saved = false
+            }
+    }
+
+    /// Подставить то, что уже записано о человеке.
+    private func fill() {
+        guard let person else { return }
+        name = person.name
+        position = person.position
+        company = person.company
     }
 
     private func sampleFiles(_ person: Speaker) -> [URL] {
