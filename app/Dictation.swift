@@ -812,9 +812,18 @@ private final class Hotkey {
         guard let port = CGEvent.tapCreate(
             tap: .cgSessionEventTap, place: .headInsertEventTap,
             options: .listenOnly, eventsOfInterest: mask,
-            callback: { _, _, event, context in
+            callback: { _, type, event, context in
                 guard let context else { return Unmanaged.passUnretained(event) }
                 let owner = Unmanaged<Hotkey>.fromOpaque(context).takeUnretainedValue()
+                // Система молча выключает слежение, если обработчик хоть раз
+                // задумался. Дальше не приходит НИЧЕГО: отпускание клавиши не
+                // видно, диктовка навсегда остаётся «слушает», а начать новую
+                // нельзя — она пускает только из «готова». Снаружи это выглядит
+                // как «индикатор не появляется и не диктуется».
+                if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                    owner.revive(timeout: type == .tapDisabledByTimeout)
+                    return Unmanaged.passUnretained(event)
+                }
                 owner.handle(event)
                 return Unmanaged.passUnretained(event)
             },
@@ -826,6 +835,20 @@ private final class Hotkey {
         CFRunLoopAddSource(CFRunLoopGetCurrent(), loop, .commonModes)
         CGEvent.tapEnable(tap: port, enable: true)
         return true
+    }
+
+    /// Вернуть слежение и закрыть диктовку, повисшую без отпускания клавиши.
+    func revive(timeout: Bool) {
+        Dictation.logHotkey("слежение за клавишей выключено системой "
+                            + (timeout ? "(не успели ответить)" : "(перехват ввода)")
+                            + " — включаю заново")
+        if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+        guard down else { return }
+        // Пока слежение было выключено, клавишу отпустили — увидеть это было
+        // некому. Закрываем диктовку сами, иначе она висит вечно.
+        down = false
+        tidyNow = false
+        onChange(false, false)
     }
 
     func stop() {
@@ -955,12 +978,26 @@ extension Dictation {
     /// Заведена не от любви к логам: поломку записи нельзя было увидеть со
     /// стороны — кнопка молчала одинаково и когда события не приходят, и
     /// когда приходят, но не опознаются.
+    /// Очередь записи в журнал.
+    ///
+    /// Раньше строка писалась там же, где обрабатывалось событие клавиши:
+    /// открыть файл, доехать до конца, записать, закрыть. Обработчику
+    /// перехвата на всё про всё отпущены миллисекунды, и за такую задержку
+    /// система выключает слежение целиком.
+    private static let journal = DispatchQueue(label: "ru.slavator.hotkey.log",
+                                               qos: .utility)
+
     static func logHotkey(_ line: String) {
+        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none,
+                                                  timeStyle: .medium)
+        journal.async { writeHotkey("\(stamp)  \(line)") }
+    }
+
+    private static func writeHotkey(_ text: String) {
         let dir = Paths.support.appending(path: "logs")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let file = dir.appending(path: "hotkey.log")
-        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-        guard let data = "\(stamp)  \(line)\n".data(using: .utf8) else { return }
+        guard let data = (text + "\n").data(using: .utf8) else { return }
         if let handle = try? FileHandle(forWritingTo: file) {
             _ = try? handle.seekToEnd()
             try? handle.write(contentsOf: data)
