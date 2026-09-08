@@ -128,11 +128,28 @@ fi
 
 # Образ Ollama берём из комплекта, а если его нет - качаем с сайта. Лёгкий
 # образ весит два мегабайта именно потому, что всё тяжёлое приезжает здесь.
+# Ollama ставят не только образом с сайта: Homebrew кладёт её в
+# /opt/homebrew/bin, и в /Applications её при этом нет. Установщик смотрел
+# только в /Applications, шёл качать образ заново — а когда сайт недоступен,
+# объявлял, что Ollama не установлена. При живой и рабочей Ollama на машине.
+find_ollama() {
+    local candidate
+    for candidate in "/Applications/Ollama.app/Contents/Resources/ollama" \
+                     "/opt/homebrew/bin/ollama" \
+                     "/usr/local/bin/ollama" \
+                     "/usr/bin/ollama"; do
+        [[ -x "$candidate" ]] && { printf '%s' "$candidate"; return 0; }
+    done
+    command -v ollama 2>/dev/null && return 0
+    return 1
+}
+
+OLLAMA_BIN="$(find_ollama || true)"
 OLLAMA_DMG=""
-if [[ -d "/Applications/Ollama.app" ]]; then
-    ok "Ollama уже установлена — пропускаю"
+if [[ -n "$OLLAMA_BIN" ]]; then
+    ok "Ollama уже установлена — пропускаю ($OLLAMA_BIN)"
 fi
-if [[ ! -d "/Applications/Ollama.app" ]]; then
+if [[ -z "$OLLAMA_BIN" ]]; then
     if [[ -f "$PAYLOAD/Ollama.dmg" ]]; then
         printf '    Устанавливаю Ollama из комплекта...\n'
         OLLAMA_DMG="$PAYLOAD/Ollama.dmg"
@@ -171,9 +188,20 @@ if [[ -n "$OLLAMA_DMG" ]]; then
     [[ "$OLLAMA_DMG" == "$SUPPORT/Ollama.dmg" ]] && rm -f "$OLLAMA_DMG"
 fi
 
-if [[ -d "/Applications/Ollama.app" ]]; then
-    open -ga Ollama 2>/dev/null
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
+OLLAMA_BIN="$(find_ollama || true)"
+
+# Ollama сама не поднимается: службы в системе она не заводит. Без запущенного
+# сервера резюме не собирается и имена по разговору не определяются, а причина
+# со стороны выглядит как «программа сломалась».
+if [[ -n "$OLLAMA_BIN" ]] \
+   && ! curl -fsS --max-time 2 http://127.0.0.1:11434/api/version >/dev/null 2>&1; then
+    if [[ -d "/Applications/Ollama.app" ]]; then
+        # У приложения есть значок в строке меню и автозапуск при входе.
+        open -ga Ollama 2>/dev/null
+    else
+        nohup "$OLLAMA_BIN" serve >/dev/null 2>&1 &
+    fi
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
         curl -fsS --max-time 2 http://127.0.0.1:11434/api/version >/dev/null 2>&1 && break
         sleep 1
     done
@@ -197,8 +225,7 @@ if curl -fsS --max-time 4 http://127.0.0.1:11434/api/version >/dev/null 2>&1; th
                 || warn "не удалось перенести модель"
         else
             printf '    Скачиваю языковую модель %s (около 5 ГБ)...\n' "$DEFAULT_LLM"
-            if "/Applications/Ollama.app/Contents/Resources/ollama" pull "$DEFAULT_LLM" \
-               || ollama pull "$DEFAULT_LLM"; then
+            if "${OLLAMA_BIN:-ollama}" pull "$DEFAULT_LLM"; then
                 ok "модель $DEFAULT_LLM установлена"
             else
                 warn "модель не скачалась — выполните позже: ollama pull $DEFAULT_LLM"
