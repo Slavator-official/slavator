@@ -152,25 +152,6 @@ struct QuietButton: ButtonStyle {
     }
 }
 
-/// Признак человека: должность, компания.
-///
-/// Не кнопка и не ссылка - нажимать не на что. Приглушённая подложка и
-/// мелкий шрифт отделяют признак от имени, не перетягивая на себя внимание.
-struct Tag: View {
-    @Environment(\.palette) private var p
-    let text: String
-
-    var body: some View {
-        Text(text)
-            .font(.system(size: 11.5, weight: .medium))
-            .foregroundStyle(p.muted)
-            .lineLimit(1)
-            .padding(.horizontal, 7).padding(.vertical, 2.5)
-            .background(RoundedRectangle(cornerRadius: 6).fill(p.raised))
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(p.line2, lineWidth: 1))
-    }
-}
-
 /// Сегментированный переключатель: тема, источник звука, движок.
 struct Segmented<T: Hashable>: View {
     @Environment(\.palette) private var p

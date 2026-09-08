@@ -624,18 +624,11 @@ struct SpeakersScreen: View {
                             RowBox {
                                 PlayDot(size: 28) { playSample(person) }
                                 Avatar(text: person.initials, colour: library.color(for: person))
-                                VStack(alignment: .leading, spacing: 4) {
+                                VStack(alignment: .leading, spacing: 1) {
                                     Text(person.name).font(Kind.strong(14.5))
-                                    // Должность и компания - два разных факта,
-                                    // и точка между ними их только склеивала.
-                                    // Тегами видно, что это признаки человека,
-                                    // а не продолжение имени.
-                                    if !person.tags.isEmpty {
-                                        HStack(spacing: 5) {
-                                            ForEach(person.tags, id: \.self) { tag in
-                                                Tag(text: tag)
-                                            }
-                                        }
+                                    if !person.subtitle.isEmpty {
+                                        Text(person.subtitle).font(Kind.body(12.5))
+                                            .foregroundStyle(p.muted).lineLimit(1)
                                     }
                                 }
                                 Spacer(minLength: 8)
@@ -850,12 +843,10 @@ struct PersonScreen: View {
             if let person {
                 HStack(spacing: 14) {
                     Avatar(text: person.initials, colour: library.color(for: person), size: 54)
-                    VStack(alignment: .leading, spacing: 5) {
+                    VStack(alignment: .leading, spacing: 2) {
                         Text(person.name).font(Kind.title(20)).foregroundStyle(p.text)
-                        if !person.tags.isEmpty {
-                            HStack(spacing: 5) {
-                                ForEach(person.tags, id: \.self) { tag in Tag(text: tag) }
-                            }
+                        if !person.subtitle.isEmpty {
+                            Text(person.subtitle).font(Kind.body(13.5)).foregroundStyle(p.muted)
                         }
                     }
                     Spacer()
