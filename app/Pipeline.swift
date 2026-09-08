@@ -88,6 +88,10 @@ final class Pipeline {
         // Названное число участников — самый крупный рычаг против дробления
         // голосов: без него движок гадает.
         if speakers > 0 { arguments += ["--speakers", String(speakers)] }
+        // Проект определяется по резюме, а его собирает отдельный запуск по
+        // кнопке. Здесь флаг всё равно нужен: без резюме ядро просто
+        // пропустит шаг, а с ним — разложит сразу, если резюме уже есть.
+        if library.settings.project_grouping { arguments.append("--group-by-project") }
         launch(arguments: arguments, library: library)
     }
 
@@ -111,8 +115,9 @@ final class Pipeline {
         detail = record.title
         log = []
 
-        launch(arguments: ["-B", Paths.core.path, "--summarize", record.dir.path],
-               library: library)
+        var arguments = ["-B", Paths.core.path, "--summarize", record.dir.path]
+        if library.settings.project_grouping { arguments.append("--group-by-project") }
+        launch(arguments: arguments, library: library)
     }
 
     /// Дозагрузить то, чего не хватает.

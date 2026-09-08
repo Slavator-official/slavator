@@ -201,6 +201,13 @@ TRANSCRIPT_DOCX = "01_transcript.docx"
 SUMMARY_DOCX = "02_summary_todo.docx"
 MINDMAP_MD = "03_mindmap.md"
 TRANSCRIPT_JSON = "transcript.json"
+MEETING_JSON = "meeting.json"
+
+# Типы встреч заданы списком и не пополняются моделью. Свободная формулировка
+# через месяц даёт «техническая», «техвстреча» и «тех. созвон» как три разных
+# типа, и группировать становится нечем.
+MEETING_TYPES = ("техническая", "продуктовая", "планёрка", "один-на-один",
+                 "клиентская", "исследование", "ретроспектива", "другое")
 
 STAGES = [
     ("prepare", "Подготовка"),
@@ -427,6 +434,187 @@ def packages_missing(need_diarization: bool = True) -> list:
         except ImportError:
             absent.append(package)
     return absent
+
+
+# --------------------------------------------------------------------------
+# Проект встречи и её тип
+#
+# Проект решает, в какую папку ляжет результат. Ошибиться здесь дороже, чем
+# не ответить: разложенная не туда встреча теряется молча, а непристроенная
+# видна и ждёт одного нажатия. Поэтому модель вправе сказать «не знаю» и
+# задать вопросы, а новые проекты заводит человек, не она.
+# --------------------------------------------------------------------------
+
+PROJECTS_PATH = Path(
+    os.environ.get("MEETING_TRANSCRIBER_PROJECTS")
+    or str(GLOSSARY_PATH.parent / "projects.json")
+).expanduser()
+
+# Ниже этого порога встреча не раскладывается, а помечается «уточнить».
+PROJECT_CONFIDENCE = float(os.environ.get("MEETING_TRANSCRIBER_PROJECT_MIN", "0.65"))
+
+CLASSIFY_SYSTEM = """Ты помощник, который относит рабочую встречу к проекту и
+определяет её тип.
+
+Тебе дают резюме встречи и список известных проектов. Реши, о каком проекте
+шла речь, и выбери тип встречи.
+
+Правила.
+1. Проект выбирай из списка. Совпадение по смыслу, а не по буквам: «ЛК
+   учителя» и «личный кабинет учителя» — один проект.
+2. Если подходящего проекта в списке нет, но из резюме ясно, о чём речь, —
+   назови новый и поставь known=false. Заводить его будет человек.
+3. Если понять нельзя, поставь confidence ниже 0.3 и задай от одного до трёх
+   коротких вопросов, ответы на которые решат дело. Спрашивай о том, чего
+   нет в резюме, а не о том, что там уже написано.
+   Догадка по общим словам запрещена: «планы», «задачи», «созвон»,
+   «обсудили работу» не указывают ни на какой проект. Нет названия продукта,
+   системы или задачи из проекта — значит проект неизвестен, и это честный
+   ответ, а не поражение.
+4. Тип встречи выбирай СТРОГО из списка: %s.
+5. Ничего не выдумывай: ни проектов, которых не было в разговоре, ни фактов.
+
+Ответ — только JSON:
+{"project": "название", "known": true/false, "confidence": 0.0-1.0,
+ "type": "тип из списка", "questions": ["вопрос", ...], "why": "одна фраза"}
+""" % ", ".join(MEETING_TYPES)
+
+
+def load_projects() -> list:
+    """Список проектов: имя и синонимы, которыми его называют в речи."""
+    try:
+        raw = json.loads(PROJECTS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    items = raw.get("projects", raw) if isinstance(raw, dict) else raw
+    projects = []
+    for item in items if isinstance(items, list) else []:
+        if isinstance(item, str):
+            projects.append({"name": item, "aliases": []})
+        elif isinstance(item, dict) and item.get("name"):
+            projects.append({"name": str(item["name"]),
+                             "aliases": [str(a) for a in item.get("aliases", [])]})
+    return projects
+
+
+def classify_meeting(analysis: dict, projects: list) -> dict:
+    """Определить проект и тип встречи по уже собранному резюме.
+
+    Работаем по резюме, а не по всей стенограмме: она длиннее контекста
+    модели, а темы, решения и заголовок уже вытянуты из неё на прошлом шаге.
+    """
+    known_list = "\n".join(
+        f"- {p['name']}" + (f" (он же: {', '.join(p['aliases'])})" if p["aliases"] else "")
+        for p in projects
+    ) or "(список пуст)"
+
+    card = {
+        "title": analysis.get("title", ""),
+        "summary": analysis.get("summary", ""),
+        "topics": analysis.get("topics", [])[:12],
+        "decisions": analysis.get("decisions", [])[:12],
+        "participants": analysis.get("participants", [])[:12],
+    }
+    user = (f"Известные проекты:\n{known_list}\n\n"
+            f"Резюме встречи:\n{json.dumps(card, ensure_ascii=False, indent=2)}")
+
+    try:
+        raw = ollama_chat(CLASSIFY_SYSTEM, user, json_mode=True, timeout=180)
+        answer = parse_json_response(raw)
+    except (LLMError, PipelineError, ValueError) as exc:
+        warn(f"Проект определить не удалось: {exc}")
+        return {"needs_review": True, "questions": [], "error": str(exc)}
+
+    name = str(answer.get("project", "")).strip()
+    kind = str(answer.get("type", "")).strip().lower()
+    if kind not in MEETING_TYPES:
+        kind = "другое"
+    try:
+        confidence = float(answer.get("confidence", 0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+
+    # Совпадение с известным проектом проверяем сами: модель охотно
+    # соглашается, что придуманное ею название «уже есть в списке».
+    known = None
+    for project in projects:
+        variants = [project["name"]] + project["aliases"]
+        if any(v.strip().lower() == name.lower() for v in variants if v.strip()):
+            known = project["name"]
+            break
+
+    questions = [str(q).strip() for q in answer.get("questions", []) if str(q).strip()][:3]
+
+    # Проверка поверх ответа модели: проект должен быть на самом деле назван
+    # в резюме. На пустом «созвоне о планах» модель уверенно выдавала первый
+    # проект из списка с confidence 0,9 — такая встреча молча уехала бы не в
+    # ту папку, а найти её потом некому.
+    mentioned = _mentions(known or name, projects, card)
+    if known is not None and not mentioned:
+        confidence = min(confidence, 0.3)
+        if not questions:
+            questions = [f"Это встреча по проекту «{known}»? В резюме он прямо не назван."]
+
+    settled = known is not None and mentioned and confidence >= PROJECT_CONFIDENCE
+
+    return {
+        "project": known or name,
+        "known": known is not None,
+        "confidence": round(confidence, 2),
+        "type": kind,
+        "why": str(answer.get("why", "")).strip(),
+        "questions": questions,
+        # Пока встреча не пристроена, она ждёт человека — и видно, чего ждёт.
+        "needs_review": not settled,
+    }
+
+
+def _mentions(project: str, projects: list, card: dict) -> bool:
+    """Назван ли проект в самом резюме, а не только в ответе модели.
+
+    Сверяем по корням слов: «кабинет учителя» должно узнаваться и в «кабинета
+    учителю». Точное совпадение здесь бесполезно — русский текст склоняется.
+    """
+    text = json.dumps(card, ensure_ascii=False).lower()
+    variants = [project]
+    for item in projects:
+        if item["name"] == project:
+            variants += item["aliases"]
+    for variant in variants:
+        words = [w[:5] for w in re.findall(r"\w{4,}", variant.lower())]
+        if not words:
+            continue
+        hits = sum(1 for w in words if w in text)
+        if hits and hits >= (len(words) + 1) // 2:
+            return True
+    return False
+
+
+def move_to_project(out_dir: Path, project: str) -> Path:
+    """Переложить готовый результат в папку проекта.
+
+    Переносим в самом конце, когда всё записано: перенос — это переименование
+    каталога, оно мгновенно и не оставляет полурезультата, если что-то пойдёт
+    не так раньше.
+    """
+    target = out_dir.parent / folder_name(project)
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        destination = target / out_dir.name
+        if destination.exists():
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            destination = target / f"{out_dir.name.removesuffix('_result')}_{stamp}_result"
+        out_dir.rename(destination)
+        return destination
+    except OSError as exc:
+        warn(f"не удалось переложить встречу в папку проекта: {exc}")
+        return out_dir
+
+
+def folder_name(project: str) -> str:
+    """Имя папки проекта: без разделителей пути и без пустого имени."""
+    cleaned = "".join(" " if ch in "/\\:" else ch for ch in project).strip()
+    return cleaned or "Без проекта"
 
 
 def preflight(need_llm: bool = True, need_diarization: bool = True) -> bool:
@@ -2313,6 +2501,7 @@ def run_pipeline(
     out_root: Optional[Path] = None,
     with_llm: bool = True,
     speakers: int = 0,
+    group_projects: bool = False,
 ) -> RunState:
     started = time.time()
 
@@ -2504,18 +2693,34 @@ def run_pipeline(
         except OSError:
             pass
 
+    # Проект и тип встречи. Считаем по резюме, поэтому только когда оно есть
+    # и когда человек попросил раскладывать: лишний запрос к модели стоит
+    # десятки секунд, а без резюме относить встречу всё равно не к чему.
+    result_dir = paths.out_dir
+    if with_summary and group_projects:
+        log("")
+        log("Определяю проект встречи")
+        card = classify_meeting(state.analysis, load_projects())
+        write_json(paths.out_dir / MEETING_JSON, card)
+        if card.get("needs_review"):
+            reason = "проекта нет в списке" if card.get("project") else "не хватает данных"
+            log(f"    проект не определён: {reason} — встреча ждёт уточнения")
+        else:
+            result_dir = move_to_project(paths.out_dir, card["project"])
+            log(f"    {card['project']} · {card['type']}")
+
     elapsed = time.time() - started
     progress("documents", 100, "готово")
     log("")
     log(f"Готово за {elapsed / 60:.1f} мин.")
-    log(f"Результат: {paths.out_dir}")
+    log(f"Результат: {result_dir}")
     unknown_count = sum(1 for m in state.matches if not m.known)
     if unknown_count:
         log(f"Новых голосов, требующих определения: {unknown_count}")
     return state
 
 
-def summarize_existing(result_dir: Path) -> int:
+def summarize_existing(result_dir: Path, group_projects: bool = False) -> int:
     """Собрать резюме по уже готовой стенограмме.
 
     Анализ вынесен из основного прогона: он самый долгий и единственный,
@@ -2568,9 +2773,23 @@ def summarize_existing(result_dir: Path) -> int:
     # Теперь известно настоящее название встречи, и документ стоит обновить.
     write_transcript_docx(result_dir / TRANSCRIPT_DOCX, utterances, title)
 
+    # Резюме собирают по кнопке, и это единственный момент, когда о встрече
+    # известно достаточно, чтобы отнести её к проекту.
+    final_dir = result_dir
+    if group_projects:
+        log("")
+        log("Определяю проект встречи")
+        card = classify_meeting(analysis, load_projects())
+        write_json(result_dir / MEETING_JSON, card)
+        if card.get("needs_review"):
+            log("    проект не определён — встреча ждёт уточнения")
+        else:
+            final_dir = move_to_project(result_dir, card["project"])
+            log(f"    {card['project']} · {card['type']}")
+
     progress("documents", 100, "готово")
     log("")
-    log(f"Резюме готово: {result_dir / SUMMARY_DOCX}")
+    log(f"Резюме готово: {final_dir / SUMMARY_DOCX}")
     return 0
 
 
@@ -2839,6 +3058,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="куда складывать результат (по умолчанию рядом с исходником)")
     parser.add_argument("--summarize", type=Path, default=None, metavar="КАТАЛОГ",
                         help="собрать резюме по готовой стенограмме в каталоге _result")
+    parser.add_argument("--group-by-project", action="store_true",
+                        help="определить проект встречи и разложить по папкам")
     parser.add_argument("--check", action="store_true", help="только проверить окружение")
     parser.add_argument("--json", action="store_true",
                         help="с --check: выдать отчёт о готовности машинно")
@@ -2888,7 +3109,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.summarize:
         try:
-            return summarize_existing(args.summarize)
+            return summarize_existing(args.summarize, args.group_by_project)
         except PipelineError as exc:
             log("")
             log(f"ОШИБКА: {exc.user_message}")
@@ -2936,6 +3157,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             voice_name=args.my_name,
             out_root=args.out_dir.expanduser().resolve() if args.out_dir else None,
             speakers=args.speakers,
+            group_projects=args.group_by_project,
         )
         paths = state.paths
         return 0

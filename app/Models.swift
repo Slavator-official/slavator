@@ -60,6 +60,9 @@ enum Paths {
     }
     static var profiles: URL { home.appending(path: "whisper-work/speaker_profiles") }
     static var glossary: URL { home.appending(path: "whisper-work/glossary.txt") }
+    /// Список проектов: лежит рядом со словарём терминов — оба про то, как
+    /// программа понимает вашу работу, и оба правятся руками.
+    static var projects: URL { home.appending(path: "whisper-work/projects.json") }
 
     /// Каталог с промежуточными файлами внутри результата. Имя задаётся ядром.
     static let extraDir = "доп файлы, на случай ошибки summary"
@@ -108,6 +111,10 @@ struct Settings: Codable {
     var keep_diagnostics = false
     /// Как подписывать ваши реплики с микрофонной дорожки.
     var my_name = "Вы"
+    /// Должность и компания владельца. Живут здесь, а не только в профиле:
+    /// вписать их человек должен уметь, ни разу не заводя голосовую карточку.
+    var my_position = ""
+    var my_company = ""
 
     // MARK: быстрый доступ
     /// Значок в строке меню: начать запись, не открывая окно.
@@ -129,6 +136,10 @@ struct Settings: Codable {
     /// Языковая модель: и для резюме встреч, и для чата.
     var llm_model = "qwen3:8b"
 
+    // MARK: проекты
+    /// Определять проект встречи и раскладывать результаты по его папке.
+    var project_grouping = false
+
     init() {}
 
     /// Настройки читаются по одному ключу, а не файлом целиком.
@@ -149,6 +160,8 @@ struct Settings: Codable {
         widget_output_dir = read(.widget_output_dir, widget_output_dir)
         keep_diagnostics = read(.keep_diagnostics, keep_diagnostics)
         my_name = read(.my_name, my_name)
+        my_position = read(.my_position, my_position)
+        my_company = read(.my_company, my_company)
         menubar_enabled = read(.menubar_enabled, menubar_enabled)
         meeting_watch_enabled = read(.meeting_watch_enabled, meeting_watch_enabled)
         dictation_enabled = read(.dictation_enabled, dictation_enabled)
@@ -336,6 +349,65 @@ final class Library {
         let shades = palette.speakers
         colors = Dictionary(uniqueKeysWithValues:
             speakers.map(\.key).sorted().enumerated().map { ($1, shades[$0 % shades.count]) })
+        adoptMyCard()
+    }
+
+    // MARK: о себе
+
+    /// Карточка самого владельца среди «Спикеров» — та, что названа его именем.
+    var mySpeaker: Speaker? {
+        let mine = settings.my_name.trimmingCharacters(in: .whitespaces)
+        guard !mine.isEmpty else { return nil }
+        return speakers.first { $0.name.caseInsensitiveCompare(mine) == .orderedSame }
+    }
+
+    /// Сохранить «о себе» и продублировать в свою карточку.
+    ///
+    /// Должность и компания видны в двух местах — в настройках и под именем в
+    /// «Спикерах». Пишем сразу в оба: иначе человек, поправив одно, увидит в
+    /// другом старое и не поймёт, какое из них настоящее.
+    func saveMyCard() {
+        settings.save()
+        guard let mine = mySpeaker else { return }
+        writeCard(key: mine.key, position: settings.my_position, company: settings.my_company)
+        guard let index = speakers.firstIndex(where: { $0.key == mine.key }) else { return }
+        speakers[index].position = settings.my_position
+        speakers[index].company = settings.my_company
+    }
+
+    /// Подхватить должность и компанию из своей карточки.
+    ///
+    /// Раньше вписать их можно было только при заведении человека, и у тех,
+    /// кто так и сделал, они лежат в profiles.json. Если в настройках пусто —
+    /// берём оттуда, иначе поля «о себе» встретят человека пустыми, и он
+    /// решит, что введённое пропало.
+    private func adoptMyCard() {
+        guard settings.my_position.isEmpty, settings.my_company.isEmpty,
+              let mine = mySpeaker,
+              !(mine.position.isEmpty && mine.company.isEmpty) else { return }
+        settings.my_position = mine.position
+        settings.my_company = mine.company
+        settings.save()
+    }
+
+    /// Переписать в profiles.json две строки одной карточки.
+    ///
+    /// Файл перечитывается перед записью и меняется по одному ключу: ядро
+    /// пишет туда же — новые профили и отпечатки, — и целиком записанный
+    /// файл затёр бы его работу.
+    private func writeCard(key: String, position: String, company: String) {
+        let path = Paths.profiles.appending(path: "profiles.json")
+        guard let data = try? Data(contentsOf: path),
+              let stored = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var info = stored[key] as? [String: Any] else { return }
+        info["position"] = position
+        info["company"] = company
+        var raw = stored
+        raw[key] = info
+        guard let out = try? JSONSerialization.data(
+            withJSONObject: raw, options: [.prettyPrinted, .withoutEscapingSlashes])
+        else { return }
+        try? out.write(to: path, options: .atomic)
     }
 
     /// Цвет реплики.
@@ -413,8 +485,20 @@ final class Library {
 
     static func readRecords(in folder: String) -> [Record] {
         let root = URL(fileURLWithPath: folder)
-        let items = (try? FileManager.default.contentsOfDirectory(
+        let manager = FileManager.default
+        let top = (try? manager.contentsOfDirectory(
             at: root, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+
+        // Разложенные по проектам встречи лежат на уровень глубже. Ищем и там,
+        // иначе включённая группировка выглядела бы как пропажа записей.
+        var items = top
+        for folder in top where !folder.lastPathComponent.hasSuffix("_result") {
+            var isDir: ObjCBool = false
+            guard manager.fileExists(atPath: folder.path, isDirectory: &isDir),
+                  isDir.boolValue else { continue }
+            items += (try? manager.contentsOfDirectory(
+                at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        }
 
         return items
             .filter { $0.lastPathComponent.hasSuffix("_result") }

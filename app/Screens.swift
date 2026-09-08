@@ -886,7 +886,7 @@ struct SettingsScreen: View {
             dictationCard
 
             Card {
-                Text("Общее").font(Kind.head(16)).padding(.bottom, 12)
+                Text("О себе").font(Kind.head(16)).padding(.bottom, 12)
                 SettingRow(title: "Ваше имя",
                            subtitle: "Так подписываются ваши реплики при записи звонка") {
                     TextField("Вы", text: Binding(
@@ -896,6 +896,31 @@ struct SettingsScreen: View {
                         .frame(width: 220)
                 }
                 Divider().overlay(p.line2)
+                SettingRow(title: "Должность") {
+                    TextField("", text: Binding(
+                        get: { library.settings.my_position },
+                        set: { library.settings.my_position = $0; library.saveMyCard() }))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 220)
+                }
+                Divider().overlay(p.line2)
+                SettingRow(title: "Компания") {
+                    TextField("", text: Binding(
+                        get: { library.settings.my_company },
+                        set: { library.settings.my_company = $0; library.saveMyCard() }))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 220)
+                }
+                if library.mySpeaker != nil {
+                    Text("То же самое стоит в вашей карточке в «Спикерах».")
+                        .font(Kind.body(12)).foregroundStyle(p.muted)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 6)
+                }
+            }
+
+            Card {
+                Text("Оформление").font(Kind.head(16)).padding(.bottom, 12)
                 SettingRow(title: "Тема") {
                     Segmented(options: [("dark", "Тёмная"), ("light", "Светлая"), ("system", "Авто")],
                               selection: Binding(
@@ -938,6 +963,19 @@ struct SettingsScreen: View {
                     Button("Изменить") { chooseFolder() }.buttonStyle(QuietButton())
                 }
                 Divider().overlay(p.line2)
+                SettingRow(title: "Автоопределение проекта и группировка",
+                           subtitle: "После резюме встреча относится к проекту и ложится в его папку. Нужна Ollama") {
+                    Toggle("", isOn: Binding(
+                        get: { library.settings.project_grouping },
+                        set: { library.settings.project_grouping = $0; library.settings.save() }))
+                        .labelsHidden().toggleStyle(.switch)
+                }
+                Divider().overlay(p.line2)
+                SettingRow(title: "Список проектов",
+                           subtitle: "\(projectCount) проектов. Название и то, как его называют в речи") {
+                    Button("Открыть") { openProjects() }.buttonStyle(QuietButton())
+                }
+                Divider().overlay(p.line2)
                 SettingRow(title: "Хранить диагностические данные",
                            subtitle: "Нужны, чтобы слушать фрагменты встреч после обработки") {
                     Toggle("", isOn: Binding(
@@ -955,6 +993,34 @@ struct SettingsScreen: View {
                 }
             }
         }
+    }
+
+    /// Сколько проектов в списке. Считаем по файлу: его правят руками, и
+    /// показывать надо то, что там сейчас, а не то, что мы помним.
+    private var projectCount: Int {
+        guard let data = try? Data(contentsOf: Paths.projects),
+              let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let items = raw["projects"] as? [Any] else { return 0 }
+        return items.count
+    }
+
+    private func openProjects() {
+        if !FileManager.default.fileExists(atPath: Paths.projects.path) {
+            // Пустой список с примером: пустой файл человек закроет, не поняв,
+            // что от него хотят.
+            let sample = """
+            {
+              "projects": [
+                {"name": "Название проекта", "aliases": ["как его зовут в речи"]}
+              ]
+            }
+            """
+            try? FileManager.default.createDirectory(
+                at: Paths.projects.deletingLastPathComponent(),
+                withIntermediateDirectories: true)
+            try? sample.write(to: Paths.projects, atomically: true, encoding: .utf8)
+        }
+        NSWorkspace.shared.open(Paths.projects)
     }
 
     private var glossaryCount: Int {
