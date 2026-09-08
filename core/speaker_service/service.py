@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import unicodedata
 import subprocess
 import uuid
 import wave
@@ -9,7 +10,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-@dataclass
+def _same_person(left: str, right: str) -> bool:
+    """Одно ли это имя.
+
+    Сравнение снисходительное: регистр, лишние пробелы, «ё» против «е» и
+    потерянный надстрочный знак у «й» не должны заводить второго человека -
+    ровно на этих различиях профили и задвоились.
+    """
+    def key(value: str) -> str:
+        value = unicodedata.normalize("NFC", value).casefold()
+        value = value.replace("ё", "е").replace("й", "и")
+        return " ".join(value.replace("_", " ").split())
+    return key(left) == key(right)
+
+
 class Speaker:
     key: str
     name: str
@@ -20,6 +34,7 @@ class Speaker:
     created_at: str = ""
     updated_at: str = ""
 
+@dataclass
 @dataclass
 class UnknownVoice:
     voice_id: str
@@ -182,6 +197,27 @@ class SpeakerService:
 
         key_base = "".join(c if c.isalnum() or c in "_-" else "_" for c in name).strip("_") or "speaker"
         profiles = self._profiles()
+
+        # Один человек - одна запись.
+        #
+        # Ключ раньше делали двумя разными правилами: одно оставляло «й»,
+        # другое роняло надстрочный знак и превращало его в «и». Так у
+        # «Мигалин Сергей» появились ключи Мигалин_Сергей и Мигалин_Сергеи —
+        # два профиля на одного человека, между которыми делятся образцы
+        # голоса. Опознание от этого только хуже: половина отпечатков в одной
+        # записи, половина в другой.
+        #
+        # Правило генерации ключа с тех пор одно, но само по себе оно не
+        # спасает: имя, введённое чуть иначе, снова даст новый ключ. Поэтому
+        # сравниваем по имени, а не по ключу.
+        same = [existing for existing, row in profiles.items()
+                if _same_person(str(row.get("name", "")), name)]
+        if same:
+            raise ValueError(
+                f"«{name}» уже есть в списке людей. "
+                "Добавьте новый образец голоса этому человеку, а не заводите второго."
+            )
+
         key = key_base
         n = 2
         while key in profiles:
