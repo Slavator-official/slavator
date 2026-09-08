@@ -59,6 +59,14 @@ enum Paths {
         try? launch.run()
     }
     static var profiles: URL { home.appending(path: "whisper-work/speaker_profiles") }
+    /// Образцы голоса прежнего конвейера.
+    ///
+    /// Он складывал их отдельной папкой верхнего уровня, а не внутри профилей.
+    /// Люди, заведённые тогда, показывали «5 образцов» в списке и «образцов
+    /// пока нет» на своей странице: число берётся из profiles.json, а файлы
+    /// искались только в новом месте. Папку не переносим - её по-прежнему
+    /// наполняют отдельные скрипты рядом с проектом.
+    static var legacySamples: URL { home.appending(path: "whisper-work/speaker_samples") }
     static var glossary: URL { home.appending(path: "whisper-work/glossary.txt") }
 
     /// Каталог с промежуточными файлами внутри результата. Имя задаётся ядром.

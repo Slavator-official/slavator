@@ -868,9 +868,15 @@ struct PersonScreen: View {
     }
 
     private func sampleFiles(_ person: Speaker) -> [URL] {
-        let folder = Paths.profiles.appending(path: "samples/\(person.key)")
-        let items = (try? FileManager.default.contentsOfDirectory(at: folder,
-                                                                  includingPropertiesForKeys: nil)) ?? []
+        // Два места: образцы, добавленные в приложении, и образцы прежнего
+        // конвейера. Смотрим в оба - иначе у человека, заведённого до
+        // переписывания, страница пуста при непустом счётчике.
+        let folders = [Paths.profiles.appending(path: "samples/\(person.key)"),
+                       Paths.legacySamples.appending(path: person.key)]
+        let items = folders.flatMap { folder in
+            (try? FileManager.default.contentsOfDirectory(at: folder,
+                                                          includingPropertiesForKeys: nil)) ?? []
+        }
         return items.filter { $0.pathExtension.lowercased() == "wav" }.sorted {
             $0.lastPathComponent < $1.lastPathComponent
         }
