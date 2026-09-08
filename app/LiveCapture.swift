@@ -84,8 +84,12 @@ final class LiveCapture: NSObject {
         originHost = 0
 
         let stamp = DateFormatter()
-        stamp.dateFormat = "yyyy-MM-dd_HH-mm"
-        let url = folder.appending(path: "Встреча \(stamp.string(from: Date())).wav")
+        stamp.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        let url = folder.appending(path: "Встреча \(stamp.string(from: Date()))_\(UUID().uuidString.prefix(6)).wav")
+        systemURL = nil
+        micURL = nil
+        systemConverter = nil
+        micConverter = nil
 
         // Обе дорожки лежат рядом с результатами: они обе нужны обработке и
         // обе стоит сохранить — это исходники встречи, а не мусор.
@@ -235,9 +239,9 @@ final class LiveCapture: NSObject {
         // Уровень для индикатора считаем по микрофону: это самый наглядный
         // признак, что запись живая.
         if meterLevel, let channel = out.int16ChannelData?[0] {
-            var peak: Int16 = 0
+            var peak = 0
             for i in 0..<Int(out.frameLength) {
-                peak = max(peak, abs(channel[i]))
+                peak = max(peak, abs(Int(channel[i])))
             }
             let value = Double(peak) / 32768.0
             Task { @MainActor in self.level = value }

@@ -1,13 +1,17 @@
-name: Windows
+name: Desktop checks
 
 on:
   push:
-    branches: ["codex/windows"]
+    branches: ["ios/macbook", "windows", "ubuntu", "codex/**"]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
-    runs-on: windows-latest
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -19,6 +23,7 @@ jobs:
       - name: Check Python syntax
         run: python -m compileall -q core legacy windows
       - name: Check PowerShell syntax
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $failed = $false
@@ -36,3 +41,9 @@ jobs:
           if ($failed) { exit 1 }
       - name: Run tests
         run: python -m pytest -q core/tests legacy/tk-версия/test_v25_10.py legacy/tk-версия/test_gui_flows_v25_10.py legacy/tk-версия/test_ui_contract_v25_10.py
+      - name: Check Swift runtime
+        if: runner.os == 'macOS'
+        run: bash packaging/test_swift.sh
+      - name: Build macOS application
+        if: runner.os == 'macOS'
+        run: bash packaging/build_app.sh

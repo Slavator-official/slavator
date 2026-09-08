@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 @main
 struct SlavatorApp: App {
@@ -11,13 +12,15 @@ struct SlavatorApp: App {
     @State private var capture = LiveCapture()
     @State private var dictation = Dictation()
     @State private var chat = Chat()
+    @State private var memory = SpeakerMemory()
+    @State private var doctor = Doctor()
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {
         WindowGroup {
             Shell(library: library, player: player,
                   pipeline: pipeline, capture: capture,
-                  dictation: dictation, chat: chat)
+                  dictation: dictation, chat: chat, memory: memory, doctor: doctor)
                 .frame(minWidth: 1080, minHeight: 620)
                 .onAppear {
                     library.reload()
@@ -25,8 +28,11 @@ struct SlavatorApp: App {
                     // ползёт на загруженных ядрах.
                     dictation.onBusyChanged = { busy in pipeline.suspend(busy) }
                     dictation.refresh(settings: library.settings)
-                    delegate.attach(dictation: dictation)
+                    delegate.attach(dictation: dictation, capture: capture, pipeline: pipeline, library: library, memory: memory, chat: chat)
                 }
+                .onChange(of: library.settings.menubar_enabled) { _, _ in delegate.apply(settings: library.settings) }
+                .onChange(of: library.settings.meeting_watch_enabled) { _, _ in delegate.apply(settings: library.settings) }
+                .onChange(of: library.settings.widget_enabled) { _, _ in delegate.apply(settings: library.settings) }
                 // Возвращение в программу — момент, когда стоит перечитать
                 // разрешения: их выдают в Системных настройках, снаружи.
                 .onReceive(NotificationCenter.default.publisher(
@@ -47,37 +53,178 @@ enum Screen: Hashable {
 
 /// Значок в строке меню. Сделан на AppKit намеренно: MenuBarExtra из SwiftUI
 /// тянет символы, которых нет в macOS 14, а приложение обязано там работать.
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
+                         UNUserNotificationCenterDelegate {
     private var item: NSStatusItem?
     private weak var dictation: Dictation?
+    private weak var memory: SpeakerMemory?
+    private weak var chat: Chat?
+    private weak var capture: LiveCapture?
+    private weak var library: Library?
+    private weak var pipeline: Pipeline?
+    private var widget: DeskWidget?
+    private let watch = MeetingWatch()
 
-    func attach(dictation: Dictation) {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Делегата ставят до первого уведомления, иначе нажатие кнопки в нём
+        // некому обработать.
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        UNUserNotificationCenter.current().delegate = self
+    }
+
+    func attach(dictation: Dictation, capture: LiveCapture,
+                pipeline: Pipeline, library: Library, memory: SpeakerMemory, chat: Chat) {
+        self.memory = memory
+        self.chat = chat
         self.dictation = dictation
+        self.capture = capture
+        self.pipeline = pipeline
+        self.library = library
+        watch.isRecording = { [weak capture] in capture?.isRecording ?? false }
+        watch.onRecord = { [weak self] in self?.startListening() }
+        apply(settings: library.settings)
+    }
+
+    /// Что из быстрого доступа включено. Вызывается и при запуске, и на
+    /// каждое переключение в настройках.
+    func apply(settings: Settings) {
+        if settings.menubar_enabled { addItem() } else { removeItem() }
+        if settings.meeting_watch_enabled { watch.start() } else { watch.stop() }
+        if settings.widget_enabled { addWidget() } else { removeWidget() }
+    }
+
+    // MARK: значок
+
+    private func addItem() {
         guard item == nil else { return }
         let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        status.button?.image = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "Славатор")
+        status.button?.image = NSImage(systemSymbolName: "mic.fill",
+                                       accessibilityDescription: "Славатор")
         status.button?.image?.isTemplate = true
-        status.menu = buildMenu()
+        let menu = NSMenu()
+        menu.delegate = self
+        status.menu = menu
         item = status
     }
 
-    private func buildMenu() -> NSMenu {
-        let menu = NSMenu()
-        let hint = NSMenuItem(title: "Держите правый ⌥ — говорите", action: nil, keyEquivalent: "")
-        hint.isEnabled = false
-        menu.addItem(hint)
+    private func removeItem() {
+        if let item { NSStatusBar.system.removeStatusItem(item) }
+        item = nil
+    }
+
+    /// Меню собирается в момент открытия: запись могла начаться или кончиться
+    /// после того, как значок появился.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        if capture?.isRecording == true {
+            let seconds = Int(capture?.seconds ?? 0)
+            menu.addItem(note(String(format: "Идёт запись — %d:%02d",
+                                     seconds / 60, seconds % 60)))
+            menu.addItem(entry("Остановить и обработать", #selector(stopListening)))
+        } else {
+            if let holder = watch.holder {
+                menu.addItem(note("Микрофон занял \(holder)"))
+            }
+            menu.addItem(entry("Записать встречу", #selector(startFromMenu)))
+        }
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Открыть Славатор", action: #selector(openApp), keyEquivalent: "0"))
+        menu.addItem(note("Держите " + HotCombo.label(library?.settings.dictation_hotkey ?? "ropt") + " — говорите"))
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "Выйти", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        menu.addItem(quit)
-        menu.items.forEach { $0.target = $0.action == #selector(openApp) ? self : $0.target }
-        return menu
+        menu.addItem(entry("Открыть Славатор", #selector(openApp)))
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Выйти",
+                                action: #selector(NSApplication.terminate(_:)),
+                                keyEquivalent: "q"))
+    }
+
+    private func note(_ title: String) -> NSMenuItem {
+        let line = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        line.isEnabled = false
+        return line
+    }
+
+    private func entry(_ title: String, _ action: Selector) -> NSMenuItem {
+        let line = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        line.target = self
+        return line
+    }
+
+    // MARK: запись
+
+    @objc private func startFromMenu() { startListening() }
+
+    /// Звонок, а не только микрофон: предложение возникает ровно тогда, когда
+    /// собеседники звучат из динамиков, и записывать одну свою половину
+    /// разговора бессмысленно.
+    private func startListening() {
+        guard let capture, let library, let pipeline, !capture.isRecording, !pipeline.isRunning else { return }
+        capture.start(source: .meeting,
+                      folder: URL(fileURLWithPath: library.settings.results_dir))
+        openApp()
+    }
+
+    @objc private func stopListening() {
+        guard let capture, let pipeline, let library else { return }
+        finishMeeting(capture: capture, pipeline: pipeline, library: library)
+        openApp()
+    }
+
+    // MARK: виджет
+
+    private func addWidget() {
+        guard widget == nil, let capture, let pipeline, let library else { return }
+        widget = DeskWidget(library: library, capture: capture, pipeline: pipeline)
+        widget?.show()
+    }
+
+    private func removeWidget() {
+        widget?.close()
+        widget = nil
     }
 
     @objc private func openApp() {
         NSApp.activate(ignoringOtherApps: true)
         NSApp.windows.first?.makeKeyAndOrderFront(nil)
+    }
+
+    // MARK: уведомления
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler done: @escaping () -> Void) {
+        // Запись начинает только кнопка. Нажатие на само уведомление
+        // открывает программу: соглашаться за человека нельзя.
+        if response.actionIdentifier == MeetingWatch.action {
+            DispatchQueue.main.async { [weak self] in self?.watch.recordTapped() }
+        } else if response.actionIdentifier == UNNotificationDefaultActionIdentifier {
+            DispatchQueue.main.async { [weak self] in self?.openApp() }
+        }
+        done()
+    }
+
+    /// Показывать, даже когда Славатор впереди: человек в это время смотрит
+    /// в окно встречи, а не сюда.
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler done: @escaping (UNNotificationPresentationOptions) -> Void) {
+        done([.banner])
+    }
+    func applicationWillTerminate(_ notification: Notification) {
+        memory?.cancel()
+        chat?.stop()
+        watch.stop()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let capture, capture.isRecording else { return .terminateNow }
+        let alert = NSAlert()
+        alert.messageText = "Сейчас идёт запись встречи"
+        alert.informativeText = "При выходе запись остановится. Аудиофайл сохранится в папке результатов."
+        alert.addButton(withTitle: "Остановить и выйти")
+        alert.addButton(withTitle: "Продолжить запись")
+        guard alert.runModal() == .alertFirstButtonReturn else { return .terminateCancel }
+        capture.stop()
+        return .terminateNow
     }
 }
 
@@ -107,8 +254,8 @@ struct ModeSwitch: View {
     private func button(symbol: String, active: Bool, hint: String,
                         action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 13, weight: .medium))
+            Label(hint == "Славатор" ? "Встречи" : "Чат", systemImage: symbol)
+                .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(active ? Color.white : p.muted)
                 .frame(maxWidth: .infinity)
                 .frame(height: 27)
@@ -128,11 +275,17 @@ struct Shell: View {
     var capture: LiveCapture
     var dictation: Dictation
     var chat: Chat
+    var memory: SpeakerMemory
+    var doctor: Doctor
     @State private var screen: Screen = .main
     /// Куда вернуться из чата.
     @State private var lastAppScreen: Screen = .main
+    @State private var picked: URL?
+    @Environment(\.colorScheme) private var systemScheme
 
-    private var palette: Palette { library.palette }
+    private var palette: Palette {
+        library.settings.theme == "system" ? (systemScheme == .dark ? .dark : .light) : library.palette
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -144,7 +297,7 @@ struct Shell: View {
                 // Чат живёт вне общей прокрутки: внутри неё высота не
                 // задаётся, и экран обрывался на середине окна.
                 if screen == .chat {
-                    ChatScreen(library: library, chat: chat)
+                    ChatScreen(library: library, chat: chat, memory: memory, player: player)
                         .padding(.horizontal, 28)
                         .padding(.vertical, 22)
                 } else {
@@ -153,17 +306,18 @@ struct Shell: View {
                         switch screen {
                         case .main:      MainScreen(library: library, player: player,
                                                     pipeline: pipeline, capture: capture,
+                                                    doctor: doctor, picked: $picked,
                                                     screen: $screen)
                         case .records:   RecordsScreen(library: library, player: player,
-                                                      pipeline: pipeline, screen: $screen)
-                        case .speakers:  SpeakersScreen(library: library, player: player, screen: $screen)
+                                                      pipeline: pipeline, memory: memory, screen: $screen)
+                        case .speakers:  SpeakersScreen(library: library, player: player, memory: memory, screen: $screen)
                         case .newVoices: NewVoicesScreen(library: library, player: player)
                         // Чат нарисован выше, вне прокрутки. Ветка нужна
                         // только чтобы перечисление было исчерпано.
                         case .chat:      EmptyView()
                         case .settings:  SettingsScreen(library: library, dictation: dictation)
                         case .person(let key): PersonScreen(library: library, player: player,
-                                                            key: key, screen: $screen)
+                                                            key: key, screen: $screen, memory: memory)
                         }
                     }
                     .padding(.horizontal, 28)
@@ -173,6 +327,9 @@ struct Shell: View {
                 }
                 }
 
+                if capture.isRecording || pipeline.isRunning {
+                    activityBar
+                }
                 if player.isActive {
                     PlayerBar(player: player)
                         .transition(.move(edge: .bottom))
@@ -181,8 +338,48 @@ struct Shell: View {
             .background(palette.bg)
         }
         .environment(\.palette, palette)
+        .foregroundStyle(palette.text)
+        .onAppear { applyAppearance(library.settings.theme) }
+        .onChange(of: library.settings.theme) { _, value in applyAppearance(value) }
+        .onChange(of: pipeline.isRunning) { _, running in if running { chat.stop() } }
+        .preferredColorScheme(library.settings.theme == "system" ? nil : (palette == .dark ? .dark : .light))
         .animation(.easeOut(duration: 0.18), value: player.isActive)
         .background(palette.bg)
+        .onReceive(NotificationCenter.default.publisher(for: .settingsSaveFailed)) { message in
+            showAlert("Не удалось сохранить настройки", message.object as? String ?? "Проверьте доступ к папке приложения.")
+        }
+    }
+
+    private var activityBar: some View {
+        VStack(spacing: 10) {
+            if capture.isRecording {
+                HStack(spacing: 12) {
+                    Image(systemName: "record.circle.fill").foregroundStyle(Color.hex(0xE0705F))
+                    Text("Идёт запись").font(Kind.strong())
+                    Text(hms(capture.seconds)).font(Kind.mono()).foregroundStyle(palette.muted)
+                    Spacer()
+                    Button("Остановить и обработать") {
+                        picked = finishMeeting(capture: capture, pipeline: pipeline, library: library)
+                    }.buttonStyle(QuietButton())
+                }
+            }
+            if pipeline.isRunning {
+                HStack(spacing: 12) {
+                    ProgressView().controlSize(.small)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(pipeline.isSuspended ? "Пауза на время диктовки" : pipeline.stage).font(Kind.strong())
+                        Text(pipeline.detail).font(Kind.body(12)).foregroundStyle(palette.muted).lineLimit(1)
+                    }
+                    Spacer()
+                    Text("\(Int(pipeline.percent))% ").font(Kind.mono())
+                    Button(pipeline.isCancelling ? "Останавливаю…" : "Прервать") { pipeline.cancel() }
+                        .buttonStyle(QuietButton()).disabled(pipeline.isCancelling)
+                }
+            }
+        }
+        .padding(.horizontal, 28).padding(.vertical, 12)
+        .background(palette.surface)
+        .overlay(alignment: .top) { Rectangle().fill(palette.line2).frame(height: 1) }
     }
 }
 
@@ -345,6 +542,7 @@ struct PlayDot: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(playing ? "Приостановить воспроизведение" : "Воспроизвести образец")
     }
 }
 

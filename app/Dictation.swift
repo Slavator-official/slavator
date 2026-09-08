@@ -15,6 +15,7 @@ import SwiftUI
 /// пришлось бы слать Backspace вслепую в чужой редактор.
 @Observable
 final class Dictation {
+    static var assigningHotkey = false
 
     enum Mode { case raw, tidy }
 
@@ -64,7 +65,9 @@ final class Dictation {
         // Разрешение могли выдать только что, в Системных настройках. Верить
         // прошлой проверке нельзя: карточка так и висела «нужен доступ»,
         // хотя доступ уже был.
-        guard Typer.hasAccess(prompt: false) else {
+        let allowed = Typer.hasAccess(prompt: false)
+        Dictation.logHotkey("доступ к вводу: \(allowed ? "есть" : "нет")")
+        guard allowed else {
             stopEverything()
             state = .needsAccess
             return
@@ -89,21 +92,42 @@ final class Dictation {
                      })
     }
 
+    private var installedCombo = ""
+
     private func installHotkey() {
-        guard hotkey == nil else { return }
-        hotkey = Hotkey { [weak self] down, shift in
+        // Слежение переставляем, когда сочетание сменили: старое иначе
+        // осталось бы работать, и диктовка отзывалась бы на обе клавиши.
+        let combo = settings.dictation_hotkey + "|" + settings.dictation_tidy_hotkey
+        if hotkey != nil, combo == installedCombo { return }
+        hotkey?.stop()
+        hotkey = Hotkey(dictate: settings.dictation_hotkey,
+                        tidy: settings.dictation_tidy_hotkey) { [weak self] down, wantsTidy in
             DispatchQueue.main.async {
-                if down { self?.begin(mode: shift ? .tidy : .raw) } else { self?.end() }
+                guard let self else { return }
+                guard down else { self.end(); return }
+                if case .listening = self.state {
+                    // Обработку выбирают той же клавишей плюс ⇧, а нажать их
+                    // одновременно нельзя: fn всегда успевает первой, и
+                    // диктовка начиналась обычной. Пока ничего не напечатано,
+                    // разрешаем передумать — обработка всё равно печатает
+                    // только в конце, так что терять нечего.
+                    if self.typed.isEmpty { self.mode = wantsTidy ? .tidy : .raw }
+                } else {
+                    self.begin(mode: wantsTidy ? .tidy : .raw)
+                }
             }
         }
         if hotkey?.start() != true {
             state = .needsAccess
             hotkey = nil
+            installedCombo = ""
+            return
         }
+        installedCombo = combo
     }
 
     private func stopEverything() {
-        hotkey?.stop(); hotkey = nil
+        hotkey?.stop(); hotkey = nil; installedCombo = ""
         worker.stop()
         workerStarted = false
         recorder?.stop(); recorder = nil
@@ -121,6 +145,11 @@ final class Dictation {
 
     private func begin(mode: Mode) {
         guard case .idle = state else { return }
+        // Греем прямо сейчас: модель поднимается секунды, и человек как раз
+        // эти секунды говорит. К концу фразы она уже в памяти, а ждать её
+        // с готовым текстом на руках — та самая заминка, из-за которой
+        // обработка выглядела сломанной.
+        if mode == .tidy { worker.warm() }
         self.mode = mode
         lastText = ""; typed = ""; spoken = ""; seconds = 0
         state = .listening
@@ -326,26 +355,17 @@ private final class Worker {
         // рядом __pycache__. Это ломает подпись приложения, а вместе с ней
         // слетают выданные разрешения — микрофон и управление вводом.
         process.arguments = ["-B", script.path]
-        var env = ProcessInfo.processInfo.environment
+        var env = AppConfiguration.environment()
         env["SLAVATOR_DICTATION_MODEL"] = model
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONDONTWRITEBYTECODE"] = "1"
-        if let text = try? String(contentsOf: Paths.configEnv, encoding: .utf8) {
-            for line in text.split(separator: "\n") {
-                let raw = line.trimmingCharacters(in: .whitespaces)
-                guard !raw.hasPrefix("#"), let eq = raw.firstIndex(of: "=") else { continue }
-                let key = String(raw[raw.startIndex..<eq])
-                var value = String(raw[raw.index(after: eq)...])
-                value = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-                env[key] = value
-            }
-        }
         process.environment = env
 
         let toWorker = Pipe(), fromWorker = Pipe()
         process.standardInput = toWorker
         process.standardOutput = fromWorker
-        process.standardError = Pipe()
+        // Непрочитанный stderr заполнял pipe и останавливал worker.
+        process.standardError = FileHandle.standardError
 
         fromWorker.fileHandleForReading.readabilityHandler = { [weak self] handle in
             guard let self else { return }
@@ -387,6 +407,11 @@ private final class Worker {
         send(["cmd": "transcribe", "path": path.path]) { text, _ in done(text) }
     }
 
+    /// Поднять языковую модель в память, не дожидаясь ответа.
+    func warm() {
+        send(["cmd": "warm"], reply: nil)
+    }
+
     func tidy(text: String, level: String, done: @escaping (String, Bool) -> Void) {
         send(["cmd": "tidy", "text": text, "level": level], reply: done)
     }
@@ -414,6 +439,9 @@ private final class Worker {
 private final class Recorder {
     private let engine = AVAudioEngine()
     private var samples: [Int16] = []
+    /// Сколько отсчётов ушло в последний снимок: ровно их и забываем, когда
+    /// фраза закрыта. Всё, что записалось позже, ещё не напечатано.
+    private var taken = 0
     private let lock = NSLock()
     private var converter: AVAudioConverter?
     private var file: URL?
@@ -448,12 +476,12 @@ private final class Recorder {
             guard failure == nil, out.frameLength > 0,
                   let channel = out.int16ChannelData?[0] else { return }
 
-            var peak: Int16 = 0
+            var peak = 0
             var slice: [Int16] = []
             slice.reserveCapacity(Int(out.frameLength))
             for i in 0..<Int(out.frameLength) {
                 slice.append(channel[i])
-                peak = max(peak, abs(channel[i]))
+                peak = max(peak, abs(Int(channel[i])))
             }
             self.lock.lock()
             self.samples.append(contentsOf: slice)
@@ -485,17 +513,38 @@ private final class Recorder {
     }
 
     /// Начать фразу заново: прошлая уже напечатана целиком.
+    ///
+    /// Выбрасываем ровно то, что ушло в снимок, а не всё подряд. Распознавание
+    /// занимает доли секунды, и человек в это время продолжает говорить —
+    /// прежний сброс стирал эти слова вместе с уже напечатанными, и фраза
+    /// теряла начало. Со стороны это выглядело как «иногда обрезает».
     func reset() {
         lock.lock()
-        samples.removeAll(keepingCapacity: true)
+        // Перед срезом оставляем тишину — но только настоящую тишину.
+        //
+        // Заход, начинающийся ровно на звуке, стоил распознавателю первого
+        // слова. Запас вслепую стоил дороже: если в него попадал хвост
+        // предыдущей фразы, она распознавалась второй раз и «Привет»
+        // печатался дважды. Поэтому отступаем от среза назад, пока идёт
+        // молчание, и останавливаемся на первом же звуке.
+        if taken > 0, taken <= samples.count {
+            let limit = max(0, taken - 5600)          // не дальше 0,35 с
+            var cut = taken
+            while cut > limit, abs(Int(samples[cut - 1])) <= 500 { cut -= 1 }
+            samples.removeFirst(cut)
+        } else {
+            samples.removeAll(keepingCapacity: true)
+        }
+        taken = 0
         lastLoud = Date()
-        heard = false
+        // Хвост мог остаться со речью — тогда фраза уже началась.
+        heard = samples.contains { abs(Int($0)) > 500 }
         lock.unlock()
     }
 
     /// Полный WAV со всем, что записано на этот момент.
     func snapshot() -> URL? {
-        lock.lock(); let data = samples; lock.unlock()
+        lock.lock(); let data = samples; taken = data.count; lock.unlock()
         guard data.count > 1600 else { return nil }        // меньше 0,1 с — нечего слать
 
         let url = file ?? FileManager.default.temporaryDirectory
@@ -546,6 +595,12 @@ private final class Typer {
                 down.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: pointer.baseAddress)
                 up.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: pointer.baseAddress)
             }
+            // Клавишу диктовки человек всё это время держит, и её флаг
+            // уезжал вместе с буквой. Одни программы такое проглатывали,
+            // другие — нет: в браузере текст появлялся, в приложениях на
+            // Electron исчезал молча. Событию модификаторы не нужны.
+            down.flags = []
+            up.flags = []
             down.post(tap: .cghidEventTap)
             up.post(tap: .cghidEventTap)
             usleep(1200)
@@ -555,15 +610,129 @@ private final class Typer {
 
 // MARK: - Горячая клавиша
 
-/// Следит за удержанием правого ⌥. Fn и двойной Control занимает системная
-/// диктовка Apple, поэтому взят правый Option: в одиночку его почти не жмут.
+/// Сочетание модификаторов, которое нужно удерживать.
+///
+/// Только модификаторы: обычную клавишу удерживать нельзя — она печаталась бы
+/// в то же поле, куда потом идёт надиктованное.
+///
+/// Сторона (левый/правый) сохраняется только у одиночной клавиши: правый ⌥
+/// сам по себе почти не нажимают, в этом и был смысл значения по умолчанию.
+/// У сочетания из двух и более сторона не важна — держать ⌘⌥ левой рукой или
+/// правой человек решает по месту, и запоминать за него не надо.
+enum HotCombo {
+    /// Маски отдельных клавиш. Их различает только CGEvent: NSEvent отдаёт
+    /// общие флаги, по которым левый ⌥ не отличить от правого.
+    private static let sided: [(token: String, bit: UInt64, sign: String, side: String)] = [
+        ("lctrl",  0x0000_0001, "⌃", "левый"),
+        ("rctrl",  0x0000_2000, "⌃", "правый"),
+        ("lshift", 0x0000_0002, "⇧", "левый"),
+        ("rshift", 0x0000_0004, "⇧", "правый"),
+        ("lcmd",   0x0000_0008, "⌘", "левый"),
+        ("rcmd",   0x0000_0010, "⌘", "правый"),
+        ("lopt",   0x0000_0020, "⌥", "левый"),
+        ("ropt",   0x0000_0040, "⌥", "правый"),
+    ]
+
+    /// Те же клавиши, когда сторона не важна. Порядок — как на клавиатуре.
+    ///
+    /// fn стоит особняком: стороны у неё нет, и системная диктовка Apple
+    /// висит на ней же. Мы её всё равно разрешаем — человек вправе занять
+    /// её собой, раз системную диктовку не использует.
+    private static let plain: [(token: String, mask: CGEventFlags, sign: String)] = [
+        ("fn", .maskSecondaryFn, "fn"),
+        ("ctrl", .maskControl, "⌃"), ("opt", .maskAlternate, "⌥"),
+        ("shift", .maskShift, "⇧"), ("cmd", .maskCommand, "⌘"),
+    ]
+
+    static let allBits: UInt64 = sided.reduce(0) { $0 | $1.bit }
+
+    /// Во что превратить нажатое: одна клавиша — со стороной, несколько — без.
+    static func tokens(from raw: UInt64) -> String {
+        let held = sided.filter { raw & $0.bit != 0 }
+        if held.isEmpty { return "" }
+        if held.count == 1 { return held[0].token }
+        return plain.filter { item in held.contains { $0.sign == item.sign } }
+                    .map(\.token).joined(separator: "+")
+    }
+
+    /// Подпись для человека: «правый ⌥», «⌥⇧».
+    ///
+    /// Сторону называем только у одиночной клавиши: в сочетании она и так не
+    /// проверяется, а «правый ⌥ и любой ⇧» — подпись, которую не прочесть
+    /// с одного взгляда.
+    static func label(_ combo: String) -> String {
+        let parts = combo.split(separator: "+").map(String.init)
+        if parts.count == 1, let one = sided.first(where: { $0.token == parts[0] }) {
+            return "\(one.side) \(one.sign)"
+        }
+        let signs = plain.compactMap { item -> String? in
+            let mine = parts.contains(item.token)
+                || sided.contains { $0.sign == item.sign && parts.contains($0.token) }
+            return mine ? item.sign : nil
+        }.joined()
+        return signs.isEmpty ? "не задано" : signs
+    }
+
+    /// Сочетание по кодам физических клавиш: их сообщает NSEvent, когда
+    /// меняются модификаторы, и по ним сторона видна без лишних догадок.
+    static func tokens(fromKeyCodes codes: Set<UInt16>) -> String {
+        let byCode: [UInt16: String] = [
+            59: "lctrl", 62: "rctrl", 56: "lshift", 60: "rshift",
+            55: "lcmd",  54: "rcmd",  58: "lopt",   61: "ropt",
+            63: "fn",
+        ]
+        let held = codes.compactMap { byCode[$0] }
+        if held.isEmpty { return "" }
+        if held.count == 1 { return held[0] }
+        // В сочетании сторона не проверяется — обобщаем до знака клавиши,
+        // а порядок берём с клавиатуры, чтобы подпись не прыгала.
+        return plain.filter { item in
+            held.contains(item.token)
+                || sided.contains { $0.token != item.token && held.contains($0.token)
+                                    && $0.sign == item.sign }
+        }.map(\.token).joined(separator: "+")
+    }
+
+    /// Держат ли сейчас всё, что нужно. Лишние модификаторы не мешают: ими
+    /// как раз переключается обработка.
+    static func held(_ combo: String, flags: CGEventFlags) -> Bool {
+        let parts = combo.split(separator: "+").map(String.init)
+        if parts.isEmpty { return false }
+        for token in parts {
+            if let one = sided.first(where: { $0.token == token }) {
+                if flags.rawValue & one.bit == 0 { return false }
+            } else if let any = plain.first(where: { $0.token == token }) {
+                if !flags.contains(any.mask) { return false }
+            } else {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// Занят ли ⇧ самим сочетанием.
+    static func usesShift(_ combo: String) -> Bool {
+        combo.split(separator: "+").contains { $0.hasSuffix("shift") }
+    }
+}
+
+/// Следит за удержанием выбранного сочетания. Fn и двойной Control занимает
+/// системная диктовка Apple, поэтому по умолчанию взят правый ⌥: в одиночку
+/// его почти не жмут.
 private final class Hotkey {
     private var tap: CFMachPort?
     private var loop: CFRunLoopSource?
+    private let dictate: String
+    private let tidy: String
     private let onChange: (Bool, Bool) -> Void
     private var down = false
+    private var tidyNow = false
 
-    init(onChange: @escaping (Bool, Bool) -> Void) { self.onChange = onChange }
+    init(dictate: String, tidy: String, onChange: @escaping (Bool, Bool) -> Void) {
+        self.dictate = dictate
+        self.tidy = tidy
+        self.onChange = onChange
+    }
 
     func start() -> Bool {
         let mask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
@@ -594,12 +763,27 @@ private final class Hotkey {
     }
 
     private func handle(_ event: CGEvent) {
-        let code = event.getIntegerValueField(.keyboardEventKeycode)
-        guard code == 61 else { return }                       // правый ⌥
-        let pressed = event.flags.contains(.maskAlternate)
-        guard pressed != down else { return }
+        guard !Dictation.assigningHotkey else { return }
+        // Код клавиши не смотрим: у сочетания их несколько, и важно состояние
+        // целиком, а не то, какая из них шевельнулась последней.
+        //
+        // Обработку проверяем первой: её сочетание обычно содержит в себе
+        // сочетание диктовки (⌥ и ⌥⇧), и при обратном порядке до неё бы
+        // никогда не дошло.
+        let wantsTidy = HotCombo.held(self.tidy, flags: event.flags)
+        let pressed = wantsTidy || HotCombo.held(dictate, flags: event.flags)
+        if pressed == down {
+            // Клавишу держат, но набор модификаторов изменился: добавили ⇧
+            // к уже нажатой fn. Это выбор обработки, и о нём надо сказать.
+            if down, wantsTidy != tidyNow {
+                tidyNow = wantsTidy
+                onChange(true, wantsTidy)
+            }
+            return
+        }
         down = pressed
-        onChange(pressed, event.flags.contains(.maskShift))
+        tidyNow = wantsTidy
+        onChange(pressed, wantsTidy)
     }
 }
 
@@ -689,5 +873,29 @@ extension Color {
         self.init(red: Double((value >> 16) & 0xFF) / 255,
                   green: Double((value >> 8) & 0xFF) / 255,
                   blue: Double(value & 0xFF) / 255)
+    }
+}
+
+// MARK: - Журнал назначения клавиши
+
+extension Dictation {
+    /// Короткая запись о том, что происходит при назначении сочетания.
+    ///
+    /// Заведена не от любви к логам: поломку записи нельзя было увидеть со
+    /// стороны — кнопка молчала одинаково и когда события не приходят, и
+    /// когда приходят, но не опознаются.
+    static func logHotkey(_ line: String) {
+        let dir = Paths.support.appending(path: "logs")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appending(path: "hotkey.log")
+        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        guard let data = "\(stamp)  \(line)\n".data(using: .utf8) else { return }
+        if let handle = try? FileHandle(forWritingTo: file) {
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+            try? handle.close()
+        } else {
+            try? data.write(to: file)
+        }
     }
 }

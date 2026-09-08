@@ -292,6 +292,11 @@ def embed(wav: Path, start: Optional[float] = None, end: Optional[float] = None)
 _recognizer = None
 
 
+def release_asr():
+    global _recognizer
+    _recognizer = None
+
+
 def recognizer():
     """Распознаватель GigaAM v3 (CTC).
 

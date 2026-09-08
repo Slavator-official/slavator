@@ -72,12 +72,14 @@ CJM
 }
 
 $Config = Join-Path $SupportDir "config.env"
+if (-not (Test-Path $Config)) {
 @"
 # Локальная конфигурация Windows.
 MEETING_TRANSCRIBER_ASR="faster-whisper"
 MEETING_TRANSCRIBER_LLM="qwen3:8b"
 MEETING_TRANSCRIBER_GLOSSARY="$Glossary"
 "@ | Set-Content -Encoding UTF8 $Config
+}
 
 if (-not $SkipOllama) {
     Step "Ollama и qwen3:8b"
@@ -97,6 +99,8 @@ if (-not $SkipOllama) {
         Start-Process -FilePath $Ollama.Source -ArgumentList "serve" -WindowStyle Hidden -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 3
         & $Ollama.Source pull qwen3:8b
+        & $Ollama.Source pull embeddinggemma:300m
+        if ($LASTEXITCODE -ne 0) { Write-Warning "Модель смыслового поиска не скачалась. Повторите: ollama pull embeddinggemma:300m" }
     } else {
         Write-Warning "Ollama не установлена. Стенограмма будет работать, резюме — нет."
     }

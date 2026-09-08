@@ -29,6 +29,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 import unicodedata
@@ -102,7 +103,8 @@ NORMALIZE_TERMS = os.environ.get("MEETING_TRANSCRIBER_NORMALIZE", "0") not in ("
 INFER_NAMES = os.environ.get("MEETING_TRANSCRIBER_INFER_NAMES", "1") not in ("0", "false", "no")
 NAME_CONFIDENCE = float(os.environ.get("MEETING_TRANSCRIBER_NAME_CONFIDENCE", "0.75"))
 
-WHISPER_MODEL = os.environ.get("MEETING_TRANSCRIBER_WHISPER_MODEL", "large-v3")
+WHISPER_MODEL = os.environ.get("MEETING_TRANSCRIBER_WHISPER_MODEL", "small")
+WHISPER_THREADS = max(1, min(16, int(os.environ.get("MEETING_TRANSCRIBER_CPU_THREADS", "4"))))
 # Детектор речи по умолчанию выключен: он терял до 80% реплик. См. пояснение
 # в _transcribe_whisper. Включается обратно только осознанно.
 USE_VAD = os.environ.get("MEETING_TRANSCRIBER_VAD", "0") not in ("0", "", "false", "no")
@@ -262,6 +264,21 @@ class SecurityError(PipelineError):
 # --------------------------------------------------------------------------
 
 
+def speak_utf8() -> None:
+    """Весь вывод — в utf-8, какой бы ни была кодовая страница системы.
+
+    На Windows с некириллической страницей ядро падало на первом же русском
+    слове: print уходил в cp1252 и обрывался UnicodeEncodeError посреди
+    работы. Интерфейс читает этот поток как utf-8, сборка — тоже. Под
+    pythonw потоков может не быть вовсе, поэтому ошибки здесь не страшны.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def log(message: str) -> None:
     print(message, flush=True)
 
@@ -309,6 +326,7 @@ class Utterance:
     speaker_id: str = ""          # SPEAKER_00 из диаризации
     speaker_name: str = ""        # человеческое имя, если голос опознан
     confidence: float = 0.0
+    words: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def label(self) -> str:
@@ -395,6 +413,24 @@ def _av():
     return _require("av", "av", "Он нужен для чтения видео и аудио без ffmpeg.")
 
 
+def packages_missing(need_diarization: bool = True) -> list:
+    """Каких библиотек не хватает. Список, а не исключение: этим же знанием
+    пользуется отчёт о готовности, а он ничего не роняет."""
+    checks = [("av", "av"), ("numpy", "numpy"), ("docx", "python-docx")]
+    if need_diarization or ASR_ENGINE.startswith("giga"):
+        checks.append(("sherpa_onnx", "sherpa-onnx"))
+    if not ASR_ENGINE.startswith("giga"):
+        checks.append(("faster_whisper", "faster-whisper"))
+
+    absent = []
+    for module, package in checks:
+        try:
+            __import__(module)
+        except ImportError:
+            absent.append(package)
+    return absent
+
+
 def preflight(need_llm: bool = True, need_diarization: bool = True) -> bool:
     """Проверить все зависимости разом.
 
@@ -407,17 +443,8 @@ def preflight(need_llm: bool = True, need_diarization: bool = True) -> bool:
     """
     problems: list[str] = []
 
-    checks = [("av", "av"), ("numpy", "numpy"), ("docx", "python-docx")]
-    if need_diarization or ASR_ENGINE.startswith("giga"):
-        checks.append(("sherpa_onnx", "sherpa-onnx"))
-    if not ASR_ENGINE.startswith("giga"):
-        checks.append(("faster_whisper", "faster-whisper"))
-
-    for module, package in checks:
-        try:
-            __import__(module)
-        except ImportError:
-            problems.append(f"  - нет пакета {package}")
+    for package in packages_missing(need_diarization):
+        problems.append(f"  - нет пакета {package}")
 
     if problems:
         support_hint = (
@@ -573,7 +600,8 @@ def whisper_model():
             ) from exc
         log(f"    модель {WHISPER_MODEL} ({WHISPER_DEVICE}/{WHISPER_COMPUTE})")
         _whisper_model = WhisperModel(
-            WHISPER_MODEL, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE
+            WHISPER_MODEL, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE,
+            cpu_threads=WHISPER_THREADS, num_workers=1,
         )
     return _whisper_model
 
@@ -665,7 +693,9 @@ def _transcribe_whisper(wav: Path, duration: float, glossary: list) -> list:
             start = float(words[0].start)
             end = float(words[-1].end)
         result.append(
-            Utterance(start=start, end=end, text=text, confidence=confidence)
+            Utterance(start=start, end=end, text=text, confidence=confidence,
+                      words=[{"start":float(w.start),"end":float(w.end),"word":w.word}
+                             for w in (words or [])])
         )
         if total:
             stage_pct("asr", segment.end / total, f"{int(segment.end)} с из {int(total)} с")
@@ -971,29 +1001,9 @@ def merge_split_voices(wav: Path, turns: list, threshold: float = MERGE_THRESHOL
 
 
 def assign_speakers(utterances: list[Utterance], turns: list[dict[str, Any]]) -> None:
-    """Каждой реплике - голос с наибольшим перекрытием по времени."""
-    if not turns:
-        for item in utterances:
-            item.speaker_id = "SPEAKER_00"
-        return
-
-    for item in utterances:
-        best_speaker = ""
-        best_overlap = 0.0
-        for turn in turns:
-            overlap = min(item.end, turn["end"]) - max(item.start, turn["start"])
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best_speaker = turn["speaker"]
-        if not best_speaker:
-            # Реплика не попала ни в один интервал - берём ближайший по центру.
-            center = (item.start + item.end) / 2
-            nearest = min(
-                turns,
-                key=lambda t: min(abs(center - t["start"]), abs(center - t["end"])),
-            )
-            best_speaker = nearest["speaker"]
-        item.speaker_id = best_speaker
+    """Разбить фразы на сменах голоса по меткам слов; сомнения оставить явными."""
+    from speech_alignment import align_utterances
+    utterances[:] = align_utterances(utterances, turns)
 
 
 # --------------------------------------------------------------------------
@@ -1474,13 +1484,149 @@ def ollama_health() -> tuple[bool, str]:
         return False, f"не удалось получить список моделей ({exc})"
 
     models = {str(item.get("name", "")) for item in tags.get("models", [])}
-    if not any(name == OLLAMA_MODEL or name.startswith(OLLAMA_MODEL) for name in models):
+    if not ollama_has_model(models):
         available = ", ".join(sorted(models)[:5]) or "нет моделей"
         return False, (
             f"модель «{OLLAMA_MODEL}» не установлена (доступно: {available}). "
             f"Выполните: ollama pull {OLLAMA_MODEL}"
         )
     return True, str(version.get("version", ""))
+
+
+OLLAMA_MAC_APP = Path("/Applications/Ollama.app")
+
+
+def ollama_binary():
+    """Найти Ollama, где бы её ни поставили.
+
+    Одного PATH мало: окно программы, запущенное из Finder или из меню
+    «Пуск», получает урезанный PATH — без /opt/homebrew/bin и без
+    %LOCALAPPDATA%. Ollama, поставленная из Homebrew или winget, при такой
+    проверке «исчезала», и установщик предлагал скачать её заново, хотя она
+    уже стояла на машине. Поэтому смотрим и в известные места установки.
+    """
+    found = shutil.which("ollama")
+    if found:
+        return Path(found)
+
+    candidates = [
+        OLLAMA_MAC_APP / "Contents" / "Resources" / "ollama",
+        Path("/opt/homebrew/bin/ollama"),
+        Path("/usr/local/bin/ollama"),
+        Path("/usr/bin/ollama"),
+    ]
+    for base in (os.environ.get("LOCALAPPDATA"), os.environ.get("ProgramFiles")):
+        if base:
+            candidates.append(Path(base) / "Programs" / "Ollama" / "ollama.exe")
+            candidates.append(Path(base) / "Ollama" / "ollama.exe")
+
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def ollama_running(timeout: int = 3) -> bool:
+    """Сервер отвечает на своём порту."""
+    try:
+        _http_json(f"{OLLAMA_HOST}/api/version", timeout=timeout)
+        return True
+    except Exception:  # noqa: BLE001 - любая неудача значит «не отвечает»
+        return False
+
+
+def ollama_serve(wait_seconds: int = 30) -> bool:
+    """Поднять Ollama и дождаться, пока она ответит.
+
+    На маке предпочитаем приложение: с ним появляется значок в строке меню, и
+    дальше система поднимает сервер сама. Если приложения нет, запускаем
+    «ollama serve» отдельным сеансом, отвязанным от нашего процесса: иначе
+    сервер умрёт вместе с обработкой, посреди работы.
+    """
+    # Starting a server is explicit repair, never a remote-host fallback.
+    if OLLAMA_HOST.rstrip("/") != "http://127.0.0.1:11434":
+        return False
+    if ollama_running():
+        return True
+    binary = ollama_binary()
+    if binary is None:
+        return False
+
+    detach = {"creationflags": 0x08000000} if os.name == "nt" else {"start_new_session": True}
+    try:
+        subprocess.Popen([str(binary), "serve"], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         env={**os.environ, "OLLAMA_HOST": "127.0.0.1:11434"}, **detach)
+    except OSError:
+        return False
+
+    deadline = time.monotonic() + wait_seconds
+    while time.monotonic() < deadline:
+        if ollama_running():
+            return True
+        time.sleep(1)
+    return False
+
+
+def ollama_models() -> set:
+    """Имена установленных моделей. Пустое множество и когда моделей нет, и
+    когда сервер молчит: для вызывающего разница невелика."""
+    try:
+        tags = _http_json(f"{OLLAMA_HOST}/api/tags", timeout=10)
+    except Exception:  # noqa: BLE001
+        return set()
+    return {str(item.get("name", "")) for item in tags.get("models", [])}
+
+
+def ollama_has_model(names=None) -> bool:
+    known = ollama_models() if names is None else names
+    return OLLAMA_MODEL in known or (":" not in OLLAMA_MODEL and OLLAMA_MODEL + ":latest" in known)
+
+
+def ollama_pull(model: str = "") -> bool:
+    """Скачать языковую модель, показывая, сколько уже пришло.
+
+    Тянем по протоколу самой Ollama, а не командой «ollama pull»: так прогресс
+    приходит строками JSON и виден в окне программы, а не в чужой консоли,
+    которую человек не открывал.
+    """
+    name = model or OLLAMA_MODEL
+    request = urllib.request.Request(
+        f"{OLLAMA_HOST}/api/pull",
+        data=json.dumps({"model": name, "stream": True}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST")
+
+    log(f"    Загружаю языковую модель {name}; точный объём покажет Ollama")
+    shown = -5
+    try:
+        with urllib.request.urlopen(request, timeout=OLLAMA_TIMEOUT) as response:
+            for raw in response:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if item.get("error"):
+                    warn(f"Ollama не отдала модель: {item['error']}")
+                    return False
+                total = int(item.get("total") or 0)
+                done = int(item.get("completed") or 0)
+                if total:
+                    pct = int(done * 100 / total)
+                    if pct >= shown + 5:
+                        shown = pct
+                        progress("llm", 45 + pct * 0.5,
+                                 f"{pct}% из {total // (1024 * 1024)} МБ")
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        warn(f"Не удалось загрузить модель: {exc}")
+        return False
+    return ollama_has_model()
 
 
 def ollama_chat(system: str, user: str, json_mode: bool = True,
@@ -1714,7 +1860,8 @@ def infer_speaker_names(utterances: list, extra_dir: Path) -> dict:
     спикеров попадали бы выдуманные люди.
     """
     unknown = sorted({item.speaker_id for item in utterances
-                      if item.speaker_id and not item.speaker_name})
+                      if item.speaker_id and not item.speaker_name
+                      and not item.speaker_id.startswith("UNASSIGNED_")})
     if not unknown:
         return {}
 
@@ -2177,6 +2324,15 @@ def run_pipeline(
             own.append(item)
         log(f"    ваших реплик: {len(own)}")
 
+    # Meeting ASR is finished. Keeping its cached model through diarization
+    # and the LLM step wastes memory on 8-GB office machines.
+    global _whisper_model
+    _whisper_model = None
+    if ASR_ENGINE.startswith("giga"):
+        _engine().release_asr()
+    import gc
+    gc.collect()
+
     stage_start("quality")
     utterances, warnings = quality_gate(utterances, state.duration)
     state.warnings = warnings
@@ -2210,6 +2366,10 @@ def run_pipeline(
         log("Разделение на спикеров пропущено (--no-diarization)")
 
     assign_speakers(utterances, turns)
+    # A phrase may split at a speaker change. Word timings retain original ASR
+    # tokens, so apply deterministic terminology repair to the final pieces.
+    if glossary:
+        _local("glossary_fix").repair(utterances, glossary)
 
     hints: dict = {}
     names: dict = {}
@@ -2218,7 +2378,8 @@ def run_pipeline(
         state.matches = identify_speakers(paths.wav, turns, profiles_dir)
         names.update({m.speaker_id: m.name for m in state.matches if m.known})
         for item in utterances:
-            item.speaker_name = names.get(item.speaker_id, "")
+            item.speaker_name = ("Голос не определён" if item.speaker_id.startswith("UNASSIGNED_")
+                                 else names.get(item.speaker_id, ""))
 
         # Имена определяем ДО выгрузки образцов: подсказка попадает в имя
         # WAV-файла и сразу видна пользователю в разделе «Новые голоса».
@@ -2453,6 +2614,9 @@ def enroll(name: str, samples, position: str, company: str, profiles_dir: Path) 
             "Возможно, все образцы короче секунды.")
 
     total = len(sorted(folder.glob("*.wav")))
+    from speaker_links import link_sample
+    for source in files:
+        link_sample(source, key)
     log(f"Готово. Всего образцов у человека: {total}")
     return 0
 
@@ -2460,6 +2624,195 @@ def enroll(name: str, samples, position: str, company: str, profiles_dir: Path) 
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------
+# Готовность окружения и дозагрузка
+#
+# Одно место, которое знает, чего не хватает и что из этого можно дозагрузить
+# на месте. Интерфейсы — маковский на Swift и виндовый на Python — только
+# показывают список и нажимают кнопку: решение принимается здесь, чтобы на
+# разных системах оно не разъезжалось.
+# --------------------------------------------------------------------------
+
+LLM_SIZE_MB = 5200
+WHISPER_SIZE_MB = 1500
+
+
+def whisper_cached() -> bool:
+    """Модель распознавания речи уже лежит в кэше huggingface."""
+    if ASR_ENGINE.startswith("giga"):
+        return True            # у GigaAM свои модели, они в списке onnx ниже
+    local = Path(WHISPER_MODEL).expanduser()
+    if local.is_dir():
+        return all((local / name).is_file() and (local / name).stat().st_size > 0
+                   for name in ("model.bin", "config.json", "tokenizer.json"))
+    try:
+        # Resolves the installed faster-whisper model mapping and cache refs;
+        # local_files_only forbids downloads, unlike mere folder existence.
+        from faster_whisper.utils import download_model
+        cached = Path(download_model(WHISPER_MODEL, local_files_only=True))
+        return all((cached / name).is_file() and (cached / name).stat().st_size > 0
+                   for name in ("model.bin", "config.json", "tokenizer.json"))
+    except Exception:
+        return False
+
+
+def _speech_models():
+    """Какие onnx-модели нужны, каких нет и сколько недостающие весят."""
+    try:
+        engine = _engine()
+        names = list(engine.DIARIZATION_MODELS) + ["vad"]
+        if ASR_ENGINE.startswith("giga"):
+            names += list(engine.ASR_MODELS_CTC)
+        absent = list(engine.missing(names))
+        return names, absent, sum(engine.MODELS[n]["size_mb"] for n in absent)
+    except Exception:  # noqa: BLE001 - без библиотек модуль может не подняться
+        return [], ["не удалось проверить модели"], 0
+
+
+def readiness() -> dict:
+    """Что на месте, чего нет и что из этого дозагружается кнопкой."""
+    items = []
+
+    packages = packages_missing()
+    items.append({
+        "key": "packages",
+        "title": "Библиотеки распознавания",
+        "state": "ok" if not packages else "missing",
+        "detail": ", ".join(packages),
+        "size_mb": 0,
+        # Библиотеки ставит установщик: ему нужны интернет, компилятор и
+        # права, которых у окна программы нет.
+        "fixable": False,
+    })
+
+    _, absent, size = ([], ["сначала восстановите библиотеки"], 0) if packages else _speech_models()
+    items.append({
+        "key": "speech",
+        "title": "Модели разделения голосов",
+        "state": "ok" if not absent else "missing",
+        "detail": ", ".join(absent),
+        "size_mb": size,
+        "fixable": True,
+    })
+
+    asr_ready = not packages and whisper_cached()
+    items.append({
+        "key": "asr",
+        "title": f"Модель распознавания речи ({WHISPER_MODEL})",
+        "state": "ok" if asr_ready else "missing",
+        "detail": "",
+        "size_mb": 0 if asr_ready else WHISPER_SIZE_MB,
+        "fixable": True,
+    })
+
+    binary = ollama_binary()
+    local = OLLAMA_HOST.rstrip("/") == "http://127.0.0.1:11434"
+    running = local and ollama_running()
+    items.append({
+        "key": "ollama",
+        "title": "Ollama",
+        "state": "ok" if running else ("stopped" if binary else "missing"),
+        "detail": "" if running else ("установлена, но не запущена" if binary
+                                      else "не установлена"),
+        "size_mb": 0,
+        # Скачать саму Ollama отсюда мы не беремся: это дело установщика, у
+        # него есть права на /Applications. А запустить уже установленную —
+        # можем, и именно этого не хватало чаще всего.
+        "fixable": binary is not None,
+    })
+
+    # Пока сервер молчит, о моделях спрашивать некого — это «неизвестно», а не
+    # «нет»: сказать «модели нет» и отправить человека качать пять гигабайт
+    # заново было бы враньём.
+    model_state = ("ok" if ollama_has_model() else "missing") if running else "unknown"
+    items.append({
+        "key": "llm",
+        "title": f"Языковая модель {OLLAMA_MODEL}",
+        "state": model_state,
+        "detail": "" if model_state != "unknown" else "неизвестно, пока Ollama не запущена",
+        "size_mb": 0 if model_state == "ok" else LLM_SIZE_MB,
+        "fixable": binary is not None,
+    })
+
+    incomplete = [item for item in items if item["state"] != "ok"]
+    return {
+        "version": APP_VERSION,
+        "ok": not incomplete,
+        "items": items,
+        "missing": [item["key"] for item in incomplete],
+        "can_repair": any(item["fixable"] for item in incomplete),
+        "needs_setup": any(not item["fixable"] for item in incomplete),
+        "size_mb": sum(item["size_mb"] for item in incomplete),
+    }
+
+
+def repair(allow_download: bool = False) -> int:
+    """Дозагрузить недостающее и поднять то, что не запущено."""
+    if OLLAMA_HOST.rstrip("/") != "http://127.0.0.1:11434":
+        log("Восстановление доступно только для локальной Ollama: http://127.0.0.1:11434")
+        return 2
+    if not allow_download:
+        log("Загрузка не разрешена. Используйте --repair --allow-download после явного согласия на интернет.")
+        return 2
+    report = readiness()
+    if report["ok"]:
+        log("Всё на месте — дозагружать нечего.")
+        return 0
+    if report["needs_setup"]:
+        broken = next(item for item in report["items"]
+                      if item["state"] != "ok" and not item["fixable"])
+        log("")
+        log(f"ОШИБКА: не хватает того, что ставит установщик: {broken['title']}")
+        if broken["detail"]:
+            log(f"  {broken['detail']}")
+        log("  Подсказка: запустите установку заново кнопкой «Установить».")
+        return 2
+
+    states = {item["key"]: item for item in report["items"]}
+
+    progress("models", 5, "")
+    if states["speech"]["state"] != "ok":
+        log("Догружаю модели разделения голосов")
+        names, _, _ = _speech_models()
+        try:
+            _engine().ensure_models(names, log=log)
+        except Exception as exc:  # noqa: BLE001
+            warn(f"модели разделения голосов не догрузились: {exc}")
+
+    progress("asr", 20, "")
+    if states["asr"]["state"] != "ok":
+        log(f"Догружаю модель распознавания речи (~{WHISPER_SIZE_MB} МБ)")
+        try:
+            whisper_model()
+            log("    модель распознавания на месте")
+        except Exception as exc:  # noqa: BLE001
+            warn(f"модель распознавания не догрузилась: {exc}")
+
+    progress("ollama", 40, "")
+    if states["ollama"]["state"] != "ok":
+        log("Запускаю Ollama")
+        if ollama_serve():
+            log("    Ollama запущена")
+        else:
+            warn("Ollama не запустилась. Резюме и определение имён будут пропущены.")
+
+    progress("llm", 45, "")
+    if ollama_running() and not ollama_has_model():
+        ollama_pull()
+
+    final = readiness()
+    progress("llm", 100, "готово")
+    log("")
+    if final["ok"]:
+        log("Всё на месте.")
+        return 0
+    log("Осталось незакрытым:")
+    for item in final["items"]:
+        if item["state"] != "ok":
+            log(f"  - {item['title']}: {item['detail'] or 'нет на месте'}")
+    return 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2489,6 +2842,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--summarize", type=Path, default=None, metavar="КАТАЛОГ",
                         help="собрать резюме по готовой стенограмме в каталоге _result")
     parser.add_argument("--check", action="store_true", help="только проверить окружение")
+    parser.add_argument("--json", action="store_true",
+                        help="с --check: выдать отчёт о готовности машинно")
+    parser.add_argument("--allow-download", action="store_true", help="явно разрешить загрузки при --repair")
+    parser.add_argument("--repair", action="store_true",
+                        help="дозагрузить недостающее и запустить Ollama")
     parser.add_argument("--enroll", metavar="ИМЯ",
                         help="завести человека или дополнить существующего")
     parser.add_argument("--samples", nargs="+", type=Path, default=[],
@@ -2501,11 +2859,21 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     global WHISPER_LANGUAGE
 
+    speak_utf8()
     args = build_parser().parse_args(argv)
     if args.language:
         WHISPER_LANGUAGE = args.language
 
+    # Машинный отчёт печатается один и без спутников: интерфейсу иначе
+    # пришлось бы выковыривать JSON из человеческого текста.
+    if args.check and args.json:
+        print(json.dumps(readiness(), ensure_ascii=False))
+        return 0
+
     log(f"Meeting Transcriber v{APP_VERSION}")
+
+    if args.repair:
+        return repair(allow_download=args.allow_download)
 
     if args.check:
         try:

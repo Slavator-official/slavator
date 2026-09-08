@@ -1,0 +1,478 @@
+{
+  "documentType": "codex-security.hardening-analysis",
+  "schemaVersion": "1.0",
+  "analysisId": "hardening_20260908_slavator",
+  "sourceEvidence": {
+    "kind": "source_collection",
+    "label": "Текущий локальный снимок Славатора и CPU-эксперимент",
+    "collectionSha256": "443f6380bac13f25b4faeb58235d03eeefccea5974ff3be09a1fb8d2ac869c9d",
+    "artifactCount": 13,
+    "targetRevision": "4f1cbf727e0b9c44e1936c39172908ecf489a73b",
+    "sourceDrift": "present",
+    "hashMethod": "SHA-256 of concatenated '<sha256>  <repo-relative-path>\\n' in artifacts order",
+    "artifacts": [
+      {
+        "path": "core/meeting_transcriber_v25_1.py",
+        "sha256": "1ad2d38ab7df71a22e2be66d0fc705bb41afd3220ad1d6da4cd470637df0eefb"
+      },
+      {
+        "path": "core/onnx_engine.py",
+        "sha256": "c88f788294e980a0204c8b4ce9564eaefb6019021defefd05fe936bdc052eceb"
+      },
+      {
+        "path": "core/dictation_worker.py",
+        "sha256": "e9236906f92b348bbe6ca14eb7ba59ff4d74545741ef8c7fd7464565cbb1fa83"
+      },
+      {
+        "path": "core/speaker_memory.py",
+        "sha256": "89d7dcc9f44faa6a1078815bab40a420cd6c0c399a8b142e21d3642654e64e08"
+      },
+      {
+        "path": "core/speaker_links.py",
+        "sha256": "e286693858d9daba4d05cca95119300e9d4411598d9bb281ebb797c5ba110cb6"
+      },
+      {
+        "path": "core/app_config.py",
+        "sha256": "045bebb9da766c62803393a2af779f745950871e9e0d41e00860e9b60db56a48"
+      },
+      {
+        "path": "app/Chat.swift",
+        "sha256": "f879a8afd694dedf79a74e0a9ea189734fc21fe960ca70bfd4716731261a5a8c"
+      },
+      {
+        "path": "app/Configuration.swift",
+        "sha256": "d20fc4d2d4b3c07ac45758518d925c46e3519d684727633b36bed50a67ac2af1"
+      },
+      {
+        "path": "packaging/setup.command",
+        "sha256": "7ddfb762cf7e72979bc117b1f3b7f79365ef77ef78686db07b9728e92fd2d694"
+      },
+      {
+        "path": "packaging/requirements.txt",
+        "sha256": "27490d82aae3dede26b34440e10ce121b0a300f01e2ab3c84a336b64158904ea"
+      },
+      {
+        "path": "packaging/requirements-faster-whisper.txt",
+        "sha256": "0f8f93b97bd6c750ac4c20342aa41a7462780f1a74ec52d868a4394cffea9722"
+      },
+      {
+        "path": "windows/install.ps1",
+        "sha256": "3bb097f3bcfaa3cb82ffd4163b2d6ab02f63190b4e628afd683b53517aaecc05"
+      },
+      {
+        "path": "docs/benchmarks/cpu-2026-09-08.json",
+        "sha256": "da4c001f362fb931e4c1ec24d5701db6cdda2ac60f640e169a02bf20cf702762"
+      }
+    ]
+  },
+  "assessment": {
+    "outcome": "opportunities_identified",
+    "summary": "Предлагается единая граница офлайн-поставки и исполнения. Варианты не внедрены; это не полный аудит безопасности."
+  },
+  "constraints": {
+    "profile": "offline_cpu_8gb",
+    "changeHorizons": [
+      "incremental",
+      "medium_term"
+    ],
+    "nonNegotiables": [
+      "Все данные и обработка на компьютере, без интернета и сервера.",
+      "macOS, Windows, Ubuntu; 8 ГБ RAM, без NVIDIA.",
+      "Русский с англицизмами и аббревиатурами.",
+      "Не публиковать до проверки пользователя."
+    ],
+    "assumptions": [
+      "Разрешён перенос проверенного комплекта из отдельной зоны сборки по процедуре ИБ.",
+      "Нет утверждённого WER/DER, аппаратного CPU-профиля, сроков хранения и требований к ключам.",
+      "3.5 ГиБ совокупного RSS — предлагаемый критерий, не достигнутый результат."
+    ]
+  },
+  "opportunities": [
+    {
+      "opportunityId": "offline-runtime",
+      "title": "Единая граница офлайн-исполнения и поставки",
+      "summary": "Объединить владение моделями, сетью и жизненным циклом задач.",
+      "diagnosis": "Инвариант полной локальности распределён между клиентами и установщиками и не обеспечивается общей границей.",
+      "evidence": [
+        {
+          "evidenceId": "E1",
+          "title": "Разрозненные сетевые клиенты",
+          "claimType": "observed",
+          "sourceKind": "source",
+          "path": "core/meeting_transcriber_v25_1.py",
+          "claim": "Настраиваемый LLM host в нескольких клиентах; только память фиксирует loopback и отключает proxy/redirect."
+        },
+        {
+          "evidenceId": "E2",
+          "title": "Загрузка моделей во время работы",
+          "claimType": "observed",
+          "sourceKind": "source",
+          "path": "core/onnx_engine.py",
+          "claim": "ensure_models загружает отсутствующие веса; WhisperModel в обычном режиме не ограничен local_files_only."
+        },
+        {
+          "evidenceId": "E3",
+          "title": "Интернет-установка без зафиксированного набора",
+          "claimType": "observed",
+          "sourceKind": "source",
+          "path": "packaging/setup.command",
+          "claim": "Установщики скачивают компоненты, requirements содержит диапазоны версий."
+        },
+        {
+          "evidenceId": "E4",
+          "title": "Независимые сроки жизни моделей",
+          "claimType": "observed",
+          "sourceKind": "source",
+          "path": "core/meeting_transcriber_v25_1.py",
+          "claim": "ASR освобождается между этапами, но LLM, embedding и диктовка удерживают модели независимо."
+        },
+        {
+          "evidenceId": "E5",
+          "title": "Производные данные на диске",
+          "claimType": "observed",
+          "sourceKind": "source",
+          "path": "core/speaker_memory.py",
+          "claim": "JSON, SQLite и образцы открыты на диске; единой политики шифрования и удаления нет."
+        },
+        {
+          "evidenceId": "E6",
+          "title": "Измеренный CPU-профиль",
+          "claimType": "observed",
+          "sourceKind": "experiment",
+          "path": "docs/benchmarks/cpu-2026-09-08.json",
+          "claim": "Один 45-секундный фрагмент на macOS: small+диаризация, 972.5 МиБ процесса; не оценка точности."
+        },
+        {
+          "claimType": "inferred",
+          "sourceKind": "source",
+          "path": "core/app_config.py",
+          "claim": "Локальность по соглашению и независимые сроки удержания моделей не гарантируют закрытый режим на 8 ГБ."
+        }
+      ],
+      "desiredInvariants": [
+        "Ноль внешних соединений/DNS и runtime-загрузок у всех процессов.",
+        "Только подписанные и проверенные локальные компоненты.",
+        "Не более одного тяжёлого этапа одновременно.",
+        "Отмена/сбой не повреждают предыдущий результат.",
+        "Неуверенный голос не становится известной личностью.",
+        "Политика данных охватывает производные и временные копии."
+      ],
+      "proposalPath": "proposals/offline-runtime.md",
+      "options": [
+        {
+          "optionId": "local-guards",
+          "displayNumber": 1,
+          "title": "Офлайн-профиль текущего стека",
+          "kind": "baseline",
+          "summary": "Сохранить Ollama, централизовать local-only проверки и поставить проверенный офлайн-комплект с запретом внешней сети ОС.",
+          "diagramPaths": {
+            "before": "diagrams/offline-runtime-before.mmd",
+            "after": "diagrams/offline-runtime-local-guards-after.mmd"
+          },
+          "evidenceCoverage": [
+            {
+              "evidenceId": "E1",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Проверки всех клиентов и политика ОС остаются обязательными."
+            },
+            {
+              "evidenceId": "E2",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "Отсутствующая модель должна давать отказ без загрузки."
+            },
+            {
+              "evidenceId": "E3",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "Нужны lock, SBOM, лицензии весов, подпись и хеши."
+            },
+            {
+              "evidenceId": "E4",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Нужны тесты отмены, последовательности и совокупной памяти."
+            },
+            {
+              "evidenceId": "E5",
+              "effect": "unaffected",
+              "tacticalFixRequired": true,
+              "rationale": "Отдельно утвердить хранение, ACL, временные файлы, шифрование и ключи."
+            },
+            {
+              "evidenceId": "E6",
+              "effect": "unknown",
+              "tacticalFixRequired": true,
+              "rationale": "Нужны размеченный корпус и реальные целевые машины."
+            }
+          ],
+          "tradeoffs": [
+            {
+              "dimension": "security",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Меньше сетевых обходов, но широкие права процессов остаются.",
+              "validationPlan": "Негативные DNS/proxy/redirect тесты и проверка файловых полномочий всех процессов."
+            },
+            {
+              "dimension": "performance",
+              "direction": "unknown",
+              "confidence": "low",
+              "basis": "hypothetical",
+              "assessment": "Выгрузка моделей может увеличить задержку.",
+              "validationPlan": "Сравнить RTF и p95 первого ответа на одном корпусе; ASR+диаризация RTF<=1 на целевом CPU."
+            },
+            {
+              "dimension": "memory",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Явная выгрузка снижает удержание, но общая Ollama доступна другим клиентам.",
+              "validationPlan": "Полный часовой файл плюс очередь поиска/диктовки на 8 ГБ; предварительно суммарный RSS<=3.5 ГиБ, без OOM."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Недокомплект выявляется до запуска, без сетевой зависимости.",
+              "validationPlan": "Прервать все фазы, аварийно завершить worker, заполнить диск; старые результаты целы."
+            },
+            {
+              "dimension": "operability",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Нужен новый офлайн-релизный процесс.",
+              "validationPlan": "Чистая офлайн-установка и обновление на трёх ОС."
+            },
+            {
+              "dimension": "migration",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Нужно обновить установщики и все клиенты.",
+              "validationPlan": "Совместимость старых результатов, настроек и повторной индексации."
+            },
+            {
+              "dimension": "developer_ergonomics",
+              "direction": "unknown",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Меньше изменений API, но проверки распределены.",
+              "validationPlan": "Добавить тестовый обработчик без получения сетевых полномочий."
+            },
+            {
+              "dimension": "rollback",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Возможен возврат на предыдущий офлайн-пакет.",
+              "validationPlan": "Репетиция downgrade на прошлый подписанный офлайн-пакет без потери документов."
+            }
+          ],
+          "residualRisks": [
+            "Политика может расходиться между клиентами.",
+            "Loopback-сервис и права пользователя сохраняют поверхность доступа.",
+            "Нет ограниченной файловой среды декодера."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "core/meeting_transcriber_v25_1.py",
+              "core/onnx_engine.py",
+              "core/dictation_worker.py",
+              "core/speaker_memory.py",
+              "core/app_config.py",
+              "app/Chat.swift",
+              "app/Configuration.swift",
+              "packaging/setup.command",
+              "windows/install.ps1"
+            ],
+            "workPackages": [
+              "Проверенная офлайн-поставка",
+              "Единые local-only проверки",
+              "Запрет внешней сети средствами ОС",
+              "Управление выгрузкой моделей"
+            ],
+            "acceptanceCriteria": [
+              "Негативные DNS/proxy/redirect тесты и проверка файловых полномочий всех процессов.",
+              "Сравнить RTF и p95 первого ответа на одном корпусе; ASR+диаризация RTF<=1 на целевом CPU.",
+              "Полный часовой файл плюс очередь поиска/диктовки на 8 ГБ; предварительно суммарный RSS<=3.5 ГиБ, без OOM.",
+              "Прервать все фазы, аварийно завершить worker, заполнить диск; старые результаты целы.",
+              "Чистая офлайн-установка и обновление на трёх ОС.",
+              "Совместимость старых результатов, настроек и повторной индексации."
+            ],
+            "migrationNotes": [
+              "Только после выбора пользователя и сверки исходного снимка.",
+              "Сохранять форматы встреч и резервную копию; не переписывать исходники встреч."
+            ],
+            "rollback": "Предыдущий подписанный офлайн-пакет и совместимая копия индекса, без ослабления сетевых ограничений."
+          }
+        },
+        {
+          "optionId": "owned-worker",
+          "displayNumber": 2,
+          "title": "Упакованное ядро с изолированными заданиями",
+          "kind": "isolation",
+          "summary": "Версионный stdio API, последовательные ограниченные worker-процессы, подписанный офлайн-комплект.",
+          "diagramPaths": {
+            "before": "diagrams/offline-runtime-before.mmd",
+            "after": "diagrams/offline-runtime-owned-worker-after.mmd"
+          },
+          "evidenceCoverage": [
+            {
+              "evidenceId": "E1",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "Проверки всех клиентов и политика ОС остаются обязательными."
+            },
+            {
+              "evidenceId": "E2",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "Отсутствующая модель должна давать отказ без загрузки."
+            },
+            {
+              "evidenceId": "E3",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "Нужны lock, SBOM, лицензии весов, подпись и хеши."
+            },
+            {
+              "evidenceId": "E4",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "Нужны тесты отмены, последовательности и совокупной памяти."
+            },
+            {
+              "evidenceId": "E5",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Отдельно утвердить хранение, ACL, временные файлы, шифрование и ключи."
+            },
+            {
+              "evidenceId": "E6",
+              "effect": "unknown",
+              "tacticalFixRequired": true,
+              "rationale": "Нужны размеченный корпус и реальные целевые машины."
+            }
+          ],
+          "tradeoffs": [
+            {
+              "dimension": "security",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Единый владелец и ограничения задач сокращают полномочия.",
+              "validationPlan": "Негативные DNS/proxy/redirect тесты и проверка файловых полномочий всех процессов."
+            },
+            {
+              "dimension": "performance",
+              "direction": "unknown",
+              "confidence": "low",
+              "basis": "hypothetical",
+              "assessment": "Холодный старт и очередь могут ухудшить интерактивность.",
+              "validationPlan": "Сравнить RTF и p95 первого ответа на одном корпусе; ASR+диаризация RTF<=1 на целевом CPU."
+            },
+            {
+              "dimension": "memory",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Один тяжёлый этап и завершение процесса освобождают модели.",
+              "validationPlan": "Полный часовой файл плюс очередь поиска/диктовки на 8 ГБ; предварительно суммарный RSS<=3.5 ГиБ, без OOM."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Сбой worker локализован; диспетчер требует защиты от устаревших ответов.",
+              "validationPlan": "Прервать все фазы, аварийно завершить worker, заполнить диск; старые результаты целы."
+            },
+            {
+              "dimension": "operability",
+              "direction": "regresses",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "Нужны офлайн-поставка и три профиля изоляции.",
+              "validationPlan": "Чистая офлайн-установка и обновление на трёх ОС."
+            },
+            {
+              "dimension": "migration",
+              "direction": "regresses",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "Нужны протокол заданий и inference workers.",
+              "validationPlan": "Совместимость старых результатов, настроек и повторной индексации."
+            },
+            {
+              "dimension": "developer_ergonomics",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Один контракт вместо нескольких владельцев политики, сложнее тестовый harness.",
+              "validationPlan": "Добавить тестовый обработчик без получения сетевых полномочий."
+            },
+            {
+              "dimension": "rollback",
+              "direction": "unknown",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Откат зависит от совместимости индекса и протокола.",
+              "validationPlan": "Репетиция downgrade на прошлый подписанный офлайн-пакет без потери документов."
+            }
+          ],
+          "residualRisks": [
+            "Изоляция ОС ещё не подтверждена на корпоративных образах.",
+            "Диспетчер остаётся доверенным компонентом.",
+            "Шифрование/удаление и точность голосов требуют отдельных проверок."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "core/meeting_transcriber_v25_1.py",
+              "core/onnx_engine.py",
+              "core/dictation_worker.py",
+              "core/speaker_memory.py",
+              "core/app_config.py",
+              "app/Chat.swift",
+              "app/Configuration.swift",
+              "packaging/setup.command",
+              "windows/install.ps1"
+            ],
+            "workPackages": [
+              "Проверенная офлайн-поставка",
+              "Версионный диспетчер заданий",
+              "Собственные LLM/embedding workers",
+              "Платформенная изоляция",
+              "Политика жизненного цикла данных"
+            ],
+            "acceptanceCriteria": [
+              "Негативные DNS/proxy/redirect тесты и проверка файловых полномочий всех процессов.",
+              "Сравнить RTF и p95 первого ответа на одном корпусе; ASR+диаризация RTF<=1 на целевом CPU.",
+              "Полный часовой файл плюс очередь поиска/диктовки на 8 ГБ; предварительно суммарный RSS<=3.5 ГиБ, без OOM.",
+              "Прервать все фазы, аварийно завершить worker, заполнить диск; старые результаты целы.",
+              "Чистая офлайн-установка и обновление на трёх ОС.",
+              "Совместимость старых результатов, настроек и повторной индексации."
+            ],
+            "migrationNotes": [
+              "Только после выбора пользователя и сверки исходного снимка.",
+              "Сохранять форматы встреч и резервную копию; не переписывать исходники встреч."
+            ],
+            "rollback": "Предыдущий подписанный офлайн-пакет и совместимая копия индекса, без ослабления сетевых ограничений."
+          }
+        }
+      ],
+      "recommendedOptionId": "owned-worker",
+      "recommendation": "Option 2 как целевая корпоративная архитектура; Option 1 для разрешённого ИБ пилота при коротком сроке."
+    }
+  ],
+  "openQuestions": [
+    "Требования ИБ к loopback, подписи, хранению голосовых профилей и шифрованию.",
+    "Версии ОС, типичный CPU и допустимая задержка.",
+    "Размеченный корпус и допустимая ошибка текста/голосов.",
+    "Выбор пользователя до начала архитектурной миграции."
+  ]
+}

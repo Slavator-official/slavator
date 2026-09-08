@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import json
+import math
 import queue
 import subprocess
 import sys
@@ -140,6 +141,11 @@ class UI(tk.Tk):
         self.current_person_key: str | None = None
         self.events: queue.Queue = queue.Queue()
         self.proc = None
+        self.is_processing = False
+        self.cancel_requested = False
+        self.progress_percent = 0.0
+        self.progress_detail = ""
+        self.processing_log = []
         self.playback_proc = None
         self.playback_path: Path | None = None
         self.playback_state = "stopped"
@@ -230,6 +236,9 @@ class UI(tk.Tk):
 
     def _on_close(self):
         """Stop child processes and cancel scheduled polling before closing."""
+        memory = getattr(self,"memory_window",None)
+        if memory is not None and memory.winfo_exists():
+            memory.close()
         if self._poll_after is not None:
             try:
                 self.after_cancel(self._poll_after)
@@ -511,6 +520,30 @@ class UI(tk.Tk):
         self.draw_header()
         getattr(self, f"draw_{self.page}")()
         self.draw_player()
+        self.draw_processing()
+
+    def draw_processing(self):
+        """Состояние обработки остаётся видимым при смене раздела."""
+        if not self.is_processing:
+            return
+        scale = self.scale()
+        right = self.canvas.winfo_width() / scale
+        bottom = self.canvas.winfo_height() / scale
+        if self.playback_state != "stopped":
+            bottom -= 56
+        left = SIDEBAR_W if self.sidebar_open else 0
+        y = bottom - 78
+        self.rect(left, y, right, bottom, PANEL, BORDER_2, 1)
+        label = "Останавливаю…" if self.cancel_requested else "Обработка встречи"
+        self.text(left + 20, y + 20, f"{label} · {self.progress_percent:.0f}%", 12, TEXT, "bold")
+        self.text(left + 20, y + 41, self.ellipsize(self.progress_detail, 85), 10, MUTED)
+        width = max(1, right - left - 160)
+        self.rect(left + 20, y + 59, left + 20 + width, y + 63, BORDER_2, BORDER_2, 0)
+        if self.progress_percent > 0:
+            self.rect(left + 20, y + 59, left + 20 + width * self.progress_percent / 100,
+                      y + 63, BLUE, BLUE, 0)
+        self.button(right - 120, y + 22, 100, 30, "Прервать", self.cancel_processing,
+                    False, self.cancel_requested, 11)
 
     def draw_player(self):
         """Панель воспроизведения внизу окна.
@@ -711,13 +744,13 @@ class UI(tk.Tk):
         if self.selected_file is None:
             self.icon_file(l + 34, y + block_h / 2, DROP_ICON)
             self.text(l + 60, y + 38, "Выбрать запись", 14, TEXT, "bold")
-            self.text(l + 60, y + 60, "или перетащите файл сюда", 10, MUTED)
+            self.text(l + 60, y + 60, "аудио или видео с компьютера", 10, MUTED)
         else:
             self.icon_file(l + 34, y + block_h / 2, BLUE)
             self.text(l + 60, y + 32, self.ellipsize(self.selected_file.name, 30), 13, TEXT, "bold")
             self.text(l + 60, y + 52, self.file_info(self.selected_file), 10, MUTED)
             self.button(l + 60, y + 62, 174, 26, "Начать транскрибацию",
-                        self.start_transcription, True, False, 10)
+                        self.start_transcription, True, self.is_processing, 10)
         self.bind_box(l, y, l + half, y + (block_h if self.selected_file is None else 58), self.pick_file)
 
         # --- слушать встречу ---
@@ -942,8 +975,9 @@ class UI(tk.Tk):
         self.line(l,154,r,154)
         self.rect(l,170,r-120,206,PANEL_2,BORDER,1,7)
         self.text(l+14,188,"⌕",14,MUTED,"normal","center")
-        self.text(l+34,188,"Поиск по имени, должности или компании",10,MUTED,"normal","w")
-        self.button(r-104,170,104,36,"☷  Фильтры",lambda:messagebox.showinfo("Фильтры","Фильтры: компания, должность, наличие образца."),False,False,10)
+        self.text(l+34,188,"Поиск по фразе и смыслу · история реплик · граф встреч",10,MUTED,"normal","w")
+        self.bind_box(l,170,r-120,206,self.open_speaker_memory)
+        self.button(r-104,170,104,36,"Память встреч",self.open_speaker_memory,False,False,10)
         people=self.speakers.list_speakers()
         y=220
         for sp in people[:7]:
@@ -966,10 +1000,18 @@ class UI(tk.Tk):
         self.text(x+58,y+10,sp.name,11,TEXT,"bold")
         self.text(x+58,y+29,sp.position or "—",9,MUTED)
         self.text(x+58,y+43,sp.company or "—",9,MUTED)
-        self.text(r-46,y+14,f"Встреч: {sp.samples}",8,MUTED,"normal","e")
+        self.text(r-46,y+14,f"Образцов: {sp.samples}",8,MUTED,"normal","e")
         self.text(r-46,y+32,"Последняя: —",8,MUTED,"normal","e")
         self.text(r-34,y+29,"›",17,MUTED,"normal","center")
         self.bind_box(x,y,r-42,y+h,lambda k=sp.key:self.open_person(k))
+
+    def open_speaker_memory(self):
+        from speaker_memory_window import MemoryWindow
+        current = getattr(self,"memory_window",None)
+        if current is not None and current.winfo_exists():
+            current.lift()
+        else:
+            self.memory_window = MemoryWindow(self)
 
     def draw_demo_person(self,x,y,r,h,name,pos,comp,cnt):
         self.rect(x,y,r-10,y+h,PANEL_2,CARD_BORDER,1,7)
@@ -1121,12 +1163,12 @@ class UI(tk.Tk):
         keep = bool(self.settings.get("keep_diagnostics"))
         self.setting_card(l,482,r,566,"Безопасность и приватность")
         self.text(l+16,505,"Хранить диагностические данные",10,TEXT,"bold")
-        self.text(l+16,525,"Нужны, чтобы слушать фрагменты встреч после обработки",9,MUTED)
+        self.text(l+16,525,"Сохранять рабочий WAV; занимает дополнительное место",9,MUTED)
         self.toggle(r-58,511,keep,self.toggle_diagnostics)
 
         self.setting_card(l,578,r,650,"Термины команды")
         self.text(l+16,610,"Словарь",9,MUTED)
-        glossary = Path.home()/"whisper-work"/"glossary.txt"
+        glossary = Path(os.environ.get("MEETING_TRANSCRIBER_GLOSSARY", str(Path.home()/"whisper-work"/"glossary.txt")))
         try:
             count = len([x for x in glossary.read_text(encoding="utf-8").splitlines()
                          if x.strip() and not x.strip().startswith("#")])
@@ -1222,16 +1264,17 @@ class UI(tk.Tk):
 
     # ---------- data/actions ----------
     def recent_records(self):
+        from meeting_store import active_results, family_name
         root=Path(str(self.settings.get("results_dir", app_settings.DEFAULT_RESULTS_DIR))).expanduser(); out=[]
         if root.exists():
-            for d in sorted(root.glob("*_result"),key=lambda p:p.stat().st_mtime,reverse=True):
-                if not d.is_dir():
+            for d in sorted(active_results(root),key=lambda p:p.stat().st_mtime,reverse=True):
+                if not d.is_dir() or not (d / "transcript.json").is_file():
                     continue
                 turns = self.load_diarization(d)
                 speakers = len({turn["speaker"] for turn in turns}) if turns else 0
                 stamp = datetime.fromtimestamp(d.stat().st_mtime).strftime("%d.%m.%Y, %H:%M")
                 status = "С резюме" if (d / "02_summary_todo.docx").is_file() else "Стенограмма"
-                out.append((d.name.removesuffix("_result"), "—", "Запись",
+                out.append((family_name(d.name), "—", "Запись",
                             stamp, str(speakers or "—"), status, d))
         return out
 
@@ -1248,37 +1291,82 @@ class UI(tk.Tk):
         if p:self.selected_file=Path(p); self.render()
 
     def start_transcription(self):
+        if self.is_processing:
+            return
         if not self.selected_file:return messagebox.showinfo("Выберите запись","Сначала выберите файл встречи.")
         if not self.backend.available():return messagebox.showerror("Ядро не найдено","Не найдено ядро v25.1. Проверьте MEETING_TRANSCRIBER_BACKEND.")
-        threading.Thread(target=self._run_backend,daemon=True).start()
+        self.is_processing = True
+        self.cancel_requested = False
+        self.progress_percent = 0
+        self.progress_detail = self.selected_file.name
+        self.processing_log = []
+        self.render()
+        # Снимок задания: выбор другого файла или папки в GUI не меняет запуск.
+        threading.Thread(target=self._run_backend,
+                         args=(self.selected_file, dict(self.settings)), daemon=True).start()
 
-    def _run_backend(self):
+    def _run_backend(self, input_file, settings):
         try:
-            self.proc=self.backend.start_transcription(
-                self.selected_file, out_dir=Path(self.settings["results_dir"]), no_summary=False)
-            if self.proc.stdout:
-                for line in self.proc.stdout:self.events.put(("log",line.rstrip()))
-            self.events.put(("done",self.proc.wait()))
+            proc = self.backend.start_transcription(
+                input_file, out_dir=Path(settings["results_dir"]), no_summary=False,
+                keep_audio=settings["keep_diagnostics"], settings=settings)
+            self.events.put(("started", proc))
+            if proc.stdout:
+                for line in proc.stdout:self.events.put(("log",line.rstrip()))
+            self.events.put(("done",proc.wait()))
         except Exception as e:self.events.put(("error",str(e)))
 
+    def cancel_processing(self):
+        if not self.is_processing or self.cancel_requested:
+            return
+        self.cancel_requested = True
+        if self.proc is not None and self.proc.poll() is None:
+            self.proc.terminate()
+        self.render()
+
     def _poll(self):
+        changed = False
         try:
             while True:
                 kind,val=self.events.get_nowait()
-                if kind=="done":
+                if kind == "started":
+                    self.proc = val
+                    if self.cancel_requested and val.poll() is None:
+                        val.terminate()
+                elif kind=="done":
+                    self.is_processing = False
+                    self.proc = None
                     self.title("Славатор")
-                    if val==0:
+                    self.render()
+                    if self.cancel_requested:
+                        self.cancel_requested = False
+                    elif val==0:
                         self.render(); messagebox.showinfo("Готово","Запись обработана. Результаты сохранены.")
-                    else:messagebox.showerror("Ошибка обработки","Обработка завершилась с ошибкой.")
+                    else:messagebox.showerror("Ошибка обработки", "\n".join(self.processing_log[-10:]) or "Ядро завершилось без объяснения ошибки.")
                 elif kind=="log" and val.startswith("@@PROGRESS@@"):
                     try:
                         payload=json.loads(val[len("@@PROGRESS@@"):])
+                        pct = float(payload.get("pct", 0))
+                        if not math.isfinite(pct):
+                            continue
+                        self.progress_percent = max(0.0, min(100.0, pct))
+                        self.progress_detail = str(payload.get("detail") or payload.get("stage", ""))
+                        changed = True
                         self.title(f"Славатор · {payload.get('pct',0):.0f}% · {payload.get('detail') or payload.get('stage','')}")
                     except (ValueError, TypeError):
                         pass
-                elif kind=="error":messagebox.showerror("Не удалось запустить обработку",str(val))
+                elif kind == "log":
+                    self.processing_log.append(val)
+                    self.processing_log = self.processing_log[-100:]
+                elif kind=="error":
+                    self.is_processing = False
+                    self.proc = None
+                    self.render()
+                    messagebox.showerror("Не удалось запустить обработку",str(val))
         except queue.Empty:
             pass
+        if changed:
+            self.render()
         if self.playback_proc is not None and self.playback_state == "playing":
             if self.playback_proc.poll() is not None:
                 self.playback_proc = None

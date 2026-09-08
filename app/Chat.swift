@@ -16,6 +16,8 @@ final class Chat {
         var id = UUID()
         let role: Role
         var text: String
+        var sources: [MemoryQuote]? = nil
+        var fromMemory: Bool? = nil
     }
 
     struct Conversation: Identifiable, Codable, Equatable {
@@ -43,6 +45,9 @@ final class Chat {
     var thinking = false
 
     private var task: Task<Void, Never>?
+    private var process: Process?
+    private var requestID = UUID()
+    private(set) var progress = ""
 
     var current: Conversation? {
         guard let currentID else { return nil }
@@ -83,44 +88,67 @@ final class Chat {
 
     // MARK: отправка
 
-    func send(_ text: String) {
+    func send(_ text: String, settings: Settings = Settings.load()) {
         let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty, !isAnswering else { return }
         if currentID == nil { startNew() }
         guard let index = conversations.firstIndex(where: { $0.id == currentID }) else { return }
 
         failure = nil
+        let token = UUID()
+        requestID = token
+        let conversationID = conversations[index].id
         if conversations[index].messages.isEmpty {
             conversations[index].title = Conversation.name(from: prompt)
         }
-        conversations[index].messages.append(Message(role: .user, text: prompt))
-        conversations[index].messages.append(Message(role: .model, text: ""))
+        conversations[index].messages.append(Message(role: .user, text: prompt, fromMemory: settings.chat_memory_enabled))
+        conversations[index].messages.append(Message(role: .model, text: "", fromMemory: settings.chat_memory_enabled))
         conversations[index].updated = Date()
         isAnswering = true
         save()
 
+        if settings.chat_memory_enabled {
+            recall(prompt, settings: settings, token: token, conversationID: conversationID)
+            return
+        }
+        let localOnly = conversations[index].messages.contains { $0.fromMemory == true || $0.sources != nil }
         let history = conversations[index].messages.dropLast().map {
             ["role": $0.role == .user ? "user" : "assistant", "content": $0.text]
         }
-        task = Task { [weak self] in await self?.stream(history: Array(history)) }
+        task = Task { [weak self] in await self?.stream(history: Array(history), token: token, conversationID: conversationID, localOnly: localOnly) }
     }
 
     func stop() {
+        requestID = UUID()
+        if let process, process.isRunning { process.terminate() }
+        process = nil
+        progress = ""
         task?.cancel()
         task = nil
         isAnswering = false
+        if let index = conversations.firstIndex(where: { $0.id == currentID }),
+           let last = conversations[index].messages.indices.last,
+           conversations[index].messages[last].text == "Найдены возможные совпадения. Готовлю ответ…" {
+            conversations[index].messages[last].text = "Ответ остановлен. Найденные цитаты сохранены."
+        }
+        if let index = conversations.firstIndex(where: { $0.id == currentID }),
+           let last = conversations[index].messages.last, last.role == .model,
+           last.text.isEmpty && (last.sources ?? []).isEmpty {
+            conversations[index].messages.removeLast()
+        }
+        save()
     }
 
     // MARK: обмен с Ollama
 
-    private func stream(history: [[String: String]]) async {
-        let settings = Settings.load()
-        let host = ProcessInfo.processInfo.environment["MEETING_TRANSCRIBER_OLLAMA"]
-            ?? "http://127.0.0.1:11434"
-        let model = ProcessInfo.processInfo.environment["MEETING_TRANSCRIBER_LLM"]
-            ?? settings.llm_model
+    private func stream(history: [[String: String]], token: UUID, conversationID: UUID, localOnly: Bool) async {
+        let env = AppConfiguration.environment()
+        let host = localOnly ? "http://127.0.0.1:11434" : (env["MEETING_TRANSCRIBER_OLLAMA_HOST"] ?? "http://127.0.0.1:11434")
+        let model = env["MEETING_TRANSCRIBER_LLM"] ?? Settings().llm_model
 
-        guard let url = URL(string: "\(host)/api/chat") else { return }
+        guard let url = URL(string: "\(host)/api/chat") else {
+            await finish(error: "Неверный адрес модели", token: token, conversationID: conversationID); return
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -134,10 +162,14 @@ final class Chat {
         ])
 
         do {
-            let (bytes, response) = try await URLSession.shared.bytes(for: request)
+            let config = URLSessionConfiguration.ephemeral
+            config.connectionProxyDictionary = [:]
+            let session = URLSession(configuration: config, delegate: LocalChatTransport(), delegateQueue: nil)
+            defer { session.invalidateAndCancel() }
+            let (bytes, response) = try await session.bytes(for: request)
             if let http = response as? HTTPURLResponse, http.statusCode != 200 {
                 await finish(error: "Ollama ответила кодом \(http.statusCode). "
-                             + "Проверьте, что модель \(model) установлена: ollama pull \(model)")
+                             + "Проверьте, что модель \(model) установлена: ollama pull \(model)", token: token, conversationID: conversationID)
                 return
             }
             for try await line in bytes.lines {
@@ -147,22 +179,23 @@ final class Chat {
                 else { continue }
                 if let piece = (raw["message"] as? [String: Any])?["content"] as? String,
                    !piece.isEmpty {
-                    await append(piece)
+                    await append(piece, token: token, conversationID: conversationID)
                 }
                 if raw["done"] as? Bool == true { break }
             }
-            await finish(error: nil)
+            await finish(error: nil, token: token, conversationID: conversationID)
         } catch {
+            guard !Task.isCancelled else { return }
             // Ollama может быть не установлена вовсе — у части людей так и есть.
             await finish(error: "Не удалось поговорить с моделью: \(error.localizedDescription)\n\n"
                          + "Ollama запущена? Она ставится вместе со Славатором и "
-                         + "отвечает за резюме встреч и этот чат.")
+                         + "отвечает за резюме встреч и этот чат.", token: token, conversationID: conversationID)
         }
     }
 
     @MainActor
-    private func append(_ piece: String) {
-        guard let index = conversations.firstIndex(where: { $0.id == currentID }),
+    private func append(_ piece: String, token: UUID, conversationID: UUID) {
+        guard requestID == token, let index = conversations.firstIndex(where: { $0.id == conversationID }),
               var last = conversations[index].messages.last, last.role == .model
         else { return }
         last.text += piece
@@ -170,10 +203,12 @@ final class Chat {
     }
 
     @MainActor
-    private func finish(error: String?) {
+    private func finish(error: String?, token: UUID, conversationID: UUID) {
+        guard requestID == token else { return }
+        progress = ""
         isAnswering = false
         failure = error
-        if let index = conversations.firstIndex(where: { $0.id == currentID }) {
+        if let index = conversations.firstIndex(where: { $0.id == conversationID }) {
             // Пустой ответ в переписке выглядит как сбой, о котором умолчали.
             if let last = conversations[index].messages.last,
                last.role == .model, last.text.isEmpty {
@@ -182,6 +217,68 @@ final class Chat {
             conversations[index].updated = Date()
         }
         save()
+    }
+
+    private struct RecallReply: Decodable {
+        let event: String
+        var message: String?
+        var text: String?
+        var sources: [MemoryQuote]?
+        var notice: String?
+        var warnings: [String]?
+    }
+
+    private func recall(_ question: String, settings: Settings, token: UUID, conversationID: UUID) {
+        let worker = Process(), input = Pipe(), output = Pipe()
+        worker.executableURL = Paths.venvPython
+        worker.arguments = ["-B", Paths.core.deletingLastPathComponent().appending(path: "meeting_chat.py").path,
+                            "--root", settings.results_dir, "--profiles", Paths.profiles.path]
+        worker.environment = AppConfiguration.environment(settings: settings)
+        worker.standardInput = input; worker.standardOutput = output
+        worker.standardError = FileHandle.standardError
+        process = worker
+        progress = "Ищу в памяти встреч…"
+        var received = false
+        do {
+            let payload = try JSONSerialization.data(withJSONObject: ["question": question, "profile": settings.my_profile_key])
+            try worker.run()
+            try input.fileHandleForWriting.write(contentsOf: payload + Data([10]))
+            try input.fileHandleForWriting.close()
+            ProcessOutput.read(output, process: worker, onLine: { [weak self] line in
+                guard let self, self.requestID == token, self.process === worker,
+                      let data = line.data(using: .utf8),
+                      let reply = try? JSONDecoder().decode(RecallReply.self, from: data) else { return }
+                if reply.event == "progress" { self.progress = reply.message ?? "" }
+                if reply.event == "error" { self.failure = reply.message }
+                if reply.event == "sources", let index = self.conversations.firstIndex(where: { $0.id == conversationID }),
+                   let last = self.conversations[index].messages.indices.last {
+                    self.conversations[index].messages[last].sources = reply.sources
+                    self.conversations[index].messages[last].text = "Найдены возможные совпадения. Готовлю ответ…"
+                    self.save()
+                }
+                if reply.event == "result", let index = self.conversations.firstIndex(where: { $0.id == conversationID }),
+                   let last = self.conversations[index].messages.indices.last {
+                    received = true
+                    self.conversations[index].messages[last].text = (reply.text ?? "")
+                        + ((reply.notice ?? "").isEmpty ? "" : "\n\n" + (reply.notice ?? ""))
+                    self.conversations[index].messages[last].sources = reply.sources
+                    if let warnings = reply.warnings, !warnings.isEmpty {
+                        self.failure = "Часть встреч не прочитана: " + warnings.joined(separator: "; ")
+                    }
+                    self.save()
+                }
+            }, onExit: { [weak self] status in
+                guard let self, self.requestID == token, self.process === worker else { return }
+                self.process = nil
+                Task { @MainActor in
+                    self.finish(error: self.failure ?? (status == 0 && received ? nil : "Не удалось прочитать память встреч."),
+                                token: token, conversationID: conversationID)
+                }
+            })
+        } catch {
+            if worker.isRunning { worker.terminate() }
+            process = nil; isAnswering = false; progress = ""; failure = error.localizedDescription
+        }
     }
 
     // MARK: хранение
@@ -203,11 +300,24 @@ final class Chat {
     }
 }
 
+/// A local reply must never redirect private conversation history elsewhere.
+private final class LocalChatTransport: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
+}
+
 // MARK: - Экран
+
+#if !CHAT_TESTING
 
 struct ChatScreen: View {
     @Bindable var library: Library
     var chat: Chat
+    var memory: SpeakerMemory
+    var player: Player
+    @State private var detail: MemoryQuote?
     @Environment(\.palette) private var p
     @State private var draft = ""
     @State private var search = ""
@@ -226,6 +336,9 @@ struct ChatScreen: View {
             }
             composer
         }
+        .sheet(item: $detail) { quote in
+            QuoteContext(quote: quote, memory: memory, library: library, player: player)
+        }
         // Чат занимает всю высоту окна: переписка сверху, поле ввода внизу.
         // Внутри общей прокрутки высота не задавалась вовсе, и экран
         // обрывался на середине, оставляя полокна пустыми.
@@ -239,8 +352,8 @@ struct ChatScreen: View {
             Spacer(minLength: 0)
             Image(systemName: "bubble.left.and.bubble.right")
                 .font(.system(size: 26)).foregroundStyle(p.faint)
-            Text("Спросите что угодно").font(Kind.strong(14.5))
-            Text("Модель работает на этом компьютере, переписка никуда не уходит")
+            Text(library.settings.chat_memory_enabled ? "Что вспомнить из встреч?" : "Спросите что угодно").font(Kind.strong(14.5))
+            Text(library.settings.chat_memory_enabled ? "Например: «Когда я говорил про перенос сроков?»" : (AppConfiguration.usesLocalModel ? "Ответит локальная модель" : "Используется настроенный адрес модели"))
                 .font(Kind.body(12.5)).foregroundStyle(p.muted)
             Spacer(minLength: 0)
         }
@@ -256,7 +369,7 @@ struct ChatScreen: View {
                         bubble(message).id(message.id)
                     }
                     if chat.isAnswering {
-                        Text("думает…").font(Kind.body(12.5)).foregroundStyle(p.faint).id("хвост")
+                        Text(chat.progress.isEmpty ? "думает…" : chat.progress).font(Kind.body(12.5)).foregroundStyle(p.faint).id("хвост")
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -278,6 +391,22 @@ struct ChatScreen: View {
             Text(Self.rendered(message.text))
                 .font(Kind.body(14)).textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            if let sources = message.sources {
+                ForEach(Array(sources.enumerated()), id: \.element.id) { number, quote in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("[\(number + 1)] \(quote.name) · \(quote.time)")
+                            .font(Kind.strong(12))
+                        Text(quote.title + " · обработано: " + quote.date).font(Kind.body(11)).foregroundStyle(p.muted)
+                        Text(quote.text).font(Kind.body(12)).textSelection(.enabled)
+                        HStack {
+                            Button("Прослушать") { playMemoryQuote(quote, player: player, colour: p.accent2) }
+                                .disabled(quote.audio == nil)
+                            Button("Контекст") { memory.loadContext(quote, settings: library.settings); detail = quote }
+                                .disabled(memory.busy)
+                        }.buttonStyle(QuietButton())
+                    }.padding(10).background(RoundedRectangle(cornerRadius: 8).fill(p.surface))
+                }
+            }
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 10)
@@ -303,6 +432,29 @@ struct ChatScreen: View {
 
     private var composer: some View {
         Card {
+            HStack {
+                Toggle("Искать в памяти встреч", isOn: Binding(
+                    get: { library.settings.chat_memory_enabled },
+                    set: { library.settings.chat_memory_enabled = $0; library.settings.save() }))
+                    .toggleStyle(.switch).disabled(chat.isAnswering)
+                Spacer()
+                if library.settings.chat_memory_enabled {
+                    Menu("Ваш голос: " + (library.speakers.first(where: { $0.key == library.settings.my_profile_key })?.name ?? "не выбран")) {
+                        Button("Не указывать свой голос") { library.settings.my_profile_key = ""; library.settings.save() }
+                        ForEach(library.speakers) { person in
+                            Button(person.name) { library.settings.my_profile_key = person.key; library.settings.save() }
+                        }
+                    }.frame(width: 250).disabled(chat.isAnswering)
+                        .help("Выберите себя среди участников, чтобы искать свои реплики по вопросу «когда я говорил».")
+                }
+            }.padding(.bottom, 10)
+            if library.settings.chat_memory_enabled {
+                Text(needsOwnProfile
+                     ? "Кого считать вами? Выберите свой голос выше, чтобы найти именно ваши слова."
+                     : "Для вопросов «я говорил» выберите свой голос. В остальных вопросах поиск идёт по всем участникам.")
+                    .font(Kind.body(12)).foregroundStyle(needsOwnProfile ? p.warn : p.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.bottom, 10)
+            }
             HStack(alignment: .bottom, spacing: 10) {
                 // Полю нужны собственные отступы и подложка: без них оно
                 // прилипало к верху, а кнопка со своими отступами оказывалась
@@ -323,9 +475,10 @@ struct ChatScreen: View {
                 } else {
                     Button("Отправить", action: send)
                         .buttonStyle(PrimaryButton())
-                        .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || needsOwnProfile)
                 }
             }
+            if !library.settings.chat_memory_enabled {
             HStack(spacing: 8) {
                 Toggle("Размышлять перед ответом", isOn: Bindable(chat).thinking)
                     .toggleStyle(.checkbox)
@@ -334,13 +487,22 @@ struct ChatScreen: View {
                 Spacer(minLength: 0)
             }
             .padding(.top, 9)
+            }
         }
     }
 
+    private var needsOwnProfile: Bool {
+        library.settings.chat_memory_enabled &&
+        !library.speakers.contains(where: { $0.key == library.settings.my_profile_key }) &&
+        draft.range(of: #"\b(я|мне|мной|мною|мои|моих|мою|мой|моя|моё|мое)\b"#,
+                    options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
     private func send() {
+        guard !needsOwnProfile else { return }
         let text = draft
         draft = ""
-        chat.send(text)
+        chat.send(text, settings: library.settings)
         writing = true
     }
 }
@@ -415,3 +577,4 @@ struct ChatHistory: View {
         }
     }
 }
+#endif

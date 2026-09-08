@@ -1,0 +1,15 @@
+flowchart LR
+  input["Недоверенные аудио / настройки"] --> ui["Интерфейс"]
+  subgraph pc["Компьютер сотрудника — ПРЕДЛАГАЕТСЯ"]
+    ui --> workers["Python-задачи ASR / голоса / память"]
+    ui --> policy["Общие сетевые проверки"]
+    workers --> policy
+    policy -->|"Только loopback, без proxy / redirect"| llm["Ollama HTTP"]
+    workers --> data["Файлы встреч / профили / SQLite"]
+    installer["Офлайн-установщик"] -->|"Проверка подписи и хешей"| models["Среда / модели"]
+    workers -->|"Только имеющиеся файлы"| models
+    deny["Политика ОС: запрет внешней сети"] -.-> ui
+    deny -.-> workers
+    deny -.-> llm
+  end
+  bundle["Доверенный комплект из зоны сборки"] --> installer

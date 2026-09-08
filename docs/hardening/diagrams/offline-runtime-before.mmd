@@ -1,0 +1,14 @@
+flowchart LR
+  input["Недоверенные аудио / настройки"] --> ui["Интерфейс"]
+  subgraph pc["Компьютер сотрудника — текущий дизайн"]
+    ui --> workers["Python-задачи ASR / голоса / память"]
+    ui --> llm["Ollama HTTP"]
+    workers --> llm
+    workers --> data["Файлы встреч / профили / SQLite"]
+    installer["Установщики"] --> models["Среда / модели"]
+    workers --> models
+  end
+  workers -->|"Загрузка недостающих моделей"| internet["Интернет"]
+  installer --> internet
+  ui -->|"Настраиваемый LLM host"| remote["Удалённый HTTP endpoint"]
+  workers -->|"LLM host кроме памяти"| remote

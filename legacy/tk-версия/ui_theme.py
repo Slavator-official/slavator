@@ -164,6 +164,33 @@ def speaker_color(key: str, theme: str = "dark", assigned=None) -> str:
     return speaker_palette(theme)[sum(ord(c) for c in key) % len(speaker_palette(theme))]
 
 
+# SwiftUI и Tk используют один файл цветов. Дополнительные роли Canvas
+# остаются здесь, а основные поверхности, текст и состояния больше не расходятся.
+from pathlib import Path
+import sys
+_core = str(Path(__file__).resolve().parents[2] / "core")
+if _core not in sys.path:
+    sys.path.insert(0, _core)
+from app_config import CONTRACT
+
+_ROLES = {
+    "BG": "bg", "SIDEBAR": "sidebar", "PANEL": "surface", "PANEL_2": "raised",
+    "PANEL_3": "raised", "ROW_BG": "row", "TEXT": "text", "MUTED": "muted",
+    "MUTED_2": "faint", "TEXT_EMPTY": "faint", "FOOTER": "faint",
+    "BORDER": "line", "BORDER_2": "line2", "CARD_BORDER": "line2",
+    "CARD_BORDER_2": "line2", "ROW_BORDER": "line2", "DIVIDER": "line2",
+    "SIDEBAR_BORDER": "line2", "NAV_TEXT": "muted", "NAV_ACTIVE": "accentSoft",
+    "BLUE": "accent", "LINK": "accent2", "GREEN": "ok", "PILL_OK_BG": "okBg",
+    "INPUT_BG": "surface", "INPUT_BORDER": "line", "BTN_BORDER": "line",
+    "BTN_BG_DISABLED": "raised", "BTN_TEXT_DISABLED": "faint",
+}
+for _name, _palette in (("dark", DARK), ("light", LIGHT)):
+    _shared = CONTRACT["themes"][_name]
+    _palette.update({key: "#" + _shared[role] for key, role in _ROLES.items()})
+SPEAKERS_DARK = tuple("#" + value for value in CONTRACT["themes"]["dark"]["speakers"])
+SPEAKERS_LIGHT = tuple("#" + value for value in CONTRACT["themes"]["light"]["speakers"])
+UNKNOWN_DARK = "#" + CONTRACT["themes"]["dark"]["unknown"]
+UNKNOWN_LIGHT = "#" + CONTRACT["themes"]["light"]["unknown"]
 THEMES = {"dark": DARK, "light": LIGHT}
 
 # В светлой теме активный пункт меню - светлая плашка, поэтому подпись на нём
@@ -175,7 +202,7 @@ NAV_ACTIVE_TEXT = {"dark": DARK["TEXT"], "light": LIGHT["TEXT"]}
 # на системные гарнитуры, чтобы приложение не разъезжалось.
 # --------------------------------------------------------------------------
 
-FONT_STACK = ("Lato", "SF Pro Display", "SF Pro Text", "Inter", "Helvetica Neue", "Helvetica")
+FONT_STACK = ("SF Pro Text", "Segoe UI", "Lato", "Inter", "Helvetica Neue", "Helvetica")
 
 
 def palette(name: str) -> dict:
@@ -197,9 +224,20 @@ def resolve_font(available) -> str:
 
 
 def system_appearance() -> str:
-    """Тема macOS: 'dark' или 'light'. При любой ошибке - светлая."""
+    """Системная тема macOS/Windows. При ошибке — светлая."""
     import subprocess
 
+    if sys.platform == "win32":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as key:
+                light, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            return "light" if light else "dark"
+        except OSError:
+            return "light"
+    if sys.platform != "darwin":
+        return "light"
     try:
         result = subprocess.run(
             ["defaults", "read", "-g", "AppleInterfaceStyle"],

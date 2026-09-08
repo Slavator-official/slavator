@@ -27,37 +27,38 @@ final class Enrollment {
 
         let process = Process()
         process.executableURL = Paths.venvPython
-        var arguments = [Paths.core.path, "--enroll", clean]
+        var arguments = ["-B", Paths.core.path, "--enroll", clean]
         if !position.isEmpty { arguments += ["--position", position] }
         if !company.isEmpty { arguments += ["--company", company] }
         arguments.append("--samples")
         arguments += samples.map(\.path)
         process.arguments = arguments
         process.currentDirectoryURL = Paths.core.deletingLastPathComponent()
+        process.environment = AppConfiguration.environment(settings: library.settings)
 
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
 
-        process.terminationHandler = { proc in
-            let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(),
-                                encoding: .utf8) ?? ""
-            DispatchQueue.main.async {
+        do {
+            try process.run()
+            var lines: [String] = []
+            ProcessOutput.read(pipe, process: process, onLine: { line in
+                lines.append(line)
+                if lines.count > 100 { lines.removeFirst(lines.count - 100) }
+            }, onExit: { status in
                 self.isRunning = false
-                if proc.terminationStatus == 0 {
+                if status == 0 {
                     // Записи, ставшие профилем, больше не «новые голоса».
                     for url in samples { try? FileManager.default.removeItem(at: url) }
                     library.reload()
                     done()
                 } else {
-                    let lines = output.split(separator: "\n").map(String.init)
                     self.failure = lines.last(where: { $0.contains("ОШИБКА") })
                         ?? lines.suffix(3).joined(separator: "\n")
                 }
-            }
-        }
-
-        do { try process.run() } catch {
+            })
+        } catch {
             isRunning = false
             failure = error.localizedDescription
         }
@@ -125,7 +126,7 @@ struct EnrollSheet: View {
 
             HStack(spacing: 8) {
                 Spacer()
-                Button("Отмена") { dismiss() }.buttonStyle(QuietButton())
+                Button("Отмена") { dismiss() }.buttonStyle(QuietButton()).disabled(enrollment.isRunning)
                 Button(enrollment.isRunning ? "Сохраняю…" : "Сохранить") { save() }
                     .buttonStyle(PrimaryButton())
                     .disabled(enrollment.isRunning || !canSave)
@@ -135,6 +136,7 @@ struct EnrollSheet: View {
         .padding(24)
         .frame(width: 460)
         .background(p.surface)
+        .interactiveDismissDisabled(enrollment.isRunning)
         .environment(\.palette, library.palette)
         .onAppear { existing = library.speakers.first?.name ?? "" }
     }

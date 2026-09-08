@@ -17,12 +17,16 @@ final class Pipeline {
     private(set) var log: [String] = []
 
     private var task: Process?
+    private(set) var isCancelling = false
+    private(set) var isSuspended = false
 
     /// Порядок этапов — для точек прогресса под полосой. Зависит от того,
     /// что запущено: у сборки резюме свой, короткий путь.
     static let fullOrder = ["prepare", "audio", "asr", "quality", "diarization",
                             "identify", "names", "transcript", "documents"]
     static let summaryOrder = ["summary", "documents"]
+    /// Дозагрузка: этапы свои, и порядок у них тоже свой.
+    static let repairOrder = ["models", "asr", "ollama", "llm"]
     private(set) var stageOrder = fullOrder
     private(set) var stageKey = ""
 
@@ -43,6 +47,11 @@ final class Pipeline {
         "transcript": "Сборка стенограммы",
         "summary": "Анализ встречи",
         "documents": "Формирование документов",
+        // «asr» уже есть выше и подписан «Распознавание речи» — при
+        // дозагрузке это ровно тот же шаг, только качается модель.
+        "models": "Модели разделения голосов",
+        "ollama": "Запуск Ollama",
+        "llm": "Языковая модель",
     ]
 
     func run(input: URL, library: Library, voiceTrack: URL? = nil, speakers: Int = 0) {
@@ -63,6 +72,7 @@ final class Pipeline {
         percent = 0
         stage = "Запуск"
         stageOrder = Self.fullOrder
+        stageKey = "prepare"
         detail = input.lastPathComponent
         log = []
 
@@ -81,6 +91,7 @@ final class Pipeline {
         // Названное число участников — самый крупный рычаг против дробления
         // голосов: без него движок гадает.
         if speakers > 0 { arguments += ["--speakers", String(speakers)] }
+        if library.settings.keep_diagnostics { arguments.append("--keep-audio") }
         launch(arguments: arguments, library: library)
     }
 
@@ -108,6 +119,30 @@ final class Pipeline {
                library: library)
     }
 
+    /// Дозагрузить то, чего не хватает.
+    ///
+    /// Что именно догружать, решает ядро: интерфейс не считает мегабайты и не
+    /// знает, где лежит Ollama. Здесь остаётся показать ход работы теми же
+    /// средствами, что и у обработки записи.
+    func repair(library: Library) {
+        guard !isRunning else { return }
+        guard FileManager.default.fileExists(atPath: Paths.venvPython.path) else {
+            showAlert("Окружение не установлено",
+                      "Сначала завершите установку на вкладке «Главная».")
+            return
+        }
+
+        isRunning = true
+        percent = 0
+        stage = "Дозагрузка"
+        stageOrder = Self.repairOrder
+        stageKey = ""
+        detail = ""
+        log = []
+
+        launch(arguments: ["-B", Paths.core.path, "--repair", "--allow-download"], library: library)
+    }
+
     /// Общий запуск ядра: и обработка записи, и сборка резюме идут одинаково -
     /// подпроцесс, разбор прогресса из stdout, показ настоящей ошибки.
     private func launch(arguments: [String], library: Library) {
@@ -115,39 +150,35 @@ final class Pipeline {
         process.executableURL = Paths.venvPython
         process.arguments = arguments
         process.currentDirectoryURL = Paths.core.deletingLastPathComponent()
-        process.environment = environment()
+        process.environment = AppConfiguration.environment(settings: library.settings)
 
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
 
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let chunk = handle.availableData
-            guard !chunk.isEmpty, let text = String(data: chunk, encoding: .utf8) else { return }
-            for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
-                DispatchQueue.main.async { self?.consume(String(line)) }
-            }
-        }
-
-        process.terminationHandler = { [weak self] proc in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                pipe.fileHandleForReading.readabilityHandler = nil
-                self.isRunning = false
-                self.task = nil
-                if proc.terminationStatus == 0 {
-                    self.percent = 100
-                    self.stage = "Готово"
-                    library.reload()
-                } else if proc.terminationStatus != 15 {   // 15 — прерывание пользователем
-                    self.showFailure()
-                }
-            }
-        }
-
         do {
             try process.run()
             task = process
+            isCancelling = false
+            isSuspended = false
+            ProcessOutput.read(pipe, process: process, onLine: { [weak self] line in
+                self?.consume(line)
+            }, onExit: { [weak self] status in
+                guard let self, self.task === process else { return }
+                self.isRunning = false
+                self.task = nil
+                self.isSuspended = false
+                if self.isCancelling {
+                    self.stage = "Прервано"
+                } else if status == 0 {
+                    self.percent = 100
+                    self.stage = "Готово"
+                    library.reload()
+                } else {
+                    self.showFailure()
+                }
+                self.isCancelling = false
+            })
         } catch {
             isRunning = false
             showAlert("Не удалось запустить обработку", error.localizedDescription)
@@ -160,14 +191,18 @@ final class Pipeline {
     /// секунды вместо долей секунды. Вы говорите секунды, встреча считается
     /// минуты — паузы не видно, а заикающийся набор был бы виден сразу.
     func suspend(_ on: Bool) {
-        guard let task, task.isRunning else { return }
-        if on { task.suspend() } else { task.resume() }
+        guard let task, task.isRunning, !isCancelling, on != isSuspended else { return }
+        if on { isSuspended = task.suspend() }
+        else if task.resume() { isSuspended = false }
     }
 
     func cancel() {
-        task?.terminate()
-        isRunning = false
-        stage = "Прервано"
+        guard let task, task.isRunning, !isCancelling else { return }
+        isCancelling = true
+        // SIGTERM не обрабатывается остановленным через SIGSTOP процессом.
+        if isSuspended { task.resume(); isSuspended = false }
+        stage = "Останавливаю…"
+        task.terminate()
     }
 
     // MARK: разбор вывода
@@ -178,7 +213,7 @@ final class Pipeline {
             guard let data = json.data(using: .utf8),
                   let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { return }
-            if let pct = raw["pct"] as? Double { percent = pct }
+            if let pct = raw["pct"] as? Double, pct.isFinite { percent = min(100, max(0, pct)) }
             if let key = raw["stage"] as? String {
                 stageKey = key
                 stage = Self.stageNames[key] ?? key
@@ -218,25 +253,4 @@ final class Pipeline {
         NSWorkspace.shared.open(url)
     }
 
-    /// Настройки из config.env, который пишет установщик.
-    private func environment() -> [String: String] {
-        var env = ProcessInfo.processInfo.environment
-        env["PYTHONUNBUFFERED"] = "1"
-        // Не давать Python писать __pycache__ внутрь подписанного бандла:
-        // это ломает подпись, а с ней слетают разрешения macOS.
-        env["PYTHONDONTWRITEBYTECODE"] = "1"
-        guard let text = try? String(contentsOf: Paths.configEnv, encoding: .utf8) else { return env }
-        for line in text.split(separator: "\n") {
-            let clean = line.trimmingCharacters(in: .whitespaces)
-            guard !clean.hasPrefix("#"), let eq = clean.firstIndex(of: "=") else { continue }
-            let key = String(clean[clean.startIndex..<eq])
-            var value = String(clean[clean.index(after: eq)...])
-            if value.hasPrefix("\""), value.hasSuffix("\""), value.count >= 2 {
-                value = String(value.dropFirst().dropLast())
-            }
-            env[key] = value
-        }
-        return env
-    }
 }
-

@@ -7,10 +7,7 @@ enum Paths {
     static var home: URL { FileManager.default.homeDirectoryForCurrentUser }
 
     static var support: URL {
-        if let override = ProcessInfo.processInfo.environment["MEETING_TRANSCRIBER_APP_SUPPORT"] {
-            return URL(fileURLWithPath: override)
-        }
-        return home.appending(path: "Library/Application Support/Славатор")
+        AppConfiguration.support
     }
 
     static var settings: URL { support.appending(path: "settings.json") }
@@ -58,8 +55,12 @@ enum Paths {
         launch.arguments = ["-a", "Terminal", script.path]
         try? launch.run()
     }
-    static var profiles: URL { home.appending(path: "whisper-work/speaker_profiles") }
-    static var glossary: URL { home.appending(path: "whisper-work/glossary.txt") }
+    static var profiles: URL {
+        URL(fileURLWithPath: (AppConfiguration.environment()["MEETING_TRANSCRIBER_PROFILES"]! as NSString).expandingTildeInPath)
+    }
+    static var glossary: URL {
+        URL(fileURLWithPath: (AppConfiguration.environment()["MEETING_TRANSCRIBER_GLOSSARY"]! as NSString).expandingTildeInPath)
+    }
 
     /// Каталог с промежуточными файлами внутри результата. Имя задаётся ядром.
     static let extraDir = "доп файлы, на случай ошибки summary"
@@ -74,38 +75,7 @@ enum Paths {
 
 // MARK: - Настройки
 
-struct Settings: Codable {
-    var theme = "dark"                 // dark | light | system
-    var results_dir = Paths.home.appending(path: "Downloads").path
-    var widget_enabled = false
-    var widget_output_dir = Paths.home.appending(path: "Downloads").path
-    var keep_diagnostics = false
-    /// Как подписывать ваши реплики с микрофонной дорожки.
-    var my_name = "Вы"
-
-    // MARK: диктовка
-    var dictation_enabled = false
-    /// small — текст идёт на ходу; large-v3-turbo — точнее, но ждать 3 секунды.
-    var dictation_model = "small"
-    /// clean | structure | shrink — насколько сильно править надиктованное.
-    var dictation_level = "structure"
-
-    /// Языковая модель: и для резюме встреч, и для чата.
-    var llm_model = "qwen3:8b"
-
-    static func load() -> Settings {
-        guard let data = try? Data(contentsOf: Paths.settings),
-              let value = try? JSONDecoder().decode(Settings.self, from: data)
-        else { return Settings() }
-        return value
-    }
-
-    func save() {
-        try? FileManager.default.createDirectory(at: Paths.support, withIntermediateDirectories: true)
-        guard let data = try? JSONEncoder().encode(self) else { return }
-        try? data.write(to: Paths.settings, options: .atomic)
-    }
-
+extension Settings {
     var palette: Palette {
         switch theme {
         case "light": return .light
@@ -178,7 +148,7 @@ struct UnknownVoice: Identifiable {
 
 /// Обработанная встреча.
 struct Record: Identifiable {
-    let id = UUID()
+    var id: URL { dir }
     let dir: URL
     let title: String
     let date: Date
@@ -355,7 +325,8 @@ final class Library {
             .compactMap { dir -> Record? in
                 var isDir: ObjCBool = false
                 guard FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDir),
-                      isDir.boolValue else { return nil }
+                      isDir.boolValue,
+                      (try? dir.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true else { return nil }
                 // Папка без стенограммы — след неудачного прогона, а не
                 // запись. Показывать её в списке значит выдавать сбой за
                 // результат.
@@ -376,8 +347,13 @@ final class Library {
             .reduce(into: [Record]()) { list, record in
                 // Оставляем только свежий прогон каждой встречи: старые копии
                 // лежат на диске, но в списке они лишний шум.
-                if !list.contains(where: { $0.title == record.title }) { list.append(record) }
+                if let index = list.firstIndex(where: { $0.title == record.title }) {
+                    if record.dir.lastPathComponent == record.title + "_result" {
+                        list[index] = record
+                    }
+                } else { list.append(record) }
             }
+            .sorted { $0.date > $1.date }
     }
 
     static func readTurns(in record: URL) -> [Turn] {
@@ -386,11 +362,7 @@ final class Library {
               let raw = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
         else { return [] }
 
-        var names: [String: String] = [:]
-        if let nd = try? Data(contentsOf: extra.appending(path: "speaker_names.json")),
-           let parsed = try? JSONSerialization.jsonObject(with: nd) as? [String: String] {
-            names = parsed
-        }
+        let names = readNames(in: record)
 
         return raw.compactMap { item in
             guard let start = item["start"] as? Double,
@@ -416,10 +388,25 @@ final class Library {
 
     static func readNames(in record: URL) -> [String: String] {
         let path = record.appending(path: Paths.extraDir).appending(path: "speaker_names.json")
-        guard let data = try? Data(contentsOf: path),
-              let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: String]
-        else { return [:] }
-        return parsed
+        var names: [String: String] = [:]
+        if let data = try? Data(contentsOf: path),
+           let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: String] { names = parsed }
+        let profiles = Dictionary(uniqueKeysWithValues: readSpeakers().map { ($0.key, $0.name) })
+        let extra = record.appending(path: Paths.extraDir)
+        if let data = try? Data(contentsOf: extra.appending(path: "speaker_recognition.json")),
+           let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+            for row in rows {
+                if let voice = row["speaker_id"] as? String, let key = row["profile_key"] as? String,
+                   let name = profiles[key] { names[voice] = name }
+            }
+        }
+        if let data = try? Data(contentsOf: extra.appending(path: "speaker_links.json")),
+           let links = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
+            for (voice, key) in links {
+                if let name = profiles[key] { names[voice] = name }
+            }
+        }
+        return names
     }
 }
 

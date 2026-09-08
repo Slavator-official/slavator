@@ -7,6 +7,8 @@ import runpy
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "core"))
+import app_config
 
 APP_NAME = "Славатор"
 
@@ -17,36 +19,26 @@ def project_root() -> Path:
 
 
 def support_dir() -> Path:
-    override = os.environ.get("MEETING_TRANSCRIBER_APP_SUPPORT", "").strip()
-    if override:
-        return Path(override).expanduser()
-    base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
-    return (Path(base) if base else Path.home()) / APP_NAME
+    return app_config.support_dir()
 
 
 def load_config(path: Path) -> None:
     """Read the deliberately small KEY=VALUE format written by install.ps1."""
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return
-    for raw in lines:
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key, value = key.strip(), value.strip()
-        if value.startswith('"') and value.endswith('"') and len(value) >= 2:
-            value = value[1:-1]
-        if key:
-            os.environ.setdefault(key, value)
+    for key, value in app_config.read_env(path).items():
+        os.environ.setdefault(key, value)
 
 
 def configure() -> tuple[Path, Path]:
     root = project_root()
     support = support_dir()
     support.mkdir(parents=True, exist_ok=True)
-    load_config(support / "config.env")
+    runtime = app_config.environment()
+    # Остальные настройки читает адаптер при каждом запуске, чтобы изменение
+    # модели в GUI не перекрывалось старым значением в окружении запускателя.
+    for key in ("MEETING_TRANSCRIBER_APP_SUPPORT", "MEETING_TRANSCRIBER_PROFILES",
+                "MEETING_TRANSCRIBER_MODELS", "MEETING_TRANSCRIBER_GLOSSARY",
+                "PYTHONUTF8", "PYTHONIOENCODING", "PYTHONDONTWRITEBYTECODE"):
+        os.environ.setdefault(key, runtime[key])
 
     core = root / "core"
     desktop = root / "legacy" / "tk-версия"
