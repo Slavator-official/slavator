@@ -28,7 +28,33 @@ final class Dictation {
         case failed(String)
     }
 
-    private(set) var state: State = .off
+    private(set) var state: State = .off {
+        didSet {
+            guard state != oldValue else { return }
+            Dictation.logHotkey("состояние: \(Self.name(oldValue)) → \(Self.name(state))")
+        }
+    }
+
+    private static func name(_ value: State) -> String {
+        switch value {
+        case .off:          return "выключена"
+        case .needsAccess:  return "нет доступа"
+        case .starting:     return "поднимается"
+        case .idle:         return "готова"
+        case .listening:    return "слушает"
+        case .finishing:    return "дописывает"
+        case .failed(let m): return "сбой: \(m)"
+        }
+    }
+
+    /// Номер диктовки.
+    ///
+    /// Ответ распознавания или обработки может прийти после того, как сторож
+    /// уже сдался: модель отвечала минуту, а плашку убрали через тридцать
+    /// секунд. Такой ответ печатал текст туда, где человек к этому времени
+    /// занимался совсем другим. Ответ не из текущей диктовки теперь просто
+    /// отбрасывается.
+    private var session = 0
     private(set) var level: Double = 0
     private(set) var seconds: Double = 0
     /// Что уже напечатано за эту диктовку — для индикатора.
@@ -151,6 +177,8 @@ final class Dictation {
         worker.warm()
         self.mode = mode
         lastText = ""; typed = ""; spoken = ""; seconds = 0
+        session += 1
+        Dictation.logHotkey("диктовка №\(session) начата, режим \(mode == .tidy ? "с обработкой" : "как есть")")
         state = .listening
         onBusyChanged?(true)
 
@@ -188,12 +216,21 @@ final class Dictation {
         recorder?.stop()
         // Сторож на случай, если процесс распознавания промолчит: висеть
         // с плашкой «Дописываю…» бесконечно нельзя.
+        //
+        // Ждём ДОЛЬШЕ, чем работник ждёт языковую модель (SLAVATOR_TIDY_TIMEOUT,
+        // 30 с). Было наоборот - 30 против 45, - и приложение сдавалось раньше,
+        // чем работник успевал ответить: человек читал «распознавание не
+        // ответило», хотя распознавание давно сработало, а думала обработка.
         watchdog?.invalidate()
-        watchdog = Timer.scheduledTimer(withTimeInterval: 30, repeats: false) { [weak self] _ in
+        watchdog = Timer.scheduledTimer(withTimeInterval: 45, repeats: false) { [weak self] _ in
             guard let self, case .finishing = self.state else { return }
+            Dictation.logHotkey("сторож: распознавание молчит 30 с, диктовка №\(self.session) брошена")
+            // Диктовка закрыта. Ответы по ней, если придут, уже никому не
+            // нужны и печатать их некуда.
+            self.session += 1
             self.pending = false
             self.finalPending = false
-            self.state = .failed("Распознавание не ответило")
+            self.state = .failed("Диктовка не дождалась ответа")
             self.onBusyChanged?(false)
             self.indicator?.hide()
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.state = .idle }
@@ -227,9 +264,14 @@ final class Dictation {
             return
         }
         pending = true
+        let mine = session
         worker.transcribe(path: wav) { [weak self] text in
             DispatchQueue.main.async {
                 guard let self else { return }
+                guard mine == self.session else {
+                    Dictation.logHotkey("ответ от брошенной диктовки №\(mine) отброшен")
+                    return
+                }
                 self.pending = false
                 if final {
                     self.commit(text)
@@ -305,9 +347,15 @@ final class Dictation {
     private func finish(raw: String = "") {
         recorder = nil
         if mode == .tidy, !raw.isEmpty {
+            let mine = session
             worker.tidy(text: raw, level: settings.dictation_level) { [weak self] text, ok in
                 DispatchQueue.main.async {
                     guard let self else { return }
+                    guard mine == self.session else {
+                        Dictation.logHotkey("обработка брошенной диктовки №\(mine) вернулась поздно, текст не печатаем")
+                        return
+                    }
+                    Dictation.logHotkey("обработка вернулась: \(text.count) символов, модель \(ok ? "ответила" : "недоступна")")
                     self.typer.type(text)
                     self.typed = text
                     if !ok && !self.tidyUnavailableShown {

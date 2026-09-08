@@ -34,7 +34,13 @@ OLLAMA = os.environ.get("MEETING_TRANSCRIBER_OLLAMA", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.environ.get("MEETING_TRANSCRIBER_LLM", "qwen3:8b")
 # Обработка идёт после того, как человек отпустил клавишу, и он ждёт.
 # Лучше отдать сырой текст, чем заставить смотреть в пустое поле.
-TIDY_TIMEOUT = int(os.environ.get("SLAVATOR_TIDY_TIMEOUT", "45"))
+# Сколько ждём модель, причёсывающую надиктованное.
+#
+# Должно быть ЗАМЕТНО МЕНЬШЕ сторожа в приложении (см. Dictation.swift): было
+# 45 против 30, то есть приложение сдавалось раньше, чем работник вообще мог
+# ответить, и человек видел «распознавание не ответило» там, где на самом
+# деле задумалась языковая модель.
+TIDY_TIMEOUT = int(os.environ.get("SLAVATOR_TIDY_TIMEOUT", "30"))
 # Сколько модель ждёт в памяти после последней правки. Полчаса — разумная
 # середина: рабочий день диктуют раз в несколько минут, а держать пять
 # гигабайт вечно ради этого незачем.
@@ -75,9 +81,18 @@ def is_junk(text: str) -> bool:
     return any(rx.search(probe) for rx in JUNK_RE)
 
 
+# Ответы пишут два потока: главный цикл и причёсывание текста. Без замка их
+# строки перемешались бы прямо в трубе, приложение не разобрало бы JSON и
+# потеряло бы ответ навсегда - то есть ровно то зависание, ради которого
+# причёсывание и вынесли в поток.
+_OUTPUT = threading.Lock()
+
+
 def send(payload: dict) -> None:
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    line = json.dumps(payload, ensure_ascii=False) + "\n"
+    with _OUTPUT:
+        sys.stdout.write(line)
+        sys.stdout.flush()
 
 
 # --------------------------------------------------------------------------
@@ -339,10 +354,22 @@ def main() -> int:
             continue
 
         if name == "tidy":
-            text, ok = tidy(command.get("text", ""), command.get("level", "structure"))
-            # Модель охотно роняет аббревиатуры в нижний регистр: «ЦОК» -> «цок».
-            send({"id": command.get("id"),
-                  "text": repair(text, glossary, fixer), "ok": ok})
+            # В стороне от главного цикла.
+            #
+            # Раньше причёсывание шло прямо здесь, и пока языковая модель
+            # думала - а она думает и полминуты, если Ollama в этот момент
+            # перезагружает пятигигабайтную модель, - работник не читал
+            # ничего. Следующая диктовка молча висела: её запрос лежал в
+            # трубе непрочитанным. Ответы сопоставляются по id, поэтому
+            # порядок неважен.
+            def run_tidy(cmd=command):
+                text, ok = tidy(cmd.get("text", ""), cmd.get("level", "structure"))
+                # Модель охотно роняет аббревиатуры в нижний регистр:
+                # «ЦОК» -> «цок».
+                send({"id": cmd.get("id"),
+                      "text": repair(text, glossary, fixer), "ok": ok})
+
+            threading.Thread(target=run_tidy, daemon=True).start()
             continue
 
     return 0
