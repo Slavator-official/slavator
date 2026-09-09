@@ -7,10 +7,7 @@ enum Paths {
     static var home: URL { FileManager.default.homeDirectoryForCurrentUser }
 
     static var support: URL {
-        if let override = ProcessInfo.processInfo.environment["MEETING_TRANSCRIBER_APP_SUPPORT"] {
-            return URL(fileURLWithPath: override)
-        }
-        return home.appending(path: "Library/Application Support/Славатор")
+        AppConfiguration.support
     }
 
     static var settings: URL { support.appending(path: "settings.json") }
@@ -58,11 +55,15 @@ enum Paths {
         launch.arguments = ["-a", "Terminal", script.path]
         try? launch.run()
     }
-    static var profiles: URL { home.appending(path: "whisper-work/speaker_profiles") }
-    static var glossary: URL { home.appending(path: "whisper-work/glossary.txt") }
+    static var profiles: URL {
+        URL(fileURLWithPath: (AppConfiguration.environment()["MEETING_TRANSCRIBER_PROFILES"]! as NSString).expandingTildeInPath)
+    }
+    static var glossary: URL {
+        URL(fileURLWithPath: (AppConfiguration.environment()["MEETING_TRANSCRIBER_GLOSSARY"]! as NSString).expandingTildeInPath)
+    }
     /// Список проектов: лежит рядом со словарём терминов — оба про то, как
     /// программа понимает вашу работу, и оба правятся руками.
-    static var projects: URL { home.appending(path: "whisper-work/projects.json") }
+    static var projects: URL { glossary.deletingLastPathComponent().appending(path: "projects.json") }
 
     /// Каталог с промежуточными файлами внутри результата. Имя задаётся ядром.
     static let extraDir = "доп файлы, на случай ошибки summary"
@@ -73,151 +74,11 @@ enum Paths {
         Bundle.main.resourceURL?.appending(path: "core/meeting_transcriber_v25_1.py")
             ?? URL(fileURLWithPath: "meeting_transcriber_v25_1.py")
     }
-
-    /// Окружение для запуска ядра: настройки из config.env, который пишет
-    /// установщик.
-    ///
-    /// Живёт здесь, а не внутри обработки: тем же окружением запускается и
-    /// проверка готовности. Разъехавшись, они смотрели бы на разные модели и
-    /// разные словари и отвечали бы по-разному об одном и том же.
-    static func coreEnvironment() -> [String: String] {
-        var env = ProcessInfo.processInfo.environment
-        env["PYTHONUNBUFFERED"] = "1"
-        // Не давать Python писать __pycache__ внутрь подписанного бандла:
-        // это ломает подпись, а с ней слетают разрешения macOS.
-        env["PYTHONDONTWRITEBYTECODE"] = "1"
-        for line in (try? String(contentsOf: configEnv, encoding: .utf8))?
-                        .split(separator: "\n") ?? [] {
-            let clean = line.trimmingCharacters(in: .whitespaces)
-            guard !clean.hasPrefix("#"), let eq = clean.firstIndex(of: "=") else { continue }
-            let key = String(clean[clean.startIndex..<eq])
-            var value = String(clean[clean.index(after: eq)...])
-            if value.hasPrefix("\""), value.hasSuffix("\""), value.count >= 2 {
-                value = String(value.dropFirst().dropLast())
-            }
-            env[key] = value
-        }
-        // Модель распознавания — из настроек, но config.env главнее: его
-        // правят руками и осознанно, а переключатель в интерфейсе — на
-        // каждый день.
-        if env["MEETING_TRANSCRIBER_WHISPER_MODEL"] == nil {
-            env["MEETING_TRANSCRIBER_WHISPER_MODEL"] = Settings.load().whisperModel
-        }
-        return env
-    }
 }
 
 // MARK: - Настройки
 
-struct Settings: Codable {
-    var theme = "dark"                 // dark | light | system
-    var results_dir = Paths.home.appending(path: "Downloads").path
-    /// Куда класть саму запись встречи. Пусто — туда же, где результаты:
-    /// так было раньше, и менять это молча у тех, кто уже привык, незачем.
-    var recordings_dir = ""
-    var widget_enabled = false
-    var widget_output_dir = Paths.home.appending(path: "Downloads").path
-    var keep_diagnostics = false
-    /// Как подписывать ваши реплики с микрофонной дорожки.
-    var my_name = "Вы"
-    /// Должность и компания владельца. Живут здесь, а не только в профиле:
-    /// вписать их человек должен уметь, ни разу не заводя голосовую карточку.
-    var my_position = ""
-    var my_company = ""
-
-    // MARK: быстрый доступ
-    /// Значок в строке меню: начать запись, не открывая окно.
-    var menubar_enabled = true
-    /// small | medium | large — насколько подробен виджет.
-    var widget_size = "medium"
-    /// Следить, не началась ли встреча, и предлагать её записать.
-    var meeting_watch_enabled = false
-
-    // MARK: диктовка
-    var dictation_enabled = false
-    /// small — текст идёт на ходу; large-v3-turbo — точнее, но ждать 3 секунды.
-    var dictation_model = "small"
-    /// Что удерживать для диктовки. Только модификаторы — см. HotCombo.
-    var dictation_hotkey = "ropt"
-    /// Что удерживать, чтобы надиктованное сразу прошло обработку.
-    var dictation_tidy_hotkey = "opt+shift"
-    /// clean | structure | shrink — насколько сильно править надиктованное.
-    var dictation_level = "structure"
-
-    /// Языковая модель: и для резюме встреч, и для чата.
-    var llm_model = "qwen3:8b"
-
-    /// Что важнее в распознавании: точность или скорость.
-    /// accurate — large-v3, fast — large-v3-turbo.
-    var asr_speed = "accurate"
-
-    // MARK: проекты
-    /// Определять проект встречи и раскладывать результаты по его папке.
-    var project_grouping = false
-
-    init() {}
-
-    /// Настройки читаются по одному ключу, а не файлом целиком.
-    ///
-    /// Файл, записанный прежней версией, не знает ключей, добавленных позже.
-    /// Синтезированный декодер на таком файле бросает ошибку на весь объект, а
-    /// `load()` молча возвращает умолчания — и человек из-за одного нового
-    /// переключателя теряет и имя, и папку результатов, и назначенные клавиши.
-    /// Здесь каждое поле падает на своё умолчание, а остальные доживают.
-    init(from decoder: Decoder) throws {
-        let box = try decoder.container(keyedBy: CodingKeys.self)
-        func read<T: Decodable>(_ key: CodingKeys, _ fallback: T) -> T {
-            ((try? box.decodeIfPresent(T.self, forKey: key)) ?? nil) ?? fallback
-        }
-        theme = read(.theme, theme)
-        results_dir = read(.results_dir, results_dir)
-        recordings_dir = read(.recordings_dir, recordings_dir)
-        widget_enabled = read(.widget_enabled, widget_enabled)
-        widget_output_dir = read(.widget_output_dir, widget_output_dir)
-        keep_diagnostics = read(.keep_diagnostics, keep_diagnostics)
-        my_name = read(.my_name, my_name)
-        my_position = read(.my_position, my_position)
-        my_company = read(.my_company, my_company)
-        menubar_enabled = read(.menubar_enabled, menubar_enabled)
-        widget_size = read(.widget_size, widget_size)
-        meeting_watch_enabled = read(.meeting_watch_enabled, meeting_watch_enabled)
-        dictation_enabled = read(.dictation_enabled, dictation_enabled)
-        dictation_model = read(.dictation_model, dictation_model)
-        dictation_hotkey = read(.dictation_hotkey, dictation_hotkey)
-        dictation_tidy_hotkey = read(.dictation_tidy_hotkey, dictation_tidy_hotkey)
-        dictation_level = read(.dictation_level, dictation_level)
-        llm_model = read(.llm_model, llm_model)
-        project_grouping = read(.project_grouping, project_grouping)
-        asr_speed = read(.asr_speed, asr_speed)
-    }
-
-    /// Модель распознавания под выбранный режим.
-    ///
-    /// Замер на 180 секундах разговора (M3, восемь ядер): large-v3 считает
-    /// примерно два времени записи, turbo — одно. Turbo при этом слабее на
-    /// именах, терминах и латинице, поэтому по умолчанию остаётся large-v3.
-    var whisperModel: String {
-        asr_speed == "fast" ? "large-v3-turbo" : "large-v3"
-    }
-
-    /// Папка, куда ложится запись встречи.
-    var recordingsFolder: String {
-        recordings_dir.isEmpty ? results_dir : recordings_dir
-    }
-
-    static func load() -> Settings {
-        guard let data = try? Data(contentsOf: Paths.settings),
-              let value = try? JSONDecoder().decode(Settings.self, from: data)
-        else { return Settings() }
-        return value
-    }
-
-    func save() {
-        try? FileManager.default.createDirectory(at: Paths.support, withIntermediateDirectories: true)
-        guard let data = try? JSONEncoder().encode(self) else { return }
-        try? data.write(to: Paths.settings, options: .atomic)
-    }
-
+extension Settings {
     var palette: Palette {
         switch theme {
         case "light": return .light
@@ -302,7 +163,7 @@ struct MeetingCard: Decodable {
 }
 
 struct Record: Identifiable {
-    let id = UUID()
+    var id: URL { dir }
     let dir: URL
     let title: String
     let date: Date
@@ -571,7 +432,8 @@ final class Library {
             .compactMap { dir -> Record? in
                 var isDir: ObjCBool = false
                 guard FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDir),
-                      isDir.boolValue else { return nil }
+                      isDir.boolValue,
+                      (try? dir.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true else { return nil }
                 // Папка без стенограммы — след неудачного прогона, а не
                 // запись. Показывать её в списке значит выдавать сбой за
                 // результат.
@@ -592,8 +454,13 @@ final class Library {
             .reduce(into: [Record]()) { list, record in
                 // Оставляем только свежий прогон каждой встречи: старые копии
                 // лежат на диске, но в списке они лишний шум.
-                if !list.contains(where: { $0.title == record.title }) { list.append(record) }
+                if let index = list.firstIndex(where: { $0.title == record.title }) {
+                    if record.dir.lastPathComponent == record.title + "_result" {
+                        list[index] = record
+                    }
+                } else { list.append(record) }
             }
+            .sorted { $0.date > $1.date }
     }
 
     static func readTurns(in record: URL) -> [Turn] {
@@ -602,11 +469,7 @@ final class Library {
               let raw = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
         else { return [] }
 
-        var names: [String: String] = [:]
-        if let nd = try? Data(contentsOf: extra.appending(path: "speaker_names.json")),
-           let parsed = try? JSONSerialization.jsonObject(with: nd) as? [String: String] {
-            names = parsed
-        }
+        let names = readNames(in: record)
 
         return raw.compactMap { item in
             guard let start = item["start"] as? Double,
@@ -632,10 +495,25 @@ final class Library {
 
     static func readNames(in record: URL) -> [String: String] {
         let path = record.appending(path: Paths.extraDir).appending(path: "speaker_names.json")
-        guard let data = try? Data(contentsOf: path),
-              let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: String]
-        else { return [:] }
-        return parsed
+        var names: [String: String] = [:]
+        if let data = try? Data(contentsOf: path),
+           let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: String] { names = parsed }
+        let profiles = Dictionary(uniqueKeysWithValues: readSpeakers().map { ($0.key, $0.name) })
+        let extra = record.appending(path: Paths.extraDir)
+        if let data = try? Data(contentsOf: extra.appending(path: "speaker_recognition.json")),
+           let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+            for row in rows {
+                if let voice = row["speaker_id"] as? String, let key = row["profile_key"] as? String,
+                   let name = profiles[key] { names[voice] = name }
+            }
+        }
+        if let data = try? Data(contentsOf: extra.appending(path: "speaker_links.json")),
+           let links = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
+            for (voice, key) in links {
+                if let name = profiles[key] { names[voice] = name }
+            }
+        }
+        return names
     }
 }
 

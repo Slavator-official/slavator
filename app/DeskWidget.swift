@@ -186,6 +186,7 @@ private struct DeskWidgetView: View {
             start(microphone: source == "mic")
         }
         .buttonStyle(PrimaryButton(wide: true))
+        .disabled(pipeline.isRunning)
         // Причину отказа целиком показывает окно: здесь для неё нет места, а
         // обрезанная на полуслове ошибка хуже её отсутствия.
         .help(capture.failure ?? "")
@@ -225,6 +226,7 @@ private struct DeskWidgetView: View {
             Spacer(minLength: 0)
             Button("Начать слушать") { start(microphone: source == "mic") }
                 .buttonStyle(PrimaryButton(wide: true))
+                .disabled(pipeline.isRunning)
             if let failure = capture.failure {
                 Text(failure).font(Kind.body(11)).foregroundStyle(p.warn)
                     .lineLimit(2).padding(.top, 8)
@@ -260,12 +262,13 @@ private struct DeskWidgetView: View {
     }
 
     private func start(microphone: Bool) {
+        guard !pipeline.isRunning else { return }
         capture.start(source: microphone ? .microphone : .meeting,
                       folder: URL(fileURLWithPath: library.settings.recordingsFolder))
     }
 
     private func stop() {
-        stopAndProcess(capture: capture, pipeline: pipeline, library: library)
+        finishMeeting(capture: capture, pipeline: pipeline, library: library)
     }
 
     private var clock: String {

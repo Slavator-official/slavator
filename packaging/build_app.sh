@@ -20,14 +20,15 @@ fail() { printf '\033[31mОШИБКА:\033[0m %s\n' "$1" >&2; exit 1; }
 
 command -v swiftc >/dev/null || fail "нет swiftc — поставьте Command Line Tools"
 
-SOURCES=(Theme.swift Models.swift Doctor.swift Ribbon.swift Player.swift Pipeline.swift
-         SystemAudio.swift MeetingWatch.swift LiveCapture.swift Mixdown.swift
-         Dictation.swift Chat.swift
-         Enroll.swift Screens.swift DeskWidget.swift App.swift)
+SOURCES=(Configuration.swift ProcessOutput.swift Theme.swift Models.swift
+         SpeakerMemory.swift SpeakerMemoryScreen.swift Ribbon.swift Player.swift
+         Pipeline.swift SystemAudio.swift LiveCapture.swift Mixdown.swift
+         Dictation.swift Chat.swift Enroll.swift Screens.swift Doctor.swift
+         DeskWidget.swift MeetingWatch.swift App.swift)
 for f in "${SOURCES[@]}"; do
     [[ -f "$SWIFT/$f" ]] || fail "нет исходника: $SWIFT/$f"
 done
-for f in meeting_transcriber_v25_1.py onnx_engine.py glossary_fix.py dictation_worker.py app_icon.png; do
+for f in meeting_transcriber_v25_1.py onnx_engine.py glossary_fix.py dictation_worker.py app_config.py speaker_memory.py speaker_links.py meeting_store.py speech_alignment.py audio_preview.py desktop_contract.json app_icon.png; do
     [[ -f "$CORE/$f" ]] || fail "нет файла ядра: $CORE/$f"
 done
 
@@ -50,6 +51,12 @@ cd "$SWIFT"
 swiftc -O -parse-as-library -target arm64-apple-macos14.2 \
     -Xlinker -dead_strip_dylibs \
     -o "$DIST/.slavator-bin" "${SOURCES[@]}" || fail "не собирается интерфейс"
+
+# A view modifier added in a future edit can pull SwiftUICore back in even
+# with dead stripping. Fail before replacing the last runnable bundle.
+if otool -L "$DIST/.slavator-bin" | grep -q '/SwiftUICore.framework/'; then
+    fail "бинарник зависит от SwiftUICore (macOS 15), но поддерживается macOS 14.2"
+fi
 
 say "Создаю бандл"
 rm -rf "$APP"
@@ -82,7 +89,7 @@ rm -rf "$ICONSET"
 cp "$CORE/app_icon.png" "$RESOURCES/app_icon.png"
 
 say "Копирую ядро обработки"
-for module in meeting_transcriber_v25_1.py onnx_engine.py glossary_fix.py dictation_worker.py; do
+for module in meeting_transcriber_v25_1.py onnx_engine.py glossary_fix.py dictation_worker.py app_config.py speaker_memory.py speaker_links.py meeting_store.py meeting_chat.py speech_alignment.py audio_preview.py desktop_contract.json; do
     cp "$CORE/$module" "$RESOURCES/core/"
 done
 cp -R "$CORE/speaker_service" "$RESOURCES/core/speaker_service"

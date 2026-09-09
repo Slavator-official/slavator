@@ -1,0 +1,2 @@
+-r ../packaging/requirements.txt
+-r ../packaging/requirements-faster-whisper.txt

@@ -104,6 +104,7 @@ INFER_NAMES = os.environ.get("MEETING_TRANSCRIBER_INFER_NAMES", "1") not in ("0"
 NAME_CONFIDENCE = float(os.environ.get("MEETING_TRANSCRIBER_NAME_CONFIDENCE", "0.75"))
 
 WHISPER_MODEL = os.environ.get("MEETING_TRANSCRIBER_WHISPER_MODEL", "large-v3")
+WHISPER_THREADS = max(1, min(16, int(os.environ.get("MEETING_TRANSCRIBER_CPU_THREADS", "4"))))
 # Детектор речи включён. Он пропускает тишину мимо модели, а её на встрече
 # около половины: замер на 180 секундах реального разговора дал 384 секунды
 # счёта против 670 без него — почти вдвое быстрее при том же тексте
@@ -348,6 +349,7 @@ class Utterance:
     speaker_id: str = ""          # SPEAKER_00 из диаризации
     speaker_name: str = ""        # человеческое имя, если голос опознан
     confidence: float = 0.0
+    words: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def label(self) -> str:
@@ -768,14 +770,6 @@ def preflight(need_llm: bool = True, need_diarization: bool = True) -> bool:
     # весь запуск - значит отнимать у пользователя работающую половину.
     if need_llm:
         ok, detail = ollama_health()
-        if not ok and not ollama_running():
-            # Ollama никем не запускается: установщик её только ставит, службы
-            # в системе нет. После перезагрузки резюме переставало собираться,
-            # и человек видел «Ollama недоступна» — правду, от которой никакого
-            # толку. Пробуем поднять её сами.
-            log("    Ollama не отвечает — запускаю")
-            if ollama_serve():
-                ok, detail = ollama_health()
         if not ok:
             warn(f"Ollama недоступна: {detail}")
             warn("Резюме и определение имён по контексту будут пропущены.")
@@ -914,7 +908,8 @@ def whisper_model():
             ) from exc
         log(f"    модель {WHISPER_MODEL} ({WHISPER_DEVICE}/{WHISPER_COMPUTE})")
         _whisper_model = WhisperModel(
-            WHISPER_MODEL, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE
+            WHISPER_MODEL, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE,
+            cpu_threads=WHISPER_THREADS, num_workers=1,
         )
     return _whisper_model
 
@@ -1006,7 +1001,9 @@ def _transcribe_whisper(wav: Path, duration: float, glossary: list) -> list:
             start = float(words[0].start)
             end = float(words[-1].end)
         result.append(
-            Utterance(start=start, end=end, text=text, confidence=confidence)
+            Utterance(start=start, end=end, text=text, confidence=confidence,
+                      words=[{"start":float(w.start),"end":float(w.end),"word":w.word}
+                             for w in (words or [])])
         )
         if total:
             stage_pct("asr", segment.end / total, f"{int(segment.end)} с из {int(total)} с")
@@ -1323,29 +1320,9 @@ def merge_split_voices(wav: Path, turns: list, threshold: float = MERGE_THRESHOL
 
 
 def assign_speakers(utterances: list[Utterance], turns: list[dict[str, Any]]) -> None:
-    """Каждой реплике - голос с наибольшим перекрытием по времени."""
-    if not turns:
-        for item in utterances:
-            item.speaker_id = "SPEAKER_00"
-        return
-
-    for item in utterances:
-        best_speaker = ""
-        best_overlap = 0.0
-        for turn in turns:
-            overlap = min(item.end, turn["end"]) - max(item.start, turn["start"])
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best_speaker = turn["speaker"]
-        if not best_speaker:
-            # Реплика не попала ни в один интервал - берём ближайший по центру.
-            center = (item.start + item.end) / 2
-            nearest = min(
-                turns,
-                key=lambda t: min(abs(center - t["start"]), abs(center - t["end"])),
-            )
-            best_speaker = nearest["speaker"]
-        item.speaker_id = best_speaker
+    """Разбить фразы на сменах голоса по меткам слов; сомнения оставить явными."""
+    from speech_alignment import align_utterances
+    utterances[:] = align_utterances(utterances, turns)
 
 
 # --------------------------------------------------------------------------
@@ -1826,7 +1803,7 @@ def ollama_health() -> tuple[bool, str]:
         return False, f"не удалось получить список моделей ({exc})"
 
     models = {str(item.get("name", "")) for item in tags.get("models", [])}
-    if not any(name == OLLAMA_MODEL or name.startswith(OLLAMA_MODEL) for name in models):
+    if not ollama_has_model(models):
         available = ", ".join(sorted(models)[:5]) or "нет моделей"
         return False, (
             f"модель «{OLLAMA_MODEL}» не установлена (доступно: {available}). "
@@ -1888,29 +1865,22 @@ def ollama_serve(wait_seconds: int = 30) -> bool:
     «ollama serve» отдельным сеансом, отвязанным от нашего процесса: иначе
     сервер умрёт вместе с обработкой, посреди работы.
     """
+    # Starting a server is explicit repair, never a remote-host fallback.
+    if OLLAMA_HOST.rstrip("/") != "http://127.0.0.1:11434":
+        return False
     if ollama_running():
         return True
     binary = ollama_binary()
     if binary is None:
         return False
 
-    started = False
-    if sys.platform == "darwin" and OLLAMA_MAC_APP.is_dir():
-        try:
-            started = subprocess.run(["/usr/bin/open", "-ga", "Ollama"],
-                                     capture_output=True, timeout=20).returncode == 0
-        except (OSError, subprocess.SubprocessError):
-            started = False
-    if not started:
-        # CREATE_NO_WINDOW: на Windows иначе выскакивает чёрное окно консоли.
-        detach = {"creationflags": 0x08000000} if os.name == "nt" \
-            else {"start_new_session": True}
-        try:
-            subprocess.Popen([str(binary), "serve"],
-                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, **detach)
-        except OSError:
-            return False
+    detach = {"creationflags": 0x08000000} if os.name == "nt" else {"start_new_session": True}
+    try:
+        subprocess.Popen([str(binary), "serve"], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         env={**os.environ, "OLLAMA_HOST": "127.0.0.1:11434"}, **detach)
+    except OSError:
+        return False
 
     deadline = time.monotonic() + wait_seconds
     while time.monotonic() < deadline:
@@ -1932,7 +1902,7 @@ def ollama_models() -> set:
 
 def ollama_has_model(names=None) -> bool:
     known = ollama_models() if names is None else names
-    return any(n == OLLAMA_MODEL or n.startswith(OLLAMA_MODEL) for n in known)
+    return OLLAMA_MODEL in known or (":" not in OLLAMA_MODEL and OLLAMA_MODEL + ":latest" in known)
 
 
 def ollama_pull(model: str = "") -> bool:
@@ -1949,7 +1919,7 @@ def ollama_pull(model: str = "") -> bool:
         headers={"Content-Type": "application/json"},
         method="POST")
 
-    log(f"    Загружаю языковую модель {name} (около 5 ГБ, это надолго)")
+    log(f"    Загружаю языковую модель {name}; точный объём покажет Ollama")
     shown = -5
     try:
         with urllib.request.urlopen(request, timeout=OLLAMA_TIMEOUT) as response:
@@ -2209,7 +2179,8 @@ def infer_speaker_names(utterances: list, extra_dir: Path) -> dict:
     спикеров попадали бы выдуманные люди.
     """
     unknown = sorted({item.speaker_id for item in utterances
-                      if item.speaker_id and not item.speaker_name})
+                      if item.speaker_id and not item.speaker_name
+                      and not item.speaker_id.startswith("UNASSIGNED_")})
     if not unknown:
         return {}
 
@@ -2750,6 +2721,15 @@ def run_pipeline(
             own.append(item)
         log(f"    ваших реплик: {len(own)}")
 
+    # Meeting ASR is finished. Keeping its cached model through diarization
+    # and the LLM step wastes memory on 8-GB office machines.
+    global _whisper_model
+    _whisper_model = None
+    if ASR_ENGINE.startswith("giga"):
+        _engine().release_asr()
+    import gc
+    gc.collect()
+
     stage_start("quality")
     utterances, warnings = quality_gate(utterances, state.duration)
     state.warnings = warnings
@@ -2783,6 +2763,10 @@ def run_pipeline(
         log("Разделение на спикеров пропущено (--no-diarization)")
 
     assign_speakers(utterances, turns)
+    # A phrase may split at a speaker change. Word timings retain original ASR
+    # tokens, so apply deterministic terminology repair to the final pieces.
+    if glossary:
+        _local("glossary_fix").repair(utterances, glossary)
 
     hints: dict = {}
     names: dict = {}
@@ -2791,7 +2775,8 @@ def run_pipeline(
         state.matches = identify_speakers(paths.wav, turns, profiles_dir)
         names.update({m.speaker_id: m.name for m in state.matches if m.known})
         for item in utterances:
-            item.speaker_name = names.get(item.speaker_id, "")
+            item.speaker_name = ("Голос не определён" if item.speaker_id.startswith("UNASSIGNED_")
+                                 else names.get(item.speaker_id, ""))
 
         # Имена определяем ДО выгрузки образцов: подсказка попадает в имя
         # WAV-файла и сразу видна пользователю в разделе «Новые голоса».
@@ -3059,6 +3044,9 @@ def enroll(name: str, samples, position: str, company: str, profiles_dir: Path) 
             "Возможно, все образцы короче секунды.")
 
     total = len(sorted(folder.glob("*.wav")))
+    from speaker_links import link_sample
+    for source in files:
+        link_sample(source, key)
     log(f"Готово. Всего образцов у человека: {total}")
     return 0
 
@@ -3085,14 +3073,18 @@ def whisper_cached() -> bool:
     """Модель распознавания речи уже лежит в кэше huggingface."""
     if ASR_ENGINE.startswith("giga"):
         return True            # у GigaAM свои модели, они в списке onnx ниже
-    home = os.environ.get("HF_HOME")
-    hub = Path(home) / "hub" if home else Path.home() / ".cache" / "huggingface" / "hub"
+    local = Path(WHISPER_MODEL).expanduser()
+    if local.is_dir():
+        return all((local / name).is_file() and (local / name).stat().st_size > 0
+                   for name in ("model.bin", "config.json", "tokenizer.json"))
     try:
-        # Сборки моделей лежат у разных авторов: large-v3 у Systran,
-        # large-v3-turbo — у mobiuslabsgmbh. Имя автора нас не касается,
-        # важно, что модель под этим названием уже скачана.
-        return any(hub.glob(f"models--*--faster-whisper-{WHISPER_MODEL}"))
-    except OSError:
+        # Resolves the installed faster-whisper model mapping and cache refs;
+        # local_files_only forbids downloads, unlike mere folder existence.
+        from faster_whisper.utils import download_model
+        cached = Path(download_model(WHISPER_MODEL, local_files_only=True))
+        return all((cached / name).is_file() and (cached / name).stat().st_size > 0
+                   for name in ("model.bin", "config.json", "tokenizer.json"))
+    except Exception:
         return False
 
 
@@ -3106,7 +3098,7 @@ def _speech_models():
         absent = list(engine.missing(names))
         return names, absent, sum(engine.MODELS[n]["size_mb"] for n in absent)
     except Exception:  # noqa: BLE001 - без библиотек модуль может не подняться
-        return [], [], 0
+        return [], ["не удалось проверить модели"], 0
 
 
 def readiness() -> dict:
@@ -3125,7 +3117,7 @@ def readiness() -> dict:
         "fixable": False,
     })
 
-    _, absent, size = ([], [], 0) if packages else _speech_models()
+    _, absent, size = ([], ["сначала восстановите библиотеки"], 0) if packages else _speech_models()
     items.append({
         "key": "speech",
         "title": "Модели разделения голосов",
@@ -3135,7 +3127,7 @@ def readiness() -> dict:
         "fixable": True,
     })
 
-    asr_ready = bool(packages) or whisper_cached()
+    asr_ready = not packages and whisper_cached()
     items.append({
         "key": "asr",
         "title": f"Модель распознавания речи ({WHISPER_MODEL})",
@@ -3146,7 +3138,8 @@ def readiness() -> dict:
     })
 
     binary = ollama_binary()
-    running = ollama_running()
+    local = OLLAMA_HOST.rstrip("/") == "http://127.0.0.1:11434"
+    running = local and ollama_running()
     items.append({
         "key": "ollama",
         "title": "Ollama",
@@ -3185,8 +3178,14 @@ def readiness() -> dict:
     }
 
 
-def repair() -> int:
+def repair(allow_download: bool = False) -> int:
     """Дозагрузить недостающее и поднять то, что не запущено."""
+    if OLLAMA_HOST.rstrip("/") != "http://127.0.0.1:11434":
+        log("Восстановление доступно только для локальной Ollama: http://127.0.0.1:11434")
+        return 2
+    if not allow_download:
+        log("Загрузка не разрешена. Используйте --repair --allow-download после явного согласия на интернет.")
+        return 2
     report = readiness()
     if report["ok"]:
         log("Всё на месте — дозагружать нечего.")
@@ -3289,6 +3288,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--check", action="store_true", help="только проверить окружение")
     parser.add_argument("--json", action="store_true",
                         help="с --check: выдать отчёт о готовности машинно")
+    parser.add_argument("--allow-download", action="store_true", help="явно разрешить загрузки при --repair")
     parser.add_argument("--repair", action="store_true",
                         help="дозагрузить недостающее и запустить Ollama")
     parser.add_argument("--enroll", metavar="ИМЯ",
@@ -3317,7 +3317,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     log(f"Meeting Transcriber v{APP_VERSION}")
 
     if args.repair:
-        return repair()
+        return repair(allow_download=args.allow_download)
 
     if args.check:
         try:

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Главная
 
@@ -11,9 +12,11 @@ struct MainScreen: View {
     var pipeline: Pipeline
     var capture: LiveCapture
     var doctor: Doctor
+    @Binding var picked: URL?
     @Binding var screen: Screen
     @Environment(\.palette) private var p
-    @State private var picked: URL?
+    @State private var dropTargeted = false
+    @State private var inputError: String?
     @State private var source = "sys"
     @State private var pulse = false
     @State private var ready = Paths.isReady
@@ -23,7 +26,15 @@ struct MainScreen: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            ScreenTitle(text: "Главная")
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Главная").font(Kind.title(28))
+                    Text("От записи встречи к стенограмме, голосам и решениям.")
+                        .font(Kind.body(13)).foregroundStyle(p.muted)
+                }
+                Spacer(minLength: 12)
+                Pill(text: "Записи: \(library.records.count)", fg: p.muted, bg: p.raised)
+            }.padding(.bottom, 10)
 
             if !ready {
                 setupCard
@@ -41,6 +52,11 @@ struct MainScreen: View {
             }
             .disabled(!ready)
             .opacity(ready ? 1 : 0.45)
+
+            if let inputError {
+                Label(inputError, systemImage: "exclamationmark.circle")
+                    .font(Kind.body(13)).foregroundStyle(p.warn)
+            }
 
             if pipeline.isRunning { progressCard }
             lastMeeting
@@ -126,10 +142,15 @@ struct MainScreen: View {
                 .padding(.top, 10)
             } else {
                 Button(pipeline.isRunning ? "Идёт дозагрузка" : "Дозагрузить") {
-                    pipeline.repair(library: library)
+                    let alert = NSAlert()
+                    alert.messageText = "Разрешить загрузку моделей из интернета?"
+                    alert.informativeText = "Будут загружены недостающие модели и запущена локальная Ollama. Объём может составить несколько гигабайт. Записи встреч не отправляются."
+                    alert.addButton(withTitle: "Разрешить и загрузить")
+                    alert.addButton(withTitle: "Отмена")
+                    if alert.runModal() == .alertFirstButtonReturn { pipeline.repair(library: library) }
                 }
                 .buttonStyle(PrimaryButton(wide: true))
-                .disabled(pipeline.isRunning)
+                .disabled(pipeline.isRunning || capture.isRecording)
                 .padding(.top, 10)
             }
         }
@@ -188,33 +209,40 @@ struct MainScreen: View {
                             pipeline.run(input: picked, library: library, speakers: speakers)
                         }
                         .buttonStyle(PrimaryButton())
-                        .disabled(pipeline.isRunning)
+                        .disabled(pipeline.isRunning || capture.isRecording)
                         Button("Другой файл") { pick() }.buttonStyle(QuietButton())
                         Spacer(minLength: 0)
                     }
                 }
             } else {
                 Button(action: pick) {
-                    HStack(spacing: 14) {
-                        Image(systemName: "doc.badge.plus")
-                            .font(.system(size: 21)).foregroundStyle(p.faint).frame(width: 26)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Выбрать запись").font(Kind.strong(14.5)).foregroundStyle(p.text)
-                            Text("или перетащите файл сюда")
-                                .font(Kind.body(12.5)).foregroundStyle(p.muted)
-                        }
-                        Spacer(minLength: 0)
+                    VStack(spacing: 10) {
+                        Image(systemName: "arrow.up.doc")
+                            .font(.system(size: 23, weight: .medium))
+                            .foregroundStyle(p.accent2)
+                            .frame(width: 48, height: 48)
+                            .background(RoundedRectangle(cornerRadius: 13).fill(p.accentSoft))
+                        Text("Выбрать запись").font(Kind.head(16)).foregroundStyle(p.text)
+                        Text("или перетащите аудио / видео сюда")
+                            .font(Kind.body(12.5)).foregroundStyle(p.muted)
+                        Text("WAV · MP3 · M4A · MP4 · другие форматы")
+                            .font(Kind.body(11)).foregroundStyle(p.faint)
                     }
+                    .frame(maxWidth: .infinity, minHeight: 172)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .frame(maxHeight: .infinity)
             }
         }
-        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-            guard let provider = providers.first else { return false }
+        .frame(minHeight: 220)
+        .overlay(RoundedRectangle(cornerRadius: 13)
+            .strokeBorder(dropTargeted ? p.accent2 : p.line,
+                          style: StrokeStyle(lineWidth: dropTargeted ? 2 : 1, dash: picked == nil ? [5, 4] : [])))
+        .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
+            guard ready, !pipeline.isRunning, let provider = providers.first else { return false }
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                if let url { DispatchQueue.main.async { picked = url } }
+                if let url { DispatchQueue.main.async { selectFile(url) } }
             }
             return true
         }
@@ -249,7 +277,7 @@ struct MainScreen: View {
                 HStack(spacing: 10) {
                     Image(systemName: "mic")
                         .font(.system(size: 19)).foregroundStyle(p.accent2).frame(width: 26)
-                    Text("Слушать встречу").font(Kind.strong(14.5))
+                    Text("Записать встречу").font(Kind.strong(14.5))
                     Spacer()
                 }
                 // Как в прототипе: сначала выбор источника во всю ширину,
@@ -263,9 +291,13 @@ struct MainScreen: View {
                      : "Только микрофон — для встречи в одной комнате")
                     .font(Kind.body(12)).foregroundStyle(p.muted)
                     .padding(.top, 6)
-                Button("Начать слушать") { startRecording() }
+                Button("Начать запись") { startRecording() }
                     .buttonStyle(PrimaryButton(wide: true))
                     .padding(.top, 8)
+                    .disabled(pipeline.isRunning)
+                Spacer(minLength: 10)
+                Text("Расшифровка начнётся после остановки записи.")
+                    .font(Kind.body(11.5)).foregroundStyle(p.faint)
                 if let failure = capture.failure {
                     Text(failure).font(Kind.body(12)).foregroundStyle(p.warn)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -273,6 +305,7 @@ struct MainScreen: View {
                 }
             }
         }
+        .frame(minHeight: 220)
     }
 
     private func startRecording() {
@@ -283,7 +316,7 @@ struct MainScreen: View {
     /// Остановка сразу отправляет запись в обычную обработку: живой режим и
     /// файл сходятся в один пайплайн, иначе качество разъедется.
     private func finishRecording() {
-        picked = stopAndProcess(capture: capture, pipeline: pipeline, library: library)
+        picked = finishMeeting(capture: capture, pipeline: pipeline, library: library)
     }
 
     /// Обработка идёт долго — час записи считается десятки минут. Без
@@ -323,7 +356,8 @@ struct MainScreen: View {
                         .frame(width: 6, height: 6)
                 }
                 Spacer()
-                Button("Прервать") { pipeline.cancel() }.buttonStyle(QuietButton())
+                Button(pipeline.isCancelling ? "Останавливаю…" : "Прервать") { pipeline.cancel() }
+                    .buttonStyle(QuietButton()).disabled(pipeline.isCancelling)
             }
             .padding(.top, 14)
         }
@@ -417,7 +451,7 @@ struct MainScreen: View {
     private func meta(_ record: Record) -> String {
         var parts = [humanDate(record.date)]
         if record.length > 0 { parts.append(hms(record.length)) }
-        if record.speakerCount > 0 { parts.append("\(record.speakerCount) участников") }
+        if record.speakerCount > 0 { parts.append("Участники: \(record.speakerCount)") }
         return parts.joined(separator: " · ")
     }
 
@@ -441,7 +475,16 @@ struct MainScreen: View {
         panel.allowedContentTypes = [.audio, .movie, .mpeg4Movie, .wav, .mp3]
         panel.allowsMultipleSelection = false
         panel.prompt = "Выбрать"
-        if panel.runModal() == .OK { picked = panel.url }
+        if panel.runModal() == .OK, let url = panel.url { selectFile(url) }
+    }
+
+    private func selectFile(_ url: URL) {
+        guard !pipeline.isRunning else { return }
+        do {
+            try MediaInput.validate(url)
+            picked = url
+            inputError = nil
+        } catch { inputError = error.localizedDescription }
     }
 
     private func fileInfo(_ url: URL) -> String {
@@ -450,6 +493,26 @@ struct MainScreen: View {
         formatter.countStyle = .file
         return "\(url.pathExtension.uppercased()) · \(formatter.string(fromByteCount: Int64(size)))"
     }
+}
+
+/// Одинаковая остановка на главной и в постоянной нижней панели.
+@discardableResult
+func finishMeeting(capture: LiveCapture, pipeline: Pipeline, library: Library) -> URL? {
+    guard let url = capture.stop() else { return nil }
+    if let warning = capture.failure { showAlert("Запись сохранена с ограничением", warning) }
+    guard capture.seconds >= 3 else {
+        showAlert("Слишком короткая запись", "Записано меньше трёх секунд. Аудиофайл сохранён в папке результатов.")
+        return url
+    }
+    guard !pipeline.isRunning else {
+        showAlert("Запись сохранена", "Другая встреча ещё обрабатывается. Новая запись выбрана на главной — запустите её, когда обработка завершится.")
+        return url
+    }
+    // Дорожки сведены в один файл ещё при остановке, отдельной микрофонной
+    // больше нет: второй проход распознавания по ней стоил на встрече в
+    // двадцать минут лишние полчаса ожидания.
+    pipeline.run(input: url, library: library)
+    return url
 }
 
 func showAlert(_ title: String, _ text: String) {
@@ -475,62 +538,153 @@ struct RecordsScreen: View {
     @Bindable var library: Library
     var player: Player
     var pipeline: Pipeline
+    @Bindable var memory: SpeakerMemory
     @Binding var screen: Screen
     @Environment(\.palette) private var p
     /// Встреча, у которой спрашиваем проект.
     @State private var asking: Record?
+    @State private var query = ""
+    @State private var onlyUnknown = false
+
+    private var visibleRecords: [Record] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return library.records.filter { record in
+            (!onlyUnknown || library.unknown.contains { $0.record == record.dir }) &&
+            (needle.isEmpty || record.title.localizedStandardContains(needle) ||
+             record.turns.contains { $0.name.localizedStandardContains(needle) })
+        }
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ScreenTitle(text: "Записи")
-            Card {
-                if library.records.isEmpty {
-                    Text("Пока нет обработанных встреч")
-                        .font(Kind.body(14)).foregroundStyle(p.muted)
-                        .frame(maxWidth: .infinity).padding(.vertical, 28)
-                } else {
-                    // Ширины подобраны так, чтобы ленте осталось место. С
-                    // прежними колонка «Кто говорил» получала нулевую ширину:
-                    // лента схлопывалась в штрих, а заголовок переносился по
-                    // букве в строку и выглядел пустотой. Дата и длительность
-                    // сведены в одну колонку - вместе они читаются лучше.
-                    HStack(spacing: 12) {
-                        Text("Встреча").frame(width: 150, alignment: .leading)
-                        Text("Кто говорил")
-                            .frame(minWidth: 110, maxWidth: .infinity, alignment: .leading)
-                        Text("Когда").frame(width: 150, alignment: .leading)
-                        Text("Статус").frame(width: 112, alignment: .trailing)
-                        Text("Стенограмма").frame(width: 88, alignment: .trailing)
-                        Text("Саммари").frame(width: 88, alignment: .trailing)
-                    }
-                    .font(Kind.eyebrow()).tracking(0.8).foregroundStyle(p.faint)
-                    .lineLimit(1)
-                    .padding(.bottom, 9)
-
-                    ForEach(library.records) { record in
-                        Divider().overlay(p.line2)
-                        HStack(spacing: 12) {
-                            Text(record.title).font(Kind.strong(13.5))
-                                .lineLimit(1).truncationMode(.middle)
-                                .frame(width: 150, alignment: .leading)
-                            Ribbon(turns: record.turns, height: 12,
-                                   library: library, record: record)
-                                .frame(minWidth: 110, maxWidth: .infinity)
-                            Text("\(humanDate(record.date)) · \(hms(record.length))")
-                                .font(Kind.mono(12)).lineLimit(1)
-                                .foregroundStyle(p.muted).frame(width: 150, alignment: .leading)
-                            statusPill(for: record).frame(width: 112, alignment: .trailing)
-                            fileButton(record.transcript, hint: "Открыть стенограмму")
-                                .frame(width: 88, alignment: .trailing)
-                            summaryButton(for: record)
-                                .frame(width: 88, alignment: .trailing)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                ScreenTitle(text: "Записи")
+                Spacer()
+                Menu("Корзина Славатора (\(memory.deleted.count))") {
+                    if memory.deleted.isEmpty { Text("Корзина пуста") }
+                    ForEach(memory.deleted) { entry in
+                        Button("Восстановить: \(entry.title) · \(entry.date.prefix(10))") {
+                            guard !pipeline.isRunning, !memory.busy else { return }
+                            memory.restoreMeeting(entry, settings: library.settings) { library.reload() }
                         }
-                        .padding(.vertical, 11)
-                        .contentShape(Rectangle())
-                        .onTapGesture { NSWorkspace.shared.open(record.dir) }
                     }
+                    Divider()
+                    Button("Показать папку корзины") {
+                        NSWorkspace.shared.open(URL(fileURLWithPath: library.settings.results_dir).appending(path: ".slavator-trash"))
+                    }.disabled(!FileManager.default.fileExists(atPath: URL(fileURLWithPath: library.settings.results_dir).appending(path: ".slavator-trash").path))
+                }.disabled(memory.busy || pipeline.isRunning)
+            }
+            if memory.busy {
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text(memory.progress).font(Kind.body(12)).foregroundStyle(p.muted)
                 }
             }
+            if let failure = memory.failure {
+                Text(failure).font(Kind.body(13)).foregroundStyle(p.warn).textSelection(.enabled)
+            }
+            if !memory.notice.isEmpty {
+                Text(memory.notice).font(Kind.body(12)).foregroundStyle(p.muted)
+            }
+            HStack(spacing: 12) {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(p.faint)
+                    TextField("Название встречи или имя участника", text: $query)
+                        .textFieldStyle(.plain).font(Kind.body())
+                    if !query.isEmpty {
+                        Button { query = "" } label: { Image(systemName: "xmark.circle.fill") }
+                            .buttonStyle(.plain).foregroundStyle(p.muted).help("Очистить поиск")
+                    }
+                }
+                .padding(11).background(RoundedRectangle(cornerRadius: 9).fill(p.surface))
+                .overlay(RoundedRectangle(cornerRadius: 9).stroke(p.line, lineWidth: 1))
+                Toggle("Новые голоса", isOn: $onlyUnknown).toggleStyle(.checkbox).font(Kind.body(12))
+            }
+            Text("Показано: \(visibleRecords.count) из \(library.records.count)")
+                .font(Kind.body(12)).foregroundStyle(p.faint)
+            if visibleRecords.isEmpty {
+                Card {
+                    VStack(spacing: 10) {
+                        Image(systemName: library.records.isEmpty ? "tray" : "magnifyingglass")
+                            .font(.system(size: 28)).foregroundStyle(p.accent2)
+                        Text(library.records.isEmpty ? "Здесь появятся ваши встречи" : "Ничего не найдено")
+                            .font(Kind.head(16))
+                        Text(library.records.isEmpty ? "Начните с аудио или видео на главном экране." : "Попробуйте другое название или отключите фильтр голосов.")
+                            .font(Kind.body(13)).foregroundStyle(p.muted)
+                        if library.records.isEmpty {
+                            Button("Перейти на главную") { screen = .main }.buttonStyle(PrimaryButton())
+                        } else {
+                            Button("Сбросить поиск") { query = ""; onlyUnknown = false }.buttonStyle(QuietButton())
+                        }
+                    }.frame(maxWidth: .infinity).padding(.vertical, 26)
+                }
+            } else {
+                LazyVStack(spacing: 12) {
+                    ForEach(visibleRecords) { record in recordCard(record) }
+                }
+            }
+        }
+        .onAppear { memory.loadCatalog(settings: library.settings) }
+    }
+
+    private func confirmDeletion(_ record: Record) {
+        guard !pipeline.isRunning, !memory.busy else { return }
+        let alert = NSAlert()
+        alert.messageText = "Удалить встречу «\(record.title)»?"
+        alert.informativeText = "Все сохранённые версии этой встречи будут перемещены в корзину Славатора и исчезнут из записей, поиска и графа. Исходное аудио и общие голосовые профили сохранятся. Встречу можно восстановить через меню корзины на этом экране."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Переместить в корзину")
+        alert.addButton(withTitle: "Отмена")
+        alert.buttons.first?.hasDestructiveAction = true
+        guard alert.runModal() == .alertFirstButtonReturn,
+              !pipeline.isRunning, !memory.busy else { return }
+        player.stop()
+        memory.deleteMeeting(record, settings: library.settings) { library.reload() }
+    }
+
+    private func recordCard(_ record: Record) -> some View {
+        Card {
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(record.title).font(Kind.head(16)).lineLimit(2).textSelection(.enabled)
+                    Text("\(humanDate(record.date)) · \(hms(record.length)) · Участники: \(record.speakerCount)")
+                        .font(Kind.body(12)).foregroundStyle(p.muted)
+                }
+                Spacer(minLength: 0)
+                statusPill(for: record)
+            }
+            if !record.turns.isEmpty {
+                Ribbon(turns: record.turns, height: 18, library: library, record: record)
+                    .padding(.vertical, 16)
+            }
+            HStack(spacing: 18) {
+                Button {
+                    player.playMeeting(record, colour: p.accent2)
+                } label: {
+                    Label(player.recordingID == record.dir && player.isPlaying ? "Пауза" : "Слушать запись",
+                          systemImage: player.recordingID == record.dir && player.isPlaying ? "pause.fill" : "play.fill")
+                        .font(Kind.strong(12))
+                }.buttonStyle(.plain).foregroundStyle(p.accent2)
+                    .disabled((record.source ?? record.ownTrack) == nil ||
+                              (player.recordingID == record.dir && player.isPreparing))
+                    .help((record.source ?? record.ownTrack) == nil
+                          ? "Исходное аудио не найдено: возможно, файл перенесли или удалили."
+                          : "Вся запись: перемотка и скорость доступны в панели снизу.")
+                Label("Стенограмма", systemImage: "doc.text").font(Kind.body(12)).foregroundStyle(p.muted)
+                fileButton(record.transcript, hint: "Открыть стенограмму")
+                Divider().frame(height: 14)
+                Text("Резюме").font(Kind.body(12)).foregroundStyle(p.muted)
+                summaryButton(for: record)
+                Spacer()
+                Button { NSWorkspace.shared.open(record.dir) } label: {
+                    Label("Папка", systemImage: "folder").font(Kind.body(12))
+                }.buttonStyle(.plain).foregroundStyle(p.muted).help("Показать файлы встречи")
+                Button { confirmDeletion(record) } label: {
+                    Label("Удалить", systemImage: "trash").font(Kind.body(12))
+                }.buttonStyle(.plain).foregroundStyle(p.warn)
+                    .disabled(pipeline.isRunning || memory.busy)
+                    .help("Переместить встречу и её прошлые версии в корзину Славатора")
+            }.padding(.top, record.turns.isEmpty ? 14 : 0)
         }
         .sheet(item: $asking) { record in
             ProjectSheet(record: record, library: library, pipeline: pipeline)
@@ -663,7 +817,7 @@ extension RecordsScreen {
                     Image(systemName: "sparkles").font(.system(size: 12))
                     Text("Собрать").font(Kind.body(12.5))
                 }
-                .foregroundStyle(library.palette.accent)
+                .foregroundStyle(library.palette.accent2)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -673,7 +827,7 @@ extension RecordsScreen {
 
     /// Статус встречи: важно не «готово», а есть ли неразобранные голоса.
     @ViewBuilder func statusPill(for record: Record) -> some View {
-        let unknown = Library.readUnknown(in: record).count
+        let unknown = library.unknown.filter { $0.record == record.dir }.count
         let card = record.meeting
         if let card, card.needs_review {
             // Не «ошибка», а незаконченное дело: нажатие открывает вопросы.
@@ -694,7 +848,7 @@ extension RecordsScreen {
     }
 }
 
-struct SpeakersScreen: View {
+struct SpeakerProfilesScreen: View {
     @Bindable var library: Library
     var player: Player
     @Binding var screen: Screen
@@ -921,6 +1075,7 @@ struct PersonScreen: View {
     var player: Player
     let key: String
     @Binding var screen: Screen
+    var memory: SpeakerMemory
     @Environment(\.palette) private var p
 
     private var person: Speaker? { library.speakers.first { $0.key == key } }
@@ -938,6 +1093,21 @@ struct PersonScreen: View {
                         }
                     }
                     Spacer()
+                }
+                Card {
+                    Text("Память о человеке").font(Kind.head(16)).padding(.bottom, 8)
+                    if let info = memory.overview.people.first(where: { $0.id == "profile:" + key }) {
+                        Text("\(info.meetings) встреч · \(info.quotes) фрагментов · последняя обработка \(info.last_seen.prefix(10))")
+                            .font(Kind.body(13)).foregroundStyle(p.muted)
+                    } else {
+                        Text("История появится, когда голос будет связан с репликами сохранённых встреч.")
+                            .font(Kind.body(13)).foregroundStyle(p.muted)
+                    }
+                    Button("Открыть высказывания и поиск") {
+                        memory.person = "profile:" + key; memory.query = ""; memory.meeting = ""
+                        memory.tab = "search"; screen = .speakers
+                        memory.search(settings: library.settings)
+                    }.buttonStyle(PrimaryButton()).disabled(memory.busy).padding(.top, 12)
                 }
                 Card {
                     Text("Образцы голоса").font(Kind.head(16)).padding(.bottom, 14)
@@ -1027,20 +1197,40 @@ struct SettingsScreen: View {
             Card {
                 Text("Распознавание речи").font(Kind.head(16)).padding(.bottom, 12)
                 SettingRow(title: "Что важнее",
-                           subtitle: library.settings.asr_speed == "fast"
+                           subtitle: library.settings.asr_model == "large-v3-turbo"
                                ? "Быстрее: примерно столько же, сколько длится запись. Хуже с именами, терминами и латиницей"
                                : "Точнее: считает примерно вдвое дольше самой записи") {
-                    Segmented(options: [("accurate", "Точнее"), ("fast", "Быстрее")],
+                    Segmented(options: [("large-v3", "Точнее"), ("large-v3-turbo", "Быстрее")],
                               selection: Binding(
-                                get: { library.settings.asr_speed },
-                                set: { library.settings.asr_speed = $0; library.settings.save() }))
+                                get: { library.settings.asr_model },
+                                set: { library.settings.asr_model = $0; library.settings.save() }))
                         .frame(width: 200)
                 }
-                if library.settings.asr_speed == "fast" {
+                if library.settings.asr_model == "large-v3-turbo" {
                     Text("При первом запуске быстрая модель скачается — около 1,5 ГБ.")
                         .font(Kind.body(12)).foregroundStyle(p.muted)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.top, 6)
+                }
+                Divider().overlay(p.line2)
+                // Двух ступеней хватает на каждый день, но на слабой машине
+                // большая модель не поедет вовсе — для таких случаев список.
+                // Обе настройки пишут в одно поле: разными они разъехались бы.
+                SettingRow(title: "Другая модель",
+                           subtitle: "Для 8 ГБ памяти: small, CPU / int8. Без видеокарты NVIDIA") {
+                    Menu(library.settings.asr_model) {
+                        ForEach(["base", "small", "large-v3-turbo", "large-v3"], id: \.self) { model in
+                            Button(model == "small" ? "small · для 8 ГБ" : model) {
+                                library.settings.asr_model = model; library.settings.save()
+                            }
+                        }
+                    }.frame(width: 220)
+                }
+                Text("Модель должна быть заранее установлена. Старые расшифровки не меняются; выбор применяется к следующей встрече. Для GigaAM настройка Whisper не используется.")
+                    .font(Kind.body(12)).foregroundStyle(p.muted).padding(.top, 10)
+                if library.settings.llm_model.contains(":8b") {
+                    Text("Резюме использует 8B-модель. Для компьютеров с 8 ГБ рекомендуем меньшую модель или обработку без резюме; замена требует отдельной проверки качества.")
+                        .font(Kind.body(12)).foregroundStyle(p.warn).padding(.top, 8)
                 }
             }
 
@@ -1052,6 +1242,14 @@ struct SettingsScreen: View {
                                 get: { library.settings.theme },
                                 set: { library.settings.theme = $0; library.settings.save(); library.reload() }))
                         .frame(width: 260)
+                }
+                Divider().overlay(p.line2)
+                SettingRow(title: "Модель для резюме и чата",
+                           subtitle: "Имя уже установленной модели Ollama") {
+                    TextField("qwen3:8b", text: Binding(
+                        get: { library.settings.llm_model },
+                        set: { library.settings.llm_model = $0; library.settings.save() }))
+                        .textFieldStyle(.roundedBorder).frame(width: 220)
                 }
             }
 
@@ -1130,8 +1328,8 @@ struct SettingsScreen: View {
                 }
                 Divider().overlay(p.line2)
                 SettingRow(title: "Хранить диагностические данные",
-                           subtitle: "Нужны, чтобы слушать фрагменты встреч после обработки") {
-                    Toggle("", isOn: Binding(
+                           subtitle: "Сохранять рабочий WAV для диагностики; занимает дополнительное место") {
+                    Toggle("Хранить диагностические данные", isOn: Binding(
                         get: { library.settings.keep_diagnostics },
                         set: { library.settings.keep_diagnostics = $0; library.settings.save() }))
                         .labelsHidden().toggleStyle(.switch)
@@ -1140,7 +1338,7 @@ struct SettingsScreen: View {
 
             Card {
                 Text("Термины команды").font(Kind.head(16)).padding(.bottom, 12)
-                SettingRow(title: "Словарь", subtitle: "\(glossaryCount) терминов") {
+                SettingRow(title: "Словарь", subtitle: "Терминов: \(glossaryCount)") {
                     Button("Открыть") { NSWorkspace.shared.open(Paths.glossary) }
                         .buttonStyle(QuietButton())
                 }
@@ -1233,7 +1431,7 @@ extension SettingsScreen {
 
             SettingRow(title: "Диктовать в любое поле",
                        subtitle: "Держите \(hotkeyLabel) и говорите — текст появится там, где курсор") {
-                Toggle("", isOn: Binding(
+                Toggle("Диктовать в любое поле", isOn: Binding(
                     get: { library.settings.dictation_enabled },
                     set: { value in
                         library.settings.dictation_enabled = value
@@ -1319,30 +1517,10 @@ extension SettingsScreen {
 /// Прямая доставка надёжнее слежки за чужими событиями: NSEvent-монитор
 /// молчал, и понять почему со стороны было нельзя. Монитор оставлен рядом
 /// вторым путём — лишним он не будет, повторы отсекаются множеством.
-private struct KeyCatcher: NSViewRepresentable {
-    var onFlags: (UInt16, NSEvent.ModifierFlags) -> Void
-
-    final class Catcher: NSView {
-        var onFlags: ((UInt16, NSEvent.ModifierFlags) -> Void)?
-        override var acceptsFirstResponder: Bool { true }
-        override func flagsChanged(with event: NSEvent) {
-            onFlags?(event.keyCode, event.modifierFlags)
-        }
-    }
-
-    func makeNSView(context: Context) -> Catcher {
-        let view = Catcher()
-        view.onFlags = onFlags
-        DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
-        return view
-    }
-
-    func updateNSView(_ view: Catcher, context: Context) {
-        view.onFlags = onFlags
-        if view.window?.firstResponder !== view {
-            DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
-        }
-    }
+private final class KeyCatcher: NSView {
+    var onFlags: ((UInt16, NSEvent.ModifierFlags) -> Void)?
+    override var acceptsFirstResponder: Bool { true }
+    override func flagsChanged(with event: NSEvent) { onFlags?(event.keyCode, event.modifierFlags) }
 }
 
 /// Назначение сочетания: нажали кнопку, подержали клавиши, отпустили.
@@ -1355,6 +1533,8 @@ private struct HotkeyField: View {
     @Binding var combo: String
     @State private var recording = false
     @State private var monitor: Any?
+    @State private var catcher: KeyCatcher?
+    @State private var previousResponder: NSResponder?
     @State private var pressed: Set<UInt16> = []
 
     var body: some View {
@@ -1366,12 +1546,6 @@ private struct HotkeyField: View {
         // собранным на скорую руку.
         .buttonStyle(QuietButton(wide: true))
         .frame(width: 210)
-        .background {
-            if recording {
-                KeyCatcher(onFlags: { code, mods in take(code: code, mods: mods) })
-                    .frame(width: 1, height: 1)
-            }
-        }
         .onDisappear { finish(save: false) }
     }
 
@@ -1396,6 +1570,15 @@ private struct HotkeyField: View {
     private func begin() {
         pressed = []
         recording = true
+        Dictation.assigningHotkey = true
+        if let window = NSApp.keyWindow, let content = window.contentView {
+            previousResponder = window.firstResponder
+            let view = KeyCatcher(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
+            view.onFlags = { code, mods in take(code: code, mods: mods) }
+            content.addSubview(view)
+            window.makeFirstResponder(view)
+            catcher = view
+        }
         Dictation.logHotkey("запись начата")
         monitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
             take(code: event.keyCode, mods: event.modifierFlags)
@@ -1404,6 +1587,12 @@ private struct HotkeyField: View {
     }
 
     private func finish(save: Bool) {
+        Dictation.assigningHotkey = false
+        if let catcher {
+            catcher.window?.makeFirstResponder(previousResponder)
+            catcher.removeFromSuperview()
+        }
+        catcher = nil; previousResponder = nil
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
         recording = false

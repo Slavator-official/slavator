@@ -61,13 +61,13 @@ mkdir -p "$SUPPORT" || die "нет доступа к $SUPPORT"
 # --------------------------------------------------------------------------
 step "Движок распознавания речи"
 # --------------------------------------------------------------------------
-printf '  1) Whisper large-v3 — сохраняет англицизмы, аббревиатуры и пунктуацию\n'
+printf '  1) Whisper small  — CPU-режим для 8 ГБ, англицизмы и пунктуация\n'
 printf '  2) GigaAM v3       — быстрее на чистом русском, но БЕЗ латиницы и пунктуации\n\n'
 read -r -p "Выберите [Enter — 1] " engine_choice
 if [[ "$engine_choice" == "2" ]]; then
     ENGINE="gigaam"; ok "GigaAM v3"
 else
-    ENGINE="faster-whisper"; ok "Whisper large-v3"
+    ENGINE="faster-whisper"; ok "Whisper small (модель меняется в настройках)"
 fi
 
 # --------------------------------------------------------------------------
@@ -234,11 +234,18 @@ if curl -fsS --max-time 4 http://127.0.0.1:11434/api/version >/dev/null 2>&1; th
     else
         ok "модель $DEFAULT_LLM уже установлена — пропускаю"
     fi
+    printf '    Подготовка локального смыслового поиска (EmbeddingGemma, около 622 МБ)...\n'
+    if "/Applications/Ollama.app/Contents/Resources/ollama" pull embeddinggemma:300m \
+       || ollama pull embeddinggemma:300m; then
+        ok "модель памяти встреч готова"
+    else
+        warn "поиск по фразе работает; для поиска по смыслу выполните позже: ollama pull embeddinggemma:300m"
+    fi
 else
     warn "Ollama не установлена - это НЕ ошибка установки"
     printf '\n      Расшифровка, разделение по голосам и стенограмма работают\n'
-    printf '      без неё. Ollama нужна только для резюме встречи и для\n'
-    printf '      определения имён участников по разговору.\n\n'
+    printf '      без неё. Ollama нужна для резюме встречи, определения\n'
+    printf '      имён и смыслового поиска. Поиск по фразе работает без неё.\n\n'
     printf '      Добавить её можно в любой момент:\n'
     printf '        1. Скачать с https://ollama.com/download/mac\n'
     printf '        2. Выполнить: ollama pull %s\n\n' "$DEFAULT_LLM"

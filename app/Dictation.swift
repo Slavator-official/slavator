@@ -15,6 +15,7 @@ import SwiftUI
 /// пришлось бы слать Backspace вслепую в чужой редактор.
 @Observable
 final class Dictation {
+    static var assigningHotkey = false
 
     enum Mode { case raw, tidy }
 
@@ -148,7 +149,7 @@ final class Dictation {
         // эти секунды говорит. К концу фразы она уже в памяти, а ждать её
         // с готовым текстом на руках — та самая заминка, из-за которой
         // обработка выглядела сломанной.
-        worker.warm()
+        if mode == .tidy { worker.warm() }
         self.mode = mode
         lastText = ""; typed = ""; spoken = ""; seconds = 0
         state = .listening
@@ -281,25 +282,9 @@ final class Dictation {
     /// неприкосновенно, поэтому просто дописываем хвост.
     private func commit(_ target: String) {
         guard mode == .raw, target.count > typed.count else { return }
-        // Дописываем то, чего ещё нет на экране, отсчитывая от общего начала,
-        // а не от длины напечатанного. Модель иногда правит начало фразы —
-        // «Это» превращается в «Эта», — и слепое отсечение по длине съедало
-        // ровно столько первых букв нового текста, сколько было в старом.
-        let common = Self.commonPrefix(typed, target)
-        let delta = String(target.dropFirst(common.count))
-        guard !delta.isEmpty else { return }
+        let delta = String(target.dropFirst(typed.count))
         typer.type(delta)
         typed = target
-    }
-
-    /// Общее начало двух расшифровок одной и той же речи.
-    static func commonPrefix(_ a: String, _ b: String) -> String {
-        var result = ""
-        for (left, right) in zip(a, b) {
-            if left != right { break }
-            result.append(left)
-        }
-        return result
     }
 
     private func finish(raw: String = "") {
@@ -370,26 +355,17 @@ private final class Worker {
         // рядом __pycache__. Это ломает подпись приложения, а вместе с ней
         // слетают выданные разрешения — микрофон и управление вводом.
         process.arguments = ["-B", script.path]
-        var env = ProcessInfo.processInfo.environment
+        var env = AppConfiguration.environment()
         env["SLAVATOR_DICTATION_MODEL"] = model
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONDONTWRITEBYTECODE"] = "1"
-        if let text = try? String(contentsOf: Paths.configEnv, encoding: .utf8) {
-            for line in text.split(separator: "\n") {
-                let raw = line.trimmingCharacters(in: .whitespaces)
-                guard !raw.hasPrefix("#"), let eq = raw.firstIndex(of: "=") else { continue }
-                let key = String(raw[raw.startIndex..<eq])
-                var value = String(raw[raw.index(after: eq)...])
-                value = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-                env[key] = value
-            }
-        }
         process.environment = env
 
         let toWorker = Pipe(), fromWorker = Pipe()
         process.standardInput = toWorker
         process.standardOutput = fromWorker
-        process.standardError = Pipe()
+        // Непрочитанный stderr заполнял pipe и останавливал worker.
+        process.standardError = FileHandle.standardError
 
         fromWorker.fileHandleForReading.readabilityHandler = { [weak self] handle in
             guard let self else { return }
@@ -500,12 +476,12 @@ private final class Recorder {
             guard failure == nil, out.frameLength > 0,
                   let channel = out.int16ChannelData?[0] else { return }
 
-            var peak: Int16 = 0
+            var peak = 0
             var slice: [Int16] = []
             slice.reserveCapacity(Int(out.frameLength))
             for i in 0..<Int(out.frameLength) {
                 slice.append(channel[i])
-                peak = max(peak, abs(channel[i]))
+                peak = max(peak, abs(Int(channel[i])))
             }
             self.lock.lock()
             self.samples.append(contentsOf: slice)
@@ -554,7 +530,7 @@ private final class Recorder {
         if taken > 0, taken <= samples.count {
             let limit = max(0, taken - 5600)          // не дальше 0,35 с
             var cut = taken
-            while cut > limit, abs(samples[cut - 1]) <= 500 { cut -= 1 }
+            while cut > limit, abs(Int(samples[cut - 1])) <= 500 { cut -= 1 }
             samples.removeFirst(cut)
         } else {
             samples.removeAll(keepingCapacity: true)
@@ -562,7 +538,7 @@ private final class Recorder {
         taken = 0
         lastLoud = Date()
         // Хвост мог остаться со речью — тогда фраза уже началась.
-        heard = samples.contains { abs($0) > 500 }
+        heard = samples.contains { abs(Int($0)) > 500 }
         lock.unlock()
     }
 
@@ -787,6 +763,7 @@ private final class Hotkey {
     }
 
     private func handle(_ event: CGEvent) {
+        guard !Dictation.assigningHotkey else { return }
         // Код клавиши не смотрим: у сочетания их несколько, и важно состояние
         // целиком, а не то, какая из них шевельнулась последней.
         //

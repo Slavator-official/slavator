@@ -1,0 +1,13 @@
+{
+  "date": "2026-09-08",
+  "workload": "Один и тот же локальный фрагмент русской встречи, 44.998 секунды",
+  "method": "Каждый кандидат в новом процессе; CPU int8; 4 потока; word timestamps; VAD выключен; local_files_only и HF_HUB_OFFLINE; файлы и тексты встреч не включены в отчёт",
+  "platform": "macOS arm64",
+  "packages": {"faster-whisper":"1.2.1","ctranslate2":"4.8.1","sherpa-onnx":"1.13.6","av":"18.1.0","numpy":"2.5.2"},
+  "results": [
+    {"model":"small","beam":5,"load_seconds":0.397,"asr_seconds":4.242,"rtf":0.094,"peak_rss_mib":972.5,"words":74,"diarization_seconds":5.157,"voices":2},
+    {"model":"small","beam":1,"load_seconds":0.298,"asr_seconds":2.912,"rtf":0.065,"peak_rss_mib":923.6,"words":75},
+    {"model":"large-v3-turbo","beam":1,"load_seconds":1.094,"asr_seconds":9.609,"rtf":0.214,"peak_rss_mib":2209.9,"words":70}
+  ],
+  "limitations": ["Один короткий фрагмент, один прогон кандидата; не репрезентативный корпус", "Пиковая память только процесса, не всей системы и не Ollama", "WER/CER/DER не измерены: нет вручную проверенной разметки", "Не проверено на 8-ГБ Windows/Ubuntu x86-64", "Разное число слов не является оценкой качества"]
+}

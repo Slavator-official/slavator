@@ -1,94 +1,15 @@
-"""Пользовательские настройки Славатора.
-
-Отдельный модуль, потому что настройки нужны трём разным процессам: главному
-окну, виджету в строке меню и мастеру установки. Формат простой и правится
-руками, если приложение вдруг не запускается.
-"""
-import json
-import os
-import sys
+"""Совместимость Tk/виджета с общим модулем настроек в core/."""
 from pathlib import Path
+import sys
 
-APP_NAME = "Славатор"
+_core = Path(__file__).resolve().parents[2] / "core"
+if str(_core) not in sys.path:
+    sys.path.insert(0, str(_core))
 
-def default_results_dir() -> Path:
-    """Папка, которую пользователь ожидает видеть на своей системе."""
-    if os.name == "nt":
-        profile = Path(os.environ.get("USERPROFILE", str(Path.home())))
-        return profile / "Documents" / APP_NAME
-    return Path.home() / "Downloads"
-
+from app_config import (  # noqa: E402,F401
+    APP_NAME, default_results_dir, defaults, load, save, settings_path, support_dir, update,
+)
 
 DEFAULT_RESULTS_DIR = default_results_dir()
-
-DEFAULTS = {
-    "theme": "dark",              # dark | light | system
-    "language": "ru",
-    "results_dir": str(DEFAULT_RESULTS_DIR),
-    "widget_enabled": False,
-    "widget_output_dir": str(DEFAULT_RESULTS_DIR),
-    "keep_diagnostics": False,
-    "widget_anchor": "top-right",  # угол/край экрана или "free"
-    "widget_x": None,
-    "widget_y": None,
-}
-
+DEFAULTS = defaults()
 VALID_THEMES = ("dark", "light", "system")
-
-
-def support_dir() -> Path:
-    """Каталог приложения. Совпадает с тем, что задаёт launcher бандла."""
-    override = os.environ.get("MEETING_TRANSCRIBER_APP_SUPPORT", "").strip()
-    if override:
-        return Path(override).expanduser()
-    if os.name == "nt":
-        base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
-        return Path(base) / APP_NAME if base else Path.home() / APP_NAME
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / APP_NAME
-    base = os.environ.get("XDG_CONFIG_HOME")
-    return (Path(base) if base else Path.home() / ".config") / APP_NAME
-
-
-def settings_path() -> Path:
-    return support_dir() / "settings.json"
-
-
-def load() -> dict:
-    """Настройки поверх значений по умолчанию. Битый файл не роняет приложение."""
-    values = dict(DEFAULTS)
-    path = settings_path()
-    if not path.is_file():
-        return values
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            stored = json.load(handle)
-    except (OSError, json.JSONDecodeError):
-        return values
-    if isinstance(stored, dict):
-        for key in DEFAULTS:
-            if key in stored:
-                values[key] = stored[key]
-    if values["theme"] not in VALID_THEMES:
-        values["theme"] = DEFAULTS["theme"]
-    return values
-
-
-def save(values: dict) -> dict:
-    """Записать настройки целиком, атомарно."""
-    merged = dict(DEFAULTS)
-    merged.update({k: v for k, v in values.items() if k in DEFAULTS})
-    path = settings_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    with tmp.open("w", encoding="utf-8") as handle:
-        json.dump(merged, handle, ensure_ascii=False, indent=2)
-    tmp.replace(path)
-    return merged
-
-
-def update(**changes) -> dict:
-    """Поменять отдельные значения, не трогая остальные."""
-    values = load()
-    values.update(changes)
-    return save(values)

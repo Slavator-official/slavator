@@ -35,10 +35,8 @@ OLLAMA_MODEL = os.environ.get("MEETING_TRANSCRIBER_LLM", "qwen3:8b")
 # Обработка идёт после того, как человек отпустил клавишу, и он ждёт.
 # Лучше отдать сырой текст, чем заставить смотреть в пустое поле.
 TIDY_TIMEOUT = int(os.environ.get("SLAVATOR_TIDY_TIMEOUT", "45"))
-# Сколько модель ждёт в памяти после последней правки. Полчаса — разумная
-# середина: рабочий день диктуют раз в несколько минут, а держать пять
-# гигабайт вечно ради этого незачем.
-KEEP_ALIVE = os.environ.get("SLAVATOR_KEEP_ALIVE", "30m")
+# Короткое удержание после правки: не занимать память надолго на 8 ГБ.
+KEEP_ALIVE = os.environ.get("SLAVATOR_KEEP_ALIVE", "1m")
 
 
 # Выдумки Whisper на тишине. Список повторяет тот, что в ядре
@@ -283,7 +281,7 @@ def main() -> int:
     )
 
     # Прогрев в стороне: он не должен задерживать готовность диктовки.
-    threading.Thread(target=warm, daemon=True).start()
+    # Warm only when the user requests tidy mode; conserve RAM.
 
     send({"ready": True, "model": MODEL, "glossary": len(glossary)})
 

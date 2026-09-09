@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from pathlib import Path
+
+import app_config
 
 class BackendAdapter:
     """GUI-facing adapter for the existing v25.1 pipeline."""
@@ -22,6 +23,8 @@ class BackendAdapter:
         out_dir: Path | None = None,
         no_summary: bool = False,
         speakers: int = 0,
+        keep_audio: bool = False,
+        settings: dict | None = None,
         env: dict[str, str] | None = None,
     ):
         if not self.available():
@@ -33,18 +36,16 @@ class BackendAdapter:
             command += ["--out-dir", str(out_dir)]
         if speakers > 0:
             command += ["--speakers", str(speakers)]
+        if keep_audio:
+            command.append("--keep-audio")
         return subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            # Кодировку задаём с обеих сторон явно. По умолчанию питон берёт
-            # кодовую страницу системы, и на Windows без кириллицы ядро
-            # обрывалось на первом русском слове, а интерфейс получал обрубок.
             encoding="utf-8",
             errors="replace",
             bufsize=1,
             cwd=str(self.backend.parent),
-            env={**os.environ, "PYTHONUNBUFFERED": "1",
-                 "PYTHONIOENCODING": "utf-8", **(env or {})},
+            env={**app_config.environment(settings), **(env or {})},
         )

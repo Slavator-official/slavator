@@ -77,7 +77,7 @@ final class Doctor {
         process.executableURL = Paths.venvPython
         process.arguments = ["-B", Paths.core.path, "--check", "--json"]
         process.currentDirectoryURL = Paths.core.deletingLastPathComponent()
-        process.environment = Paths.coreEnvironment()
+        process.environment = AppConfiguration.environment()
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -89,6 +89,9 @@ final class Doctor {
         } catch {
             return nil
         }
+        let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 40, execute: timeout)
+        defer { timeout.cancel() }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         return try? JSONDecoder().decode(Readiness.self, from: data)

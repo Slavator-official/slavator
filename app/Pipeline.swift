@@ -17,6 +17,8 @@ final class Pipeline {
     private(set) var log: [String] = []
 
     private var task: Process?
+    private(set) var isCancelling = false
+    private(set) var isSuspended = false
 
     /// Порядок этапов — для точек прогресса под полосой. Зависит от того,
     /// что запущено: у сборки резюме свой, короткий путь.
@@ -70,6 +72,7 @@ final class Pipeline {
         percent = 0
         stage = "Запуск"
         stageOrder = Self.fullOrder
+        stageKey = "prepare"
         detail = input.lastPathComponent
         log = []
 
@@ -94,6 +97,7 @@ final class Pipeline {
         // кнопке. Здесь флаг всё равно нужен: без резюме ядро просто
         // пропустит шаг, а с ним — разложит сразу, если резюме уже есть.
         if library.settings.project_grouping { arguments.append("--group-by-project") }
+        if library.settings.keep_diagnostics { arguments.append("--keep-audio") }
         launch(arguments: arguments, library: library)
     }
 
@@ -148,7 +152,7 @@ final class Pipeline {
         detail = ""
         log = []
 
-        launch(arguments: ["-B", Paths.core.path, "--repair"], library: library)
+        launch(arguments: ["-B", Paths.core.path, "--repair", "--allow-download"], library: library)
     }
 
     /// Отнести встречу к проекту, названному человеком.
@@ -195,39 +199,35 @@ final class Pipeline {
         process.executableURL = Paths.venvPython
         process.arguments = arguments
         process.currentDirectoryURL = Paths.core.deletingLastPathComponent()
-        process.environment = Paths.coreEnvironment()
+        process.environment = AppConfiguration.environment(settings: library.settings)
 
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
 
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let chunk = handle.availableData
-            guard !chunk.isEmpty, let text = String(data: chunk, encoding: .utf8) else { return }
-            for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
-                DispatchQueue.main.async { self?.consume(String(line)) }
-            }
-        }
-
-        process.terminationHandler = { [weak self] proc in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                pipe.fileHandleForReading.readabilityHandler = nil
-                self.isRunning = false
-                self.task = nil
-                if proc.terminationStatus == 0 {
-                    self.percent = 100
-                    self.stage = "Готово"
-                    library.reload()
-                } else if proc.terminationStatus != 15 {   // 15 — прерывание пользователем
-                    self.showFailure()
-                }
-            }
-        }
-
         do {
             try process.run()
             task = process
+            isCancelling = false
+            isSuspended = false
+            ProcessOutput.read(pipe, process: process, onLine: { [weak self] line in
+                self?.consume(line)
+            }, onExit: { [weak self] status in
+                guard let self, self.task === process else { return }
+                self.isRunning = false
+                self.task = nil
+                self.isSuspended = false
+                if self.isCancelling {
+                    self.stage = "Прервано"
+                } else if status == 0 {
+                    self.percent = 100
+                    self.stage = "Готово"
+                    library.reload()
+                } else {
+                    self.showFailure()
+                }
+                self.isCancelling = false
+            })
         } catch {
             isRunning = false
             showAlert("Не удалось запустить обработку", error.localizedDescription)
@@ -240,14 +240,18 @@ final class Pipeline {
     /// секунды вместо долей секунды. Вы говорите секунды, встреча считается
     /// минуты — паузы не видно, а заикающийся набор был бы виден сразу.
     func suspend(_ on: Bool) {
-        guard let task, task.isRunning else { return }
-        if on { task.suspend() } else { task.resume() }
+        guard let task, task.isRunning, !isCancelling, on != isSuspended else { return }
+        if on { isSuspended = task.suspend() }
+        else if task.resume() { isSuspended = false }
     }
 
     func cancel() {
-        task?.terminate()
-        isRunning = false
-        stage = "Прервано"
+        guard let task, task.isRunning, !isCancelling else { return }
+        isCancelling = true
+        // SIGTERM не обрабатывается остановленным через SIGSTOP процессом.
+        if isSuspended { task.resume(); isSuspended = false }
+        stage = "Останавливаю…"
+        task.terminate()
     }
 
     // MARK: разбор вывода
@@ -258,7 +262,7 @@ final class Pipeline {
             guard let data = json.data(using: .utf8),
                   let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { return }
-            if let pct = raw["pct"] as? Double { percent = pct }
+            if let pct = raw["pct"] as? Double, pct.isFinite { percent = min(100, max(0, pct)) }
             if let key = raw["stage"] as? String {
                 stageKey = key
                 stage = Self.stageNames[key] ?? key
@@ -299,4 +303,3 @@ final class Pipeline {
     }
 
 }
-
