@@ -128,6 +128,8 @@ struct Settings: Codable {
     // MARK: быстрый доступ
     /// Значок в строке меню: начать запись, не открывая окно.
     var menubar_enabled = true
+    /// small | medium | large — насколько подробен виджет.
+    var widget_size = "medium"
     /// Следить, не началась ли встреча, и предлагать её записать.
     var meeting_watch_enabled = false
 
@@ -177,6 +179,7 @@ struct Settings: Codable {
         my_position = read(.my_position, my_position)
         my_company = read(.my_company, my_company)
         menubar_enabled = read(.menubar_enabled, menubar_enabled)
+        widget_size = read(.widget_size, widget_size)
         meeting_watch_enabled = read(.meeting_watch_enabled, meeting_watch_enabled)
         dictation_enabled = read(.dictation_enabled, dictation_enabled)
         dictation_model = read(.dictation_model, dictation_model)

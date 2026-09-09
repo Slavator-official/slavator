@@ -1072,6 +1072,19 @@ struct SettingsScreen: View {
                         set: { library.settings.widget_enabled = $0; library.settings.save() }))
                         .labelsHidden().toggleStyle(.switch)
                 }
+                if library.settings.widget_enabled {
+                    Divider().overlay(p.line2)
+                    SettingRow(title: "Размер виджета") {
+                        // «Значок», а не «маленький»: это не уменьшенная копия
+                        // остальных, а другой вид — одна кнопка без подписей.
+                        Segmented(options: [("small", "Значок"), ("medium", "Средний"),
+                                            ("large", "Большой")],
+                                  selection: Binding(
+                                    get: { library.settings.widget_size },
+                                    set: { library.settings.widget_size = $0; library.settings.save() }))
+                            .frame(width: 280)
+                    }
+                }
                 Divider().overlay(p.line2)
                 SettingRow(title: "Предлагать запись, когда начинается встреча",
                            subtitle: "Славатор заметит, что микрофон занят звонком, и спросит одним уведомлением") {

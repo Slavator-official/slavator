@@ -43,6 +43,9 @@ struct SlavatorApp: App {
                 .onChange(of: library.settings.widget_enabled) { _, _ in
                     delegate.apply(settings: library.settings)
                 }
+                .onChange(of: library.settings.widget_size) { _, _ in
+                    delegate.apply(settings: library.settings)
+                }
                 // Возвращение в программу — момент, когда стоит перечитать
                 // разрешения: их выдают в Системных настройках, снаружи.
                 .onReceive(NotificationCenter.default.publisher(
@@ -94,6 +97,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private weak var library: Library?
     private weak var pipeline: Pipeline?
     private var widget: DeskWidget?
+    /// Каким размером виджет собран сейчас: панель задаёт его при создании,
+    /// поэтому смена размера — это пересборка окна, а не правка на лету.
+    private var widgetSize = ""
     private let watch = MeetingWatch()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -119,7 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     func apply(settings: Settings) {
         if settings.menubar_enabled { addItem() } else { removeItem() }
         if settings.meeting_watch_enabled { watch.start() } else { watch.stop() }
-        if settings.widget_enabled { addWidget() } else { removeWidget() }
+        if settings.widget_enabled { addWidget(size: settings.widget_size) } else { removeWidget() }
     }
 
     // MARK: значок
@@ -200,8 +206,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     // MARK: виджет
 
-    private func addWidget() {
-        guard widget == nil, let capture, let pipeline, let library else { return }
+    private func addWidget(size: String) {
+        if widget != nil, size == widgetSize { return }
+        removeWidget()
+        guard let capture, let pipeline, let library else { return }
+        widgetSize = size
         widget = DeskWidget(library: library, capture: capture, pipeline: pipeline)
         widget?.show()
     }
