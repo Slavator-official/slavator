@@ -76,7 +76,9 @@ final class Pipeline {
         var arguments = ["-B", Paths.core.path, input.path]
         if let voiceTrack, FileManager.default.fileExists(atPath: voiceTrack.path) {
             arguments += ["--my-voice", voiceTrack.path,
-                          "--my-name", library.settings.my_name]
+                          "--my-name", library.settings.my_name,
+                          "--my-position", library.settings.my_position,
+                          "--my-company", library.settings.my_company]
         }
         // Резюме отдельно, по кнопке: оно самое долгое и нужно не всегда.
         // Расшифровка и голоса ценны сами по себе - ждать ради необязательного
@@ -115,7 +117,12 @@ final class Pipeline {
         detail = record.title
         log = []
 
-        var arguments = ["-B", Paths.core.path, "--summarize", record.dir.path]
+        // Кто вы и чем занимаетесь — ядру для справки о людях: должности
+        // подсказывают модели, кому по силам поручение и чьё слово решающее.
+        var arguments = ["-B", Paths.core.path, "--summarize", record.dir.path,
+                         "--my-name", library.settings.my_name,
+                         "--my-position", library.settings.my_position,
+                         "--my-company", library.settings.my_company]
         if library.settings.project_grouping { arguments.append("--group-by-project") }
         launch(arguments: arguments, library: library)
     }
@@ -142,6 +149,43 @@ final class Pipeline {
         log = []
 
         launch(arguments: ["-B", Paths.core.path, "--repair"], library: library)
+    }
+
+    /// Отнести встречу к проекту, названному человеком.
+    func assign(record: Record, project: String, remember: Bool, library: Library) {
+        guard !isRunning else { return }
+        var arguments = ["-B", Paths.core.path, "--assign", record.dir.path,
+                         "--project", project]
+        if remember { arguments.append("--add-project") }
+        startShort(stage: "Проект", detail: project, arguments: arguments, library: library)
+    }
+
+    /// Переспросить модель, добавив ответы человека.
+    func clarify(record: Record, answers: String, library: Library) {
+        guard !isRunning else { return }
+        startShort(stage: "Проект", detail: record.title,
+                   arguments: ["-B", Paths.core.path, "--clarify", record.dir.path,
+                               "--answers", answers],
+                   library: library)
+    }
+
+    /// Короткая работа без этапов: полоса прогресса тут не о чем рассказывать,
+    /// важно лишь, что программа занята и чем кончилось.
+    private func startShort(stage: String, detail: String,
+                            arguments: [String], library: Library) {
+        guard FileManager.default.fileExists(atPath: Paths.venvPython.path) else {
+            showAlert("Окружение не установлено",
+                      "Сначала завершите установку на вкладке «Главная».")
+            return
+        }
+        isRunning = true
+        percent = 0
+        self.stage = stage
+        stageOrder = []
+        stageKey = ""
+        self.detail = detail
+        log = []
+        launch(arguments: arguments, library: library)
     }
 
     /// Общий запуск ядра: и обработка записи, и сборка резюме идут одинаково -

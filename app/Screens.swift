@@ -477,6 +477,8 @@ struct RecordsScreen: View {
     var pipeline: Pipeline
     @Binding var screen: Screen
     @Environment(\.palette) private var p
+    /// Встреча, у которой спрашиваем проект.
+    @State private var asking: Record?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -530,6 +532,98 @@ struct RecordsScreen: View {
                 }
             }
         }
+        .sheet(item: $asking) { record in
+            ProjectSheet(record: record, library: library, pipeline: pipeline)
+        }
+    }
+}
+
+/// Разговор о том, к какому проекту отнести встречу.
+///
+/// Спрашиваем здесь, а не окном сразу после обработки: разбор заканчивается
+/// когда придётся, и перебивать человека вопросом о папке — плохая цена за
+/// аккуратность. Встреча ждёт в списке столько, сколько нужно.
+private struct ProjectSheet: View {
+    let record: Record
+    @Bindable var library: Library
+    var pipeline: Pipeline
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.palette) private var p
+    @State private var answers = ""
+    @State private var chosen = ""
+
+    private var card: MeetingCard { record.meeting ?? MeetingCard() }
+    private var known: [String] { Library.projectNames() }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("К какому проекту отнести встречу").font(Kind.head(16))
+            Text(record.title).font(Kind.body(13)).foregroundStyle(p.muted)
+
+            if !card.project.isEmpty {
+                Card {
+                    Text("Ядро предполагает: «\(card.project)»").font(Kind.strong(13.5))
+                    if !card.why.isEmpty {
+                        Text(card.why).font(Kind.body(12.5)).foregroundStyle(p.muted)
+                            .padding(.top, 4)
+                    }
+                }
+            }
+
+            if !card.questions.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Вопросы к вам").font(Kind.eyebrow()).foregroundStyle(p.faint)
+                    ForEach(card.questions, id: \.self) { question in
+                        Text("— \(question)").font(Kind.body(13))
+                    }
+                }
+                TextEditor(text: $answers)
+                    .font(Kind.body(13)).frame(height: 70)
+                    .scrollContentBackground(.hidden)
+                    .padding(6)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(p.raised))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(p.line, lineWidth: 1))
+                Button("Ответить и переспросить") {
+                    pipeline.clarify(record: record, answers: answers, library: library)
+                    dismiss()
+                }
+                .buttonStyle(QuietButton(wide: true))
+                .disabled(answers.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+
+            Divider().overlay(p.line2)
+
+            Text("Или выберите сами").font(Kind.eyebrow()).foregroundStyle(p.faint)
+            HStack(spacing: 10) {
+                Picker("", selection: $chosen) {
+                    Text("не выбран").tag("")
+                    ForEach(known, id: \.self) { Text($0).tag($0) }
+                    // Предложение модели можно принять одним нажатием — оно
+                    // и есть самый вероятный ответ.
+                    if !card.project.isEmpty, !known.contains(card.project) {
+                        Divider()
+                        Text("Добавить «\(card.project)»").tag(card.project)
+                    }
+                }
+                .labelsHidden().frame(width: 260)
+
+                Button("Сохранить") {
+                    pipeline.assign(record: record, project: chosen,
+                                    remember: !known.contains(chosen), library: library)
+                    dismiss()
+                }
+                .buttonStyle(PrimaryButton())
+                .disabled(chosen.isEmpty)
+            }
+
+            HStack {
+                Spacer()
+                Button("Закрыть") { dismiss() }.buttonStyle(QuietButton())
+            }
+        }
+        .padding(22)
+        .frame(width: 520)
+        .background(p.surface)
     }
 }
 
@@ -580,9 +674,20 @@ extension RecordsScreen {
     /// Статус встречи: важно не «готово», а есть ли неразобранные голоса.
     @ViewBuilder func statusPill(for record: Record) -> some View {
         let unknown = Library.readUnknown(in: record).count
-        if unknown > 0 {
+        let card = record.meeting
+        if let card, card.needs_review {
+            // Не «ошибка», а незаконченное дело: нажатие открывает вопросы.
+            Button { asking = record } label: {
+                Pill(text: "уточнить проект",
+                     fg: library.palette.warn, bg: library.palette.warnBg)
+            }
+            .buttonStyle(.plain)
+            .help("Ядро не смогло определить проект — спросите его или выберите руками")
+        } else if unknown > 0 {
             Pill(text: unknown == 1 ? "1 новый голос" : "\(unknown) новых голоса",
                  fg: library.palette.warn, bg: library.palette.warnBg)
+        } else if let card, !card.project.isEmpty {
+            Pill(text: card.project, fg: library.palette.ok, bg: library.palette.okBg)
         } else {
             Pill(text: "Готово", fg: library.palette.ok, bg: library.palette.okBg)
         }

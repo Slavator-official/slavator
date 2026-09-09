@@ -256,6 +256,18 @@ struct UnknownVoice: Identifiable {
 }
 
 /// Обработанная встреча.
+/// Что ядро решило о принадлежности встречи: проект, тип и — если решить не
+/// смогло — вопросы человеку.
+struct MeetingCard: Decodable {
+    var project = ""
+    var known = false
+    var confidence = 0.0
+    var type = ""
+    var why = ""
+    var questions: [String] = []
+    var needs_review = false
+}
+
 struct Record: Identifiable {
     let id = UUID()
     let dir: URL
@@ -269,6 +281,14 @@ struct Record: Identifiable {
     /// Резюме встречи: решения, поручения и кто за что отвечает.
     /// Появляется после расшифровки и разделения по голосам.
     var summary: URL? { existing("02_summary_todo.docx") }
+
+    /// Проект и тип встречи. Пусто, пока не собрано резюме или пока
+    /// автоопределение выключено.
+    var meeting: MeetingCard? {
+        guard let url = existing("meeting.json"),
+              let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(MeetingCard.self, from: data)
+    }
     var transcript: URL? { existing("01_transcript.docx") }
 
     /// Исходная запись встречи. Ядро удаляет свою рабочую копию после
@@ -481,6 +501,16 @@ final class Library {
                 samples: info["samples"] as? Int ?? 0
             )
         }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// Названия проектов из списка — для выбора руками.
+    static func projectNames() -> [String] {
+        guard let data = try? Data(contentsOf: Paths.projects),
+              let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let items = raw["projects"] as? [[String: Any]] else { return [] }
+        return items.compactMap { $0["name"] as? String }
+            .filter { !$0.isEmpty }
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 
     static func readRecords(in folder: String) -> [Record] {
