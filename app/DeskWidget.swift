@@ -98,7 +98,7 @@ private struct DeskWidgetView: View {
             Spacer(minLength: 0)
             Button("Начать слушать") {
                 capture.start(source: source == "mic" ? .microphone : .meeting,
-                              folder: URL(fileURLWithPath: library.settings.results_dir))
+                              folder: URL(fileURLWithPath: library.settings.recordingsFolder))
             }
             .buttonStyle(PrimaryButton(wide: true))
             if let failure = capture.failure {

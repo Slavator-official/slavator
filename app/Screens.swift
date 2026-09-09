@@ -276,7 +276,7 @@ struct MainScreen: View {
     }
 
     private func startRecording() {
-        let folder = URL(fileURLWithPath: library.settings.results_dir)
+        let folder = URL(fileURLWithPath: library.settings.recordingsFolder)
         capture.start(source: source == "mic" ? .microphone : .meeting, folder: folder)
     }
 
@@ -1025,6 +1025,26 @@ struct SettingsScreen: View {
             }
 
             Card {
+                Text("Распознавание речи").font(Kind.head(16)).padding(.bottom, 12)
+                SettingRow(title: "Что важнее",
+                           subtitle: library.settings.asr_speed == "fast"
+                               ? "Быстрее: примерно столько же, сколько длится запись. Хуже с именами, терминами и латиницей"
+                               : "Точнее: считает примерно вдвое дольше самой записи") {
+                    Segmented(options: [("accurate", "Точнее"), ("fast", "Быстрее")],
+                              selection: Binding(
+                                get: { library.settings.asr_speed },
+                                set: { library.settings.asr_speed = $0; library.settings.save() }))
+                        .frame(width: 200)
+                }
+                if library.settings.asr_speed == "fast" {
+                    Text("При первом запуске быстрая модель скачается — около 1,5 ГБ.")
+                        .font(Kind.body(12)).foregroundStyle(p.muted)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 6)
+                }
+            }
+
+            Card {
                 Text("Оформление").font(Kind.head(16)).padding(.bottom, 12)
                 SettingRow(title: "Тема") {
                     Segmented(options: [("dark", "Тёмная"), ("light", "Светлая"), ("system", "Авто")],
@@ -1066,6 +1086,21 @@ struct SettingsScreen: View {
                 Text("Хранение данных").font(Kind.head(16)).padding(.bottom, 12)
                 SettingRow(title: "Папка для результатов", subtitle: library.settings.results_dir) {
                     Button("Изменить") { chooseFolder() }.buttonStyle(QuietButton())
+                }
+                Divider().overlay(p.line2)
+                SettingRow(title: "Папка для записей",
+                           subtitle: library.settings.recordings_dir.isEmpty
+                               ? "Там же, где результаты: \(library.settings.results_dir)"
+                               : library.settings.recordings_dir) {
+                    HStack(spacing: 8) {
+                        if !library.settings.recordings_dir.isEmpty {
+                            Button("Сбросить") {
+                                library.settings.recordings_dir = ""
+                                library.settings.save()
+                            }.buttonStyle(QuietButton())
+                        }
+                        Button("Изменить") { chooseRecordingsFolder() }.buttonStyle(QuietButton())
+                    }
                 }
                 Divider().overlay(p.line2)
                 SettingRow(title: "Автоопределение проекта и группировка",
@@ -1144,6 +1179,22 @@ struct SettingsScreen: View {
             library.settings.results_dir = url.path
             library.settings.save()
             library.reload()
+        }
+    }
+
+    /// Куда складывать сами записи встреч.
+    ///
+    /// Отдельно от результатов: запись — это исходник на десятки мегабайт, и
+    /// держать его хочется не там, где лежат стенограммы, а иногда и не на
+    /// системном диске.
+    private func chooseRecordingsFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.prompt = "Выбрать"
+        if panel.runModal() == .OK, let url = panel.url {
+            library.settings.recordings_dir = url.path
+            library.settings.save()
         }
     }
 }

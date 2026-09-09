@@ -104,9 +104,25 @@ INFER_NAMES = os.environ.get("MEETING_TRANSCRIBER_INFER_NAMES", "1") not in ("0"
 NAME_CONFIDENCE = float(os.environ.get("MEETING_TRANSCRIBER_NAME_CONFIDENCE", "0.75"))
 
 WHISPER_MODEL = os.environ.get("MEETING_TRANSCRIBER_WHISPER_MODEL", "large-v3")
-# Детектор речи по умолчанию выключен: он терял до 80% реплик. См. пояснение
-# в _transcribe_whisper. Включается обратно только осознанно.
-USE_VAD = os.environ.get("MEETING_TRANSCRIBER_VAD", "0") not in ("0", "", "false", "no")
+# Детектор речи включён. Он пропускает тишину мимо модели, а её на встрече
+# около половины: замер на 180 секундах реального разговора дал 384 секунды
+# счёта против 670 без него — почти вдвое быстрее при том же тексте
+# (359 распознанных слов против 357).
+#
+# Раньше он был выключен, потому что выбрасывал до 80% реплик. Дело было не в
+# самом детекторе, а в его пороге: со стандартным 0.5 тихий собеседник из
+# динамиков не считался речью вовсе. Параметры ниже — мягкие, см. VAD_OPTIONS.
+USE_VAD = os.environ.get("MEETING_TRANSCRIBER_VAD", "1") not in ("0", "", "false", "no")
+
+# Порог намеренно вдвое ниже стандартного: на записи звонка речь приходит из
+# динамиков, она тише живого голоса рядом с микрофоном. Отступы по краям и
+# длинная пауза перед разрезом берегут начала и концы фраз - именно они
+# терялись, когда детектор отключали.
+VAD_OPTIONS = {
+    "threshold": float(os.environ.get("MEETING_TRANSCRIBER_VAD_THRESHOLD", "0.25")),
+    "min_silence_duration_ms": 700,
+    "speech_pad_ms": 400,
+}
 WHISPER_COMPUTE = os.environ.get("MEETING_TRANSCRIBER_WHISPER_COMPUTE", "int8")
 WHISPER_DEVICE = os.environ.get("MEETING_TRANSCRIBER_WHISPER_DEVICE", "cpu")
 WHISPER_LANGUAGE = os.environ.get("MEETING_TRANSCRIBER_LANGUAGE", "ru")
@@ -945,13 +961,13 @@ def _transcribe_whisper(wav: Path, duration: float, glossary: list) -> list:
         else None
     )
 
-    # Детектор речи ОТКЛЮЧЁН намеренно.
+    # Детектор речи включён и настроен мягко (VAD_OPTIONS).
     #
-    # Замер на реальном файле (216 с): с ним распознавалась одна реплика и
-    # 10 слов, без него - 13 реплик и 47 слов. Он выбрасывал около 80%
-    # сказанного, а оставшееся слипалось в один отрезок на всю запись, из-за
-    # чего разваливалась и привязка реплик к говорящим. Плата - счёт идёт
-    # дольше, потому что тишину больше не пропускаем.
+    # Прежний замер (216 с) с ним давал одну реплику и 10 слов против 13
+    # реплик и 47 слов без него - и его выключили. Причиной был стандартный
+    # порог 0.5: речь из динамиков до него не дотягивала. С порогом 0.25 и
+    # отступами по краям на 180 секундах разговора выходит 359 слов против
+    # 357 без детектора, а счёт идёт почти вдвое быстрее.
     #
     # От выдумок на тишине защищает HALLUCINATION_PATTERNS ниже по конвейеру.
     segments, info = model.transcribe(
@@ -959,7 +975,7 @@ def _transcribe_whisper(wav: Path, duration: float, glossary: list) -> list:
         language=language,
         beam_size=WHISPER_BEAM,
         vad_filter=USE_VAD,
-        vad_parameters={"min_silence_duration_ms": 500} if USE_VAD else None,
+        vad_parameters=VAD_OPTIONS if USE_VAD else None,
         condition_on_previous_text=False,  # снижает зацикливание на повторах
         hotwords=hotwords,
         initial_prompt=prompt,
@@ -1002,6 +1018,7 @@ def transcribe(wav: Path, duration: float) -> list:
     if glossary:
         log(f"    словарь домена: {len(glossary)} терминов")
 
+    started_at = time.time()
     if ASR_ENGINE in ("gigaam", "giga", "gigaam-v3", "gigaam-onnx"):
         result = _transcribe_gigaam(wav, duration, glossary)
     elif ASR_ENGINE in ("faster-whisper", "whisper", "faster_whisper"):
@@ -1017,6 +1034,16 @@ def transcribe(wav: Path, duration: float) -> list:
             "В записи не распознано ни одной реплики. "
             "Проверьте, что в файле есть разборчивая речь."
         )
+    spent = time.time() - started_at
+    # Время распознавания пишем всегда: это самый долгий шаг, и когда
+    # обработка кажется зависшей, первым делом смотрят сюда. Отношение к
+    # длине записи важнее секунд: по нему сразу видно, во сколько раз счёт
+    # медленнее реального времени.
+    if duration > 0:
+        log(f"    распознавание заняло {spent / 60:.1f} мин "
+            f"({spent / duration:.1f}x длины записи)")
+    else:
+        log(f"    распознавание заняло {spent / 60:.1f} мин")
     log(f"    распознано реплик: {len(result)}")
     return result
 
@@ -3061,7 +3088,10 @@ def whisper_cached() -> bool:
     home = os.environ.get("HF_HOME")
     hub = Path(home) / "hub" if home else Path.home() / ".cache" / "huggingface" / "hub"
     try:
-        return (hub / f"models--Systran--faster-whisper-{WHISPER_MODEL}").is_dir()
+        # Сборки моделей лежат у разных авторов: large-v3 у Systran,
+        # large-v3-turbo — у mobiuslabsgmbh. Имя автора нас не касается,
+        # важно, что модель под этим названием уже скачана.
+        return any(hub.glob(f"models--*--faster-whisper-{WHISPER_MODEL}"))
     except OSError:
         return False
 

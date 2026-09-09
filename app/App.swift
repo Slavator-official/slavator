@@ -65,21 +65,20 @@ enum Screen: Hashable {
 ///
 /// Одна дорога для всех кнопок остановки — главного экрана, строки меню и
 /// виджета. Свой вариант у каждой кнопки неминуемо разъехался бы в мелочах:
-/// где-то забыли убрать слишком короткую запись, где-то не передали
-/// микрофонную дорожку.
+/// где-то забыли убрать слишком короткую запись, где-то не дождались
+/// сведения дорожек.
 @discardableResult
 func stopAndProcess(capture: LiveCapture, pipeline: Pipeline, library: Library) -> URL? {
     guard let url = capture.stop() else { return nil }
-    let voice = capture.systemTrack != nil ? capture.microphoneTrack : nil
     if capture.seconds < 3 {
         try? FileManager.default.removeItem(at: url)
-        if let voice { try? FileManager.default.removeItem(at: voice) }
         showAlert("Слишком короткая запись", "Записано меньше трёх секунд — обрабатывать нечего.")
         return nil
     }
-    // Микрофон уходит отдельной дорожкой: ваш голос не смешивается с
-    // собеседниками и не требует опознания.
-    pipeline.run(input: url, library: library, voiceTrack: voice)
+    // Дорожки уже сведены в один файл при остановке. Отдельной дорожкой
+    // микрофон больше не уходит: это стоило второго прохода распознавания —
+    // на встрече в двадцать минут лишние полчаса ожидания.
+    pipeline.run(input: url, library: library)
     return url
 }
 
@@ -189,7 +188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private func startListening() {
         guard let capture, let library, !capture.isRecording else { return }
         capture.start(source: .meeting,
-                      folder: URL(fileURLWithPath: library.settings.results_dir))
+                      folder: URL(fileURLWithPath: library.settings.recordingsFolder))
         openApp()
     }
 

@@ -86,8 +86,8 @@ enum Paths {
         // Не давать Python писать __pycache__ внутрь подписанного бандла:
         // это ломает подпись, а с ней слетают разрешения macOS.
         env["PYTHONDONTWRITEBYTECODE"] = "1"
-        guard let text = try? String(contentsOf: configEnv, encoding: .utf8) else { return env }
-        for line in text.split(separator: "\n") {
+        for line in (try? String(contentsOf: configEnv, encoding: .utf8))?
+                        .split(separator: "\n") ?? [] {
             let clean = line.trimmingCharacters(in: .whitespaces)
             guard !clean.hasPrefix("#"), let eq = clean.firstIndex(of: "=") else { continue }
             let key = String(clean[clean.startIndex..<eq])
@@ -96,6 +96,12 @@ enum Paths {
                 value = String(value.dropFirst().dropLast())
             }
             env[key] = value
+        }
+        // Модель распознавания — из настроек, но config.env главнее: его
+        // правят руками и осознанно, а переключатель в интерфейсе — на
+        // каждый день.
+        if env["MEETING_TRANSCRIBER_WHISPER_MODEL"] == nil {
+            env["MEETING_TRANSCRIBER_WHISPER_MODEL"] = Settings.load().whisperModel
         }
         return env
     }
@@ -106,6 +112,9 @@ enum Paths {
 struct Settings: Codable {
     var theme = "dark"                 // dark | light | system
     var results_dir = Paths.home.appending(path: "Downloads").path
+    /// Куда класть саму запись встречи. Пусто — туда же, где результаты:
+    /// так было раньше, и менять это молча у тех, кто уже привык, незачем.
+    var recordings_dir = ""
     var widget_enabled = false
     var widget_output_dir = Paths.home.appending(path: "Downloads").path
     var keep_diagnostics = false
@@ -136,6 +145,10 @@ struct Settings: Codable {
     /// Языковая модель: и для резюме встреч, и для чата.
     var llm_model = "qwen3:8b"
 
+    /// Что важнее в распознавании: точность или скорость.
+    /// accurate — large-v3, fast — large-v3-turbo.
+    var asr_speed = "accurate"
+
     // MARK: проекты
     /// Определять проект встречи и раскладывать результаты по его папке.
     var project_grouping = false
@@ -156,6 +169,7 @@ struct Settings: Codable {
         }
         theme = read(.theme, theme)
         results_dir = read(.results_dir, results_dir)
+        recordings_dir = read(.recordings_dir, recordings_dir)
         widget_enabled = read(.widget_enabled, widget_enabled)
         widget_output_dir = read(.widget_output_dir, widget_output_dir)
         keep_diagnostics = read(.keep_diagnostics, keep_diagnostics)
@@ -170,6 +184,22 @@ struct Settings: Codable {
         dictation_tidy_hotkey = read(.dictation_tidy_hotkey, dictation_tidy_hotkey)
         dictation_level = read(.dictation_level, dictation_level)
         llm_model = read(.llm_model, llm_model)
+        project_grouping = read(.project_grouping, project_grouping)
+        asr_speed = read(.asr_speed, asr_speed)
+    }
+
+    /// Модель распознавания под выбранный режим.
+    ///
+    /// Замер на 180 секундах разговора (M3, восемь ядер): large-v3 считает
+    /// примерно два времени записи, turbo — одно. Turbo при этом слабее на
+    /// именах, терминах и латинице, поэтому по умолчанию остаётся large-v3.
+    var whisperModel: String {
+        asr_speed == "fast" ? "large-v3-turbo" : "large-v3"
+    }
+
+    /// Папка, куда ложится запись встречи.
+    var recordingsFolder: String {
+        recordings_dir.isEmpty ? results_dir : recordings_dir
     }
 
     static func load() -> Settings {
@@ -316,8 +346,11 @@ struct Record: Identifiable {
         return existing("\(Paths.extraDir)/work/audio_16k.wav")
     }
 
-    /// Дорожка с вашим голосом: при записи звонка она пишется отдельным
-    /// файлом, и фрагменты ваших реплик звучат из неё, а не из системной.
+    /// Дорожка с вашим голосом — у записей, сделанных до сведения дорожек.
+    ///
+    /// Тогда живой захват оставлял два файла, и реплики с меткой OWN звучали
+    /// из микрофонного. Новые записи сводятся в одну дорожку ещё при
+    /// остановке, метки OWN в них нет, и этот путь просто не находит файла.
     var ownTrack: URL? {
         // Ищем рядом с самой записью, а не рядом с результатом: при живом
         // захвате обе дорожки пишутся в одну папку, но результат может
