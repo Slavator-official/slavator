@@ -497,7 +497,7 @@ def load_projects() -> list:
     return projects
 
 
-def classify_meeting(analysis: dict, projects: list) -> dict:
+def classify_meeting(analysis: dict, projects: list, notes: str = "") -> dict:
     """Определить проект и тип встречи по уже собранному резюме.
 
     Работаем по резюме, а не по всей стенограмме: она длиннее контекста
@@ -517,6 +517,11 @@ def classify_meeting(analysis: dict, projects: list) -> dict:
     }
     user = (f"Известные проекты:\n{known_list}\n\n"
             f"Резюме встречи:\n{json.dumps(card, ensure_ascii=False, indent=2)}")
+    if notes.strip():
+        # Ответы человека весомее резюме: он был на встрече, а модель нет.
+        user += ("\n\nЧеловек ответил на твои вопросы. Это достоверно, верь "
+                 f"этому больше, чем резюме:\n{notes.strip()}")
+        card["уточнения"] = notes.strip()
 
     try:
         raw = ollama_chat(CLASSIFY_SYSTEM, user, json_mode=True, timeout=180)
@@ -590,25 +595,124 @@ def _mentions(project: str, projects: list, card: dict) -> bool:
     return False
 
 
-def move_to_project(out_dir: Path, project: str) -> Path:
+def move_to_project(out_dir: Path, project: str, previous: str = "") -> Path:
     """Переложить готовый результат в папку проекта.
 
     Переносим в самом конце, когда всё записано: перенос — это переименование
     каталога, оно мгновенно и не оставляет полурезультата, если что-то пойдёт
     не так раньше.
+
+    Проект могут поменять — тогда встреча уже лежит в чужой папке, и класть
+    новую внутрь неё нельзя: получилась бы матрёшка «Кабинет/Витрина/встреча».
+    Поэтому от папки проекта поднимаемся к корню результатов.
     """
-    target = out_dir.parent / folder_name(project)
+    root = out_dir.parent
+    names = {folder_name(p["name"]) for p in load_projects()}
+    if previous:
+        names.add(folder_name(previous))
+    # Поднимаемся, пока над нами папки проектов: встречу могли переносить не
+    # раз, и одной ступени не хватает — вложенность копится.
+    hops = 0
+    while root.name in names and hops < 3 and root.parent != root:
+        root = root.parent
+        hops += 1
+
+    target = root / folder_name(project)
     try:
         target.mkdir(parents=True, exist_ok=True)
         destination = target / out_dir.name
         if destination.exists():
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             destination = target / f"{out_dir.name.removesuffix('_result')}_{stamp}_result"
+        old_home = out_dir.parent
         out_dir.rename(destination)
+        # Опустевшая папка прежнего проекта — мусор, который человек примет
+        # за живой проект. Убираем, но только если она и правда пуста.
+        if old_home != root and old_home.name in names:
+            try:
+                old_home.rmdir()
+            except OSError:
+                pass
         return destination
     except OSError as exc:
         warn(f"не удалось переложить встречу в папку проекта: {exc}")
         return out_dir
+
+
+def remember_project(name: str) -> None:
+    """Добавить проект в список. Заводит его человек, а не модель."""
+    projects = load_projects()
+    if any(p["name"].strip().lower() == name.strip().lower() for p in projects):
+        return
+    projects.append({"name": name, "aliases": []})
+    try:
+        PROJECTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        write_json(PROJECTS_PATH, {"projects": projects})
+        log(f"    проект «{name}» добавлен в список")
+    except OSError as exc:
+        warn(f"не удалось сохранить список проектов: {exc}")
+
+
+def assign_project(result_dir: Path, project: str, remember: bool = False) -> int:
+    """Отнести встречу к проекту, названному человеком.
+
+    Человеку не задают вопросов о его же решении: раз проект назван, встреча
+    считается разобранной и сразу переезжает в его папку.
+    """
+    result_dir = result_dir.expanduser().resolve()
+    if not (result_dir / TRANSCRIPT_JSON).is_file():
+        log(f"ОШИБКА: это не каталог встречи: {result_dir}")
+        return 1
+
+    if remember:
+        remember_project(project)
+
+    try:
+        card = json.loads((result_dir / MEETING_JSON).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        card = {}
+    previous = str(card.get("project", ""))
+    card.update({
+        "project": project,
+        "known": True,
+        "confidence": 1.0,
+        "questions": [],
+        "needs_review": False,
+        "why": "выбрано человеком",
+    })
+    card.setdefault("type", "другое")
+    write_json(result_dir / MEETING_JSON, card)
+    final = move_to_project(result_dir, project, previous=previous)
+    log(f"Встреча отнесена к проекту «{project}»: {final}")
+    return 0
+
+
+def clarify_project(result_dir: Path, answers: str) -> int:
+    """Переспросить модель, добавив к резюме ответы человека."""
+    result_dir = result_dir.expanduser().resolve()
+    analysis_path = result_dir / EXTRA_DIR_NAME / "final_analysis.json"
+    try:
+        analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        log("ОШИБКА: у встречи ещё нет резюме — сначала соберите его.")
+        return 1
+
+    try:
+        previous = str(json.loads(
+            (result_dir / MEETING_JSON).read_text(encoding="utf-8")).get("project", ""))
+    except (OSError, ValueError):
+        previous = ""
+
+    card = classify_meeting(analysis, load_projects(), notes=answers)
+    write_json(result_dir / MEETING_JSON, card)
+    if card.get("needs_review"):
+        log("Проект по-прежнему не определён.")
+        for question in card.get("questions", []):
+            log(f"  - {question}")
+        return 0
+    final = move_to_project(result_dir, card["project"], previous=previous)
+    log(f"Встреча отнесена к проекту «{card['project']}»: {final}")
+    return 0
 
 
 def folder_name(project: str) -> str:
@@ -2166,7 +2270,7 @@ MAP_TEMPLATE = """Это фрагмент {index} из {total} стеногра�
 - owner бери ТОЛЬКО из имён говорящих в стенограмме; если исполнитель не назван, ставь "".
 - не выдумывай факты, которых нет в тексте;
 - пустой список лучше, чем придуманный пункт.
-
+{roster}
 Фрагмент стенограммы:
 {chunk}"""
 
@@ -2189,9 +2293,62 @@ REDUCE_TEMPLATE = """Ниже - разборы последовательных 
   "risks": ["риски"],
   "questions": ["открытые вопросы"]
 }}
-
+{roster}
 Разборы фрагментов:
 {parts}"""
+
+
+ROSTER_TEMPLATE = """
+Кто есть кто на встрече:
+{people}
+
+Это справка о людях, а не содержание разговора: фактов и поручений из неё не
+берите. Должности нужны, чтобы верно понять, кто за что отвечает и к кому
+относится сказанное.
+"""
+
+
+def speaker_roster(labels: Iterable[str], profiles_dir: Path = DEFAULT_PROFILES_DIR,
+                   me: Optional[dict[str, str]] = None) -> dict[str, str]:
+    """Должность и компания тех, кто говорил на этой встрече.
+
+    Берём из карточек людей: должность отвечает на вопрос, кому поручение по
+    силам и чьё слово в спорной строке решающее, — без неё модель раздаёт
+    задачи по тому, кто последним говорил.
+
+    Владелец программы попадает сюда даже без голосовой карточки: он
+    вписывает себя в настройках, и приходит отдельно, в `me`.
+    """
+    cards: dict[str, str] = {}
+    for info in load_profiles(profiles_dir).values():
+        name = str(info.get("name", "")).strip()
+        role = ", ".join(x for x in (str(info.get("position", "")).strip(),
+                                     str(info.get("company", "")).strip()) if x)
+        if name and role:
+            cards[name.casefold()] = role
+    if me:
+        # Настройки свежее карточки: человек правит их чаще, чем заводит голос.
+        name = str(me.get("name", "")).strip()
+        role = ", ".join(x for x in (str(me.get("position", "")).strip(),
+                                     str(me.get("company", "")).strip()) if x)
+        if name and role:
+            cards[name.casefold()] = role
+
+    known: dict[str, str] = {}
+    for label in labels:
+        name = str(label).strip()
+        role = cards.get(name.casefold(), "")
+        if name and role and name not in known:
+            known[name] = role
+    return known
+
+
+def roster_block(roles: dict[str, str]) -> str:
+    """Справка о людях для промпта. Пусто, если про людей ничего не известно."""
+    if not roles:
+        return ""
+    people = "\n".join(f"- {name} — {role}" for name, role in sorted(roles.items()))
+    return ROSTER_TEMPLATE.format(people=people)
 
 
 def transcript_as_text(utterances: Sequence[Utterance]) -> str:
@@ -2243,17 +2400,25 @@ def _merge_unique(target: list[str], items: Iterable[Any]) -> None:
             target.append(text)
 
 
-def analyze_meeting(utterances: list[Utterance], extra_dir: Path) -> dict[str, Any]:
+def analyze_meeting(utterances: list[Utterance], extra_dir: Path,
+                    profiles_dir: Path = DEFAULT_PROFILES_DIR,
+                    me: Optional[dict[str, str]] = None) -> dict[str, Any]:
     text = transcript_as_text(utterances)
     chunks = chunk_transcript(text, OLLAMA_NUM_CTX)
     log(f"    фрагментов для анализа: {len(chunks)} (num_ctx={OLLAMA_NUM_CTX})")
+
+    roles = speaker_roster(sorted({item.label for item in utterances}), profiles_dir, me)
+    roster = roster_block(roles)
+    if roles:
+        log(f"    известны должности: {len(roles)} из {len({item.label for item in utterances})}")
 
     partials: list[dict[str, Any]] = []
     for index, chunk in enumerate(chunks, start=1):
         stage_pct("summary", (index - 1) / (len(chunks) + 1), f"фрагмент {index} из {len(chunks)}")
         raw = ollama_chat(
             MAP_SYSTEM,
-            MAP_TEMPLATE.format(index=index, total=len(chunks), chunk=chunk),
+            MAP_TEMPLATE.format(index=index, total=len(chunks), chunk=chunk,
+                                roster=roster),
         )
         partials.append(parse_json_response(raw))
 
@@ -2265,7 +2430,8 @@ def analyze_meeting(utterances: list[Utterance], extra_dir: Path) -> dict[str, A
         stage_pct("summary", len(chunks) / (len(chunks) + 1), "сведение фрагментов")
     raw = ollama_chat(
         REDUCE_SYSTEM,
-        REDUCE_TEMPLATE.format(parts=json.dumps(partials, ensure_ascii=False, indent=2)),
+        REDUCE_TEMPLATE.format(parts=json.dumps(partials, ensure_ascii=False, indent=2),
+                               roster=roster),
     )
     final = parse_json_response(raw)
     speakers = sorted({item.label for item in utterances})
@@ -2279,6 +2445,9 @@ def analyze_meeting(utterances: list[Utterance], extra_dir: Path) -> dict[str, A
         "risks": [],
         "questions": [],
         "todos": [],
+        # Должности участников: их печатает документ, чтобы протокол читался
+        # без вопроса «а кто это».
+        "roles": roles,
     }
     for key in ("topics", "decisions", "risks", "questions"):
         _merge_unique(analysis[key], final.get(key, []))
@@ -2358,9 +2527,19 @@ def write_summary_docx(path: Path, analysis: dict[str, Any], warnings: list[str]
     document.add_paragraph(datetime.now().strftime("Обработано: %d.%m.%Y %H:%M"))
 
     participants = analysis.get("participants") or []
+    roles = analysis.get("roles") or {}
     if participants:
         document.add_heading("Участники", level=1)
-        document.add_paragraph(", ".join(participants))
+        # Со списком должностей — по строке на человека: перечисление через
+        # запятую с должностями читается как каша.
+        if roles:
+            lookup = {str(name).casefold(): role for name, role in roles.items()}
+            for name in participants:
+                role = lookup.get(str(name).strip().casefold(), "")
+                document.add_paragraph(f"{name} — {role}" if role else str(name),
+                                       style="List Bullet")
+        else:
+            document.add_paragraph(", ".join(participants))
 
     document.add_heading("Резюме", level=1)
     document.add_paragraph(analysis.get("summary", ""))
@@ -2498,6 +2677,8 @@ def run_pipeline(
     keep_audio: bool = False,
     voice_track: Optional[Path] = None,
     voice_name: str = "Вы",
+    voice_position: str = "",
+    voice_company: str = "",
     out_root: Optional[Path] = None,
     with_llm: bool = True,
     speakers: int = 0,
@@ -2654,7 +2835,9 @@ def run_pipeline(
     if with_summary:
         stage_start("summary")
         try:
-            state.analysis = analyze_meeting(utterances, paths.extra_dir)
+            state.analysis = analyze_meeting(
+                utterances, paths.extra_dir, profiles_dir,
+                {"name": voice_name, "position": voice_position, "company": voice_company})
         except LLMError as exc:
             # Стенограмма и разделение по голосам уже готовы. Ронять прогон
             # из-за необязательной части - значит выбросить сделанную работу.
@@ -2720,7 +2903,8 @@ def run_pipeline(
     return state
 
 
-def summarize_existing(result_dir: Path, group_projects: bool = False) -> int:
+def summarize_existing(result_dir: Path, group_projects: bool = False,
+                       me: Optional[dict[str, str]] = None) -> int:
     """Собрать резюме по уже готовой стенограмме.
 
     Анализ вынесен из основного прогона: он самый долгий и единственный,
@@ -2761,7 +2945,7 @@ def summarize_existing(result_dir: Path, group_projects: bool = False) -> int:
             write_json(transcript, data)
             write_json(extra_dir / TRANSCRIPT_JSON, data)
 
-    analysis = analyze_meeting(utterances, extra_dir)
+    analysis = analyze_meeting(utterances, extra_dir, DEFAULT_PROFILES_DIR, me)
 
     stage_start("documents")
     warnings = list(data.get("warnings", []))
@@ -3052,12 +3236,24 @@ def build_parser() -> argparse.ArgumentParser:
                         help="отдельная дорожка с вашим голосом (микрофон)")
     parser.add_argument("--my-name", default="Вы",
                         help="как подписывать реплики с вашей дорожки")
+    parser.add_argument("--my-position", default="",
+                        help="ваша должность: уходит в справку о людях для резюме")
+    parser.add_argument("--my-company", default="",
+                        help="ваша компания: уходит в справку о людях для резюме")
     parser.add_argument("--speakers", type=int, default=0,
                         help="сколько человек на встрече (0 - определить самой)")
     parser.add_argument("--out-dir", type=Path, default=None,
                         help="куда складывать результат (по умолчанию рядом с исходником)")
     parser.add_argument("--summarize", type=Path, default=None, metavar="КАТАЛОГ",
                         help="собрать резюме по готовой стенограмме в каталоге _result")
+    parser.add_argument("--assign", type=Path, default=None, metavar="КАТАЛОГ",
+                        help="отнести встречу к проекту из --project")
+    parser.add_argument("--clarify", type=Path, default=None, metavar="КАТАЛОГ",
+                        help="переспросить модель с ответами из --answers")
+    parser.add_argument("--project", default="", help="название проекта для --assign")
+    parser.add_argument("--answers", default="", help="ответы человека для --clarify")
+    parser.add_argument("--add-project", action="store_true",
+                        help="с --assign: запомнить проект в списке")
     parser.add_argument("--group-by-project", action="store_true",
                         help="определить проект встречи и разложить по папкам")
     parser.add_argument("--check", action="store_true", help="только проверить окружение")
@@ -3107,9 +3303,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             log("Окружение готово частично: расшифровка и спикеры работают, резюме - нет.")
         return 0
 
+    if args.assign:
+        if not args.project.strip():
+            log("Укажите проект: --project «название»")
+            return 2
+        return assign_project(args.assign, args.project.strip(), args.add_project)
+
+    if args.clarify:
+        return clarify_project(args.clarify, args.answers)
+
     if args.summarize:
         try:
-            return summarize_existing(args.summarize, args.group_by_project)
+            return summarize_existing(
+                args.summarize, args.group_by_project,
+                {"name": args.my_name, "position": args.my_position,
+                 "company": args.my_company})
         except PipelineError as exc:
             log("")
             log(f"ОШИБКА: {exc.user_message}")
@@ -3155,6 +3363,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             keep_audio=args.keep_audio,
             voice_track=args.my_voice.expanduser().resolve() if args.my_voice else None,
             voice_name=args.my_name,
+            voice_position=args.my_position,
+            voice_company=args.my_company,
             out_root=args.out_dir.expanduser().resolve() if args.out_dir else None,
             speakers=args.speakers,
             group_projects=args.group_by_project,
