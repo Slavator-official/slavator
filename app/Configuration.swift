@@ -96,7 +96,11 @@ struct Settings: Codable {
     var dictation_tidy_hotkey = "opt+shift"
     var memory_graph_enabled = true
     var chat_memory_enabled = true
+    /// Чей голос считать вашим. Пусто — ещё не спрашивали, значение
+    /// подставится само по имени из настроек; `noVoice` — отказались явно,
+    /// и подставлять больше нечего.
     var my_profile_key = ""
+    static let noVoice = "-"
     var widget_enabled = false
     /// small | medium | large — насколько подробен виджет.
     var widget_size = "medium"

@@ -343,6 +343,24 @@ struct ChatScreen: View {
         // Внутри общей прокрутки высота не задавалась вовсе, и экран
         // обрывался на середине, оставляя полокна пустыми.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .onAppear(perform: fillMyVoice)
+        // Голоса подгружаются не мгновенно: к первому появлению чата списка
+        // может ещё не быть, и подставлять тогда нечего.
+        .onChange(of: library.speakers) { _, _ in fillMyVoice() }
+    }
+
+    /// Подставить свой голос, не спрашивая.
+    ///
+    /// Кто вы — уже сказано в настройках, именем. Спрашивать то же самое
+    /// второй раз, да ещё в чате, незачем: без выбора вопросы «когда я
+    /// говорил» упираются в предупреждение, и человек не понимает, чего от
+    /// него хотят. Явный отказ пишется отдельным значением и переживает
+    /// возвращение в чат — иначе выбор «не указывать» стирался бы сразу.
+    private func fillMyVoice() {
+        guard library.settings.my_profile_key.isEmpty,
+              let mine = library.mySpeaker else { return }
+        library.settings.my_profile_key = mine.key
+        library.settings.save()
     }
 
     // MARK: переписка
@@ -440,7 +458,9 @@ struct ChatScreen: View {
                 Spacer()
                 if library.settings.chat_memory_enabled {
                     Menu("Ваш голос: " + (library.speakers.first(where: { $0.key == library.settings.my_profile_key })?.name ?? "не выбран")) {
-                        Button("Не указывать свой голос") { library.settings.my_profile_key = ""; library.settings.save() }
+                        Button("Не указывать свой голос") {
+                            library.settings.my_profile_key = Settings.noVoice; library.settings.save()
+                        }
                         ForEach(library.speakers) { person in
                             Button(person.name) { library.settings.my_profile_key = person.key; library.settings.save() }
                         }

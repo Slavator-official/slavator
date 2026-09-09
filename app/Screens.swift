@@ -1153,6 +1153,9 @@ struct SettingsScreen: View {
     @Bindable var library: Library
     var dictation: Dictation
     @Environment(\.palette) private var p
+    /// Список моделей раскрыт. Не сохраняется: это не настройка, а состояние
+    /// разговора — вернулся в настройки, значит пришёл за другим.
+    @State private var modelExtras = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -1216,21 +1219,50 @@ struct SettingsScreen: View {
                 // Двух ступеней хватает на каждый день, но на слабой машине
                 // большая модель не поедет вовсе — для таких случаев список.
                 // Обе настройки пишут в одно поле: разными они разъехались бы.
-                SettingRow(title: "Другая модель",
-                           subtitle: "Для 8 ГБ памяти: small, CPU / int8. Без видеокарты NVIDIA") {
-                    Menu(library.settings.asr_model) {
-                        ForEach(["base", "small", "large-v3-turbo", "large-v3"], id: \.self) { model in
-                            Button(model == "small" ? "small · для 8 ГБ" : model) {
-                                library.settings.asr_model = model; library.settings.save()
-                            }
-                        }
-                    }.frame(width: 220)
+                //
+                // Список убран под кнопку: на виду он спорит с переключателем
+                // за один и тот же выбор, и с двух шагов легко съехать на
+                // слабую модель, не поняв, что это была она.
+                Button {
+                    withAnimation(.easeOut(duration: 0.16)) { modelExtras.toggle() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text("Доп. настройки модели").font(Kind.body(14))
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .rotationEffect(.degrees(modelExtras ? 90 : 0))
+                        Spacer()
+                    }
+                    .foregroundStyle(p.accent2)
+                    .padding(.vertical, 11)
+                    .contentShape(Rectangle())
                 }
-                Text("Модель должна быть заранее установлена. Старые расшифровки не меняются; выбор применяется к следующей встрече. Для GigaAM настройка Whisper не используется.")
-                    .font(Kind.body(12)).foregroundStyle(p.muted).padding(.top, 10)
-                if library.settings.llm_model.contains(":8b") {
-                    Text("Резюме использует 8B-модель. Для компьютеров с 8 ГБ рекомендуем меньшую модель или обработку без резюме; замена требует отдельной проверки качества.")
-                        .font(Kind.body(12)).foregroundStyle(p.warn).padding(.top, 8)
+                .buttonStyle(.plain)
+                if modelExtras {
+                    SettingRow(title: "Другая модель",
+                               subtitle: "Для 8 ГБ памяти: small, CPU / int8. Без видеокарты NVIDIA") {
+                        Menu(library.settings.asr_model) {
+                            ForEach(["base", "small", "large-v3-turbo", "large-v3"], id: \.self) { model in
+                                Button(model == "small" ? "small · для 8 ГБ" : model) {
+                                    library.settings.asr_model = model; library.settings.save()
+                                }
+                            }
+                        }.frame(width: 220)
+                    }
+                    Text("Модель должна быть заранее установлена. Старые расшифровки не меняются; выбор применяется к следующей встрече. Для GigaAM настройка Whisper не используется.")
+                        .font(Kind.body(12)).foregroundStyle(p.muted)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Divider().overlay(p.line2)
+                    // Языковая модель тоже «доп. настройка»: её меняют раз в
+                    // жизни, а стояла она в «Оформлении» — там её никто не
+                    // ищет, и рядом с темой она читалась как оформление.
+                    SettingRow(title: "Модель для резюме и чата",
+                               subtitle: "Имя уже установленной модели Ollama") {
+                        TextField("qwen3:8b", text: Binding(
+                            get: { library.settings.llm_model },
+                            set: { library.settings.llm_model = $0; library.settings.save() }))
+                            .textFieldStyle(.roundedBorder).frame(width: 220)
+                    }
                 }
             }
 
@@ -1242,14 +1274,6 @@ struct SettingsScreen: View {
                                 get: { library.settings.theme },
                                 set: { library.settings.theme = $0; library.settings.save(); library.reload() }))
                         .frame(width: 260)
-                }
-                Divider().overlay(p.line2)
-                SettingRow(title: "Модель для резюме и чата",
-                           subtitle: "Имя уже установленной модели Ollama") {
-                    TextField("qwen3:8b", text: Binding(
-                        get: { library.settings.llm_model },
-                        set: { library.settings.llm_model = $0; library.settings.save() }))
-                        .textFieldStyle(.roundedBorder).frame(width: 220)
                 }
             }
 
