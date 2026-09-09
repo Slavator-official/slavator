@@ -26,7 +26,7 @@ def recall(memory, question, profile="", progress=lambda _: None, model=None, ge
     own = bool(SELF.search(question.replace("ё", "е")))
     profiles = read(memory.profiles / "profiles.json", {})
     if own and profile not in profiles:
-        return {"text": "Выберите в чате свой профиль в поле «Это я», чтобы я искал именно ваши реплики.", "sources": [], "needs_profile": True}
+        return {"text": "Выберите в чате свой профиль в поле «Ваш голос», чтобы я искал именно ваши реплики.", "sources": [], "needs_profile": True}
     person = "profile:" + profile if own else ""
     # Identity is explicit; a name in the question can select only one known person.
     people = memory.overview(build_graph=False)["people"]

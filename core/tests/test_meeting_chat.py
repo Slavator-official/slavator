@@ -28,6 +28,7 @@ def test_self_requires_explicit_profile(tmp_path):
     try:
         result = recall(memory, "Вспомни, когда я говорил про бюджет", generate=False)
         assert result["needs_profile"] and not result["sources"]
+        assert "«Ваш голос»" in result["text"]
     finally:
         memory.close()
 
