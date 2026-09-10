@@ -1052,6 +1052,16 @@ struct NewVoicesScreen: View {
     @State private var enrolling = false
 
     private var dismissed: [UnknownVoice] { library.dismissed }
+    @State private var split = VoiceSplit()
+
+    /// Встречи с неразобранными голосами, свежие сверху.
+    private var meetings: [URL] {
+        var seen: [URL] = []
+        for record in library.records where library.unknown.contains(where: { $0.record == record.dir }) {
+            seen.append(record.dir)
+        }
+        return seen
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1097,27 +1107,43 @@ struct NewVoicesScreen: View {
                         .frame(maxWidth: .infinity).padding(.vertical, 26)
                 }
             } else {
-                Card {
-                    Text("Один человек часто распадается на несколько голосов — отметьте их вместе.")
-                        .font(Kind.body(13)).foregroundStyle(p.muted)
-                        .padding(.bottom, 14)
+                if let failure = split.failure {
+                    Text(failure).font(Kind.body(12)).foregroundStyle(p.warn)
+                        .textSelection(.enabled).padding(.bottom, 10)
+                }
+                // Голоса разложены по встречам: SPEAKER_02 из разных встреч —
+                // разные люди, и в общей куче их легко было отметить вместе
+                // как одного.
+                ForEach(meetings, id: \.self) { record in
+                    Card {
+                        Text(record.lastPathComponent.replacingOccurrences(of: "_result", with: ""))
+                            .font(Kind.head(15))
+                        Text("Один человек часто распадается на несколько голосов — отметьте их вместе. Голоса из разных встреч объединяйте, только если это точно один человек.")
+                            .font(Kind.body(12.5)).foregroundStyle(p.muted)
+                            .padding(.top, 3).padding(.bottom, 14)
 
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 320), spacing: 12)],
-                              spacing: 12) {
-                        ForEach(library.unknown) { voice in
-                            VoiceCard(voice: voice, library: library, player: player,
-                                      selected: selected.contains(voice.url)) {
-                                if selected.contains(voice.url) { selected.remove(voice.url) }
-                                else { selected.insert(voice.url) }
-                            } assign: {
-                                selected = [voice.url]
-                                enrolling = true
-                            } dismiss: {
-                                selected.remove(voice.url)
-                                library.dismissUnknown(voice)
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 320), spacing: 12)],
+                                  spacing: 12) {
+                            ForEach(library.unknown.filter { $0.record == record }) { voice in
+                                VoiceCard(voice: voice, library: library, player: player,
+                                          selected: selected.contains(voice.url),
+                                          busy: split.isRunning) {
+                                    if selected.contains(voice.url) { selected.remove(voice.url) }
+                                    else { selected.insert(voice.url) }
+                                } assign: {
+                                    selected = [voice.url]
+                                    enrolling = true
+                                } dismiss: {
+                                    selected.remove(voice.url)
+                                    library.dismissUnknown(voice)
+                                } split: { count in
+                                    selected.remove(voice.url)
+                                    split.split(voice: voice, into: count, library: library) { }
+                                }
                             }
                         }
                     }
+                    .padding(.bottom, 12)
                 }
 
                 if !selected.isEmpty {
@@ -1161,9 +1187,11 @@ private struct VoiceCard: View {
     var library: Library
     var player: Player
     var selected: Bool = false
+    var busy = false
     var toggle: () -> Void = {}
     var assign: () -> Void = {}
     var dismiss: (() -> Void)? = nil
+    var split: ((Int) -> Void)? = nil
 
     /// Реплики встречи, из которой взят голос.
     private var turns: [Turn] {
@@ -1229,13 +1257,35 @@ private struct VoiceCard: View {
             HStack(spacing: 8) {
                 Button(voice.guess.map { "Это \($0)" } ?? "Выбрать человека") { assign() }
                     .buttonStyle(PrimaryButton())
+                if let split {
+                    // Сколько человек — говорит человек, а не подбор: подбор
+                    // на реальной записи перескакивает нужное число, ради
+                    // этого кнопка и нужна.
+                    Menu {
+                        ForEach(2...6, id: \.self) { count in
+                            Button("Разделить на \(count) " + (count < 5 ? "человека" : "человек")) {
+                                split(count)
+                            }
+                        }
+                    } label: {
+                        Label("Здесь несколько человек", systemImage: "person.2")
+                            .font(Kind.body(12))
+                    }
+                    // Ширина задана числом: fixedSize() тянет за собой
+                    // _FixedSizeLayout из SwiftUICore, которого в macOS 14 нет,
+                    // и сборка такой бинарник не пропускает.
+                    .menuStyle(.borderlessButton).frame(width: 205)
+                    .foregroundStyle(p.accent2).disabled(busy)
+                    .help("Разложить реплики этого голоса по нескольким людям и заново нарезать образцы")
+                }
                 Spacer(minLength: 0)
+                if busy { ProgressView().controlSize(.small) }
                 if let dismiss {
                     Button(action: dismiss) {
                         Label("Не определяется", systemImage: "person.fill.xmark")
                             .font(Kind.body(12))
                     }
-                    .buttonStyle(.plain).foregroundStyle(p.muted)
+                    .buttonStyle(.plain).foregroundStyle(p.muted).disabled(busy)
                     .help("Убрать из списка: имя вспомнить не удалось. Голос останется на диске, его можно вернуть.")
                 }
             }

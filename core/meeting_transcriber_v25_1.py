@@ -31,6 +31,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
 import urllib.error
@@ -1687,6 +1688,236 @@ def write_wav_excerpt(src: Path, dst: Path, spans: list) -> float:
     return collected / float(rate)
 
 
+def split_voice(result_dir: Path, speaker_id: str, into: int) -> int:
+    """Разделить один голос на несколько человек.
+
+    Диаризация склеивает людей: похожие голоса, один микрофон на комнату,
+    короткие реплики. Обратная сторона слияния, которое делает
+    merge_split_voices, и там честно написано, что склеенных уже не
+    разделить, — автоматически не разделить, а по указанию человека можно:
+    он слышит, что говорили двое, и знает, сколько их было.
+
+    Считаем отпечаток каждого отрезка этого голоса и раскладываем отрезки на
+    заданное число групп ближайшим объединением. Число групп берётся у
+    человека, а не подбирается: подобранное на реальной записи перескакивает
+    нужное значение, ради этого и существует эта команда.
+    """
+    result_dir = Path(result_dir).expanduser().resolve()
+    extra_dir = result_dir / EXTRA_DIR_NAME
+    transcript_path = result_dir / TRANSCRIPT_JSON
+    turns_path = extra_dir / "diarization.json"
+    if not transcript_path.is_file() or not turns_path.is_file():
+        raise PipelineError("Не найдена встреча", "Нет стенограммы или разметки голосов.")
+    if into < 2:
+        raise PipelineError("Делить не на что", "Укажите хотя бы двух человек.")
+
+    data = json.loads(transcript_path.read_text(encoding="utf-8"))
+    meta = data if isinstance(data, dict) else {}
+    utterances = meta.get("utterances") if meta else data
+    turns = json.loads(turns_path.read_text(encoding="utf-8"))
+    mine = [t for t in turns if t.get("speaker") == speaker_id]
+    if not mine:
+        raise PipelineError("Голос не найден", f"В разметке встречи нет «{speaker_id}».")
+
+    stage_start("diarization")
+    wav, temporary = _speech_wav(result_dir, meta)
+    try:
+        # Отрезки короче секунды дают неустойчивый отпечаток: их не
+        # раскладываем, а раздаём в конце ближайшей по времени группе.
+        usable, vectors = [], []
+        for turn in mine:
+            start = float(turn["start"])
+            end = min(float(turn["end"]), start + 8.0)
+            if end - start < MIN_EMBED_SECONDS:
+                continue
+            try:
+                vectors.append(embedding_from_wav(wav, start, end))
+            except PipelineError:
+                continue
+            usable.append(turn)
+            stage_pct("diarization", len(usable) / max(1, len(mine)))
+        if len(usable) < into:
+            raise PipelineError(
+                "Слишком мало речи",
+                f"Отрезков длиннее {MIN_EMBED_SECONDS:g} с всего {len(usable)}, "
+                f"а групп нужно {into}.")
+
+        groups = _cluster_into(vectors, into)
+        names = [f"{speaker_id}_{i + 1}" for i in range(into)]
+        assigned = {id(turn): names[groups[i]] for i, turn in enumerate(usable)}
+        # Короткие отрезки идут туда же, куда ближайший по времени разобранный.
+        for turn in mine:
+            if id(turn) in assigned:
+                continue
+            near = min(usable, key=lambda x: abs(float(x["start"]) - float(turn["start"])))
+            assigned[id(turn)] = assigned[id(near)]
+
+        for turn in mine:
+            turn["speaker"] = assigned[id(turn)]
+        spans: dict = {}
+        for turn in mine:
+            spans.setdefault(turn["speaker"], []).append((float(turn["start"]), float(turn["end"])))
+
+        # Реплика достаётся тому, чьи отрезки перекрывают её сильнее прочих.
+        for item in utterances if isinstance(utterances, list) else []:
+            if not isinstance(item, dict) or item.get("speaker_id") != speaker_id:
+                continue
+            start, end = float(item.get("start", 0)), float(item.get("end", 0))
+            best, best_overlap = names[0], -1.0
+            for name, ranges in spans.items():
+                overlap = sum(max(0.0, min(end, b) - max(start, a)) for a, b in ranges)
+                if overlap > best_overlap:
+                    best, best_overlap = name, overlap
+            item["speaker_id"] = best
+            item["speaker_name"] = ""
+        if isinstance(meta.get("speakers"), list):
+            meta["speakers"] = sorted({
+                (u.get("speaker_name") or u.get("speaker_id") or "Неизвестный")
+                for u in utterances})
+
+        turns_path.write_text(json.dumps(turns, ensure_ascii=False, indent=2), encoding="utf-8")
+        for path in (transcript_path, extra_dir / TRANSCRIPT_JSON):
+            if path.is_file():
+                write_json(path, data)
+        _resplit_records(extra_dir, wav, speaker_id, names, spans)
+    finally:
+        if temporary and wav.exists():
+            wav.unlink(missing_ok=True)
+
+    log(f"    {speaker_id} разделён на {into}: {', '.join(names)}")
+    stage_pct("diarization", 1.0)
+    return 0
+
+
+def _speech_wav(result_dir: Path, meta: dict):
+    """Рабочий WAV встречи: сохранённый рядом или добытый из исходной записи."""
+    kept = result_dir / EXTRA_DIR_NAME / "work" / "audio_16k.wav"
+    if kept.is_file():
+        return kept, False
+    source = Path(str(meta.get("source_path") or ""))
+    if not source.is_file():
+        raise PipelineError(
+            "Нет исходной записи",
+            "Рабочий файл не сохранён, а исходную запись найти не удалось: "
+            f"«{source}». Верните файл на место или включите «хранить рабочий WAV».")
+    target = Path(tempfile.mkdtemp(prefix="slavator-split-")) / "audio_16k.wav"
+    decode_to_wav16k(source, target)
+    return target, True
+
+
+def _cluster_into(vectors: list, into: int) -> list:
+    """Ближайшее объединение отрезков в заданное число групп.
+
+    Своё, а не из sklearn: зависимость ради двадцати строк на десятках
+    отрезков не окупается, а среднее по группе — то же average linkage.
+    """
+    np = _np()
+    groups = [[i] for i in range(len(vectors))]
+    centres = [v for v in vectors]
+    while len(groups) > into:
+        best, pair = -2.0, (0, 1)
+        for i in range(len(groups)):
+            for j in range(i + 1, len(groups)):
+                score = cosine(centres[i], centres[j])
+                if score > best:
+                    best, pair = score, (i, j)
+        i, j = pair
+        groups[i] = groups[i] + groups[j]
+        centres[i] = np.mean(np.stack([vectors[k] for k in groups[i]]), axis=0)
+        del groups[j], centres[j]
+    label = [0] * len(vectors)
+    for g, members in enumerate(groups):
+        for index in members:
+            label[index] = g
+
+    # Ближайшее объединение легко оставляет группу из одного отрезка: пока
+    # оно сливает похожих, всё сходится в один ком, а «второй человек»
+    # оказывается случайным выбросом. Несколько проходов перераспределения
+    # выравнивают группы: каждый отрезок уходит к ближайшему центру, центры
+    # пересчитываются заново.
+    for _ in range(12):
+        centres = []
+        for g in range(into):
+            members = [vectors[i] for i, tag in enumerate(label) if tag == g]
+            centres.append(np.mean(np.stack(members), axis=0) if members else None)
+        moved = False
+        for i, vector in enumerate(vectors):
+            best, score = label[i], -2.0
+            for g, centre in enumerate(centres):
+                if centre is None:
+                    continue
+                value = cosine(vector, centre)
+                if value > score:
+                    best, score = g, value
+            if best != label[i]:
+                label[i], moved = best, True
+        if not moved:
+            break
+
+    # Крупные группы идут первыми: «_1» должен быть тем, кто говорил больше.
+    sizes = [label.count(g) for g in range(into)]
+    order = sorted(range(into), key=lambda g: sizes[g], reverse=True)
+    place = {g: i for i, g in enumerate(order)}
+    return [place[tag] for tag in label]
+
+
+def _resplit_records(extra_dir: Path, wav: Path, speaker_id: str, names: list, spans: dict) -> None:
+    """Переписать всё, что помнило старый голос: узнавание, образцы, имена."""
+    recognition = read_json_list(extra_dir / "speaker_recognition.json")
+    recognition = [r for r in recognition if r.get("speaker_id") != speaker_id]
+    unknown = read_json_list(extra_dir / "unknown_speakers.json")
+    unknown = [r for r in unknown if r.get("speaker_id") != speaker_id]
+
+    unknown_dir = extra_dir / UNKNOWN_DIR_NAME
+    for stale in unknown_dir.glob(f"{speaker_id}*.wav"):
+        stale.unlink(missing_ok=True)
+
+    for name in names:
+        ranges = sorted(spans.get(name, []), key=lambda x: x[1] - x[0], reverse=True)
+        chosen, collected = [], 0.0
+        for span in ranges:
+            if collected >= SAMPLE_TARGET:
+                break
+            chosen.append(span)
+            collected += span[1] - span[0]
+        chosen.sort()
+        total = sum(b - a for a, b in spans.get(name, []))
+        recognition.append({"speaker_id": name, "profile_key": "", "name": "",
+                            "similarity": 0.0, "total_speech": round(total, 2),
+                            "best_segment": list(chosen[0]) if chosen else []})
+        if not chosen:
+            continue
+        length = write_wav_excerpt(wav, unknown_dir / f"{name}.wav", chosen)
+        if length <= 0:
+            continue
+        unknown.append({"speaker_id": name, "wav": f"{name}.wav", "suggested_name": "",
+                        "suggested_confidence": 0, "duration": round(length, 2),
+                        "total_speech": round(total, 2), "best_similarity": 0.0})
+
+    write_json(extra_dir / "speaker_recognition.json", recognition)
+    write_json(extra_dir / "unknown_speakers.json", unknown)
+
+    # Имя и привязка относились к слитому голосу; для новых они неизвестны.
+    for file in ("speaker_names.json", "speaker_links.json"):
+        path = extra_dir / file
+        if not path.is_file():
+            continue
+        try:
+            table = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            continue
+        if isinstance(table, dict) and table.pop(speaker_id, None) is not None:
+            write_json(path, table)
+
+
+def read_json_list(path: Path) -> list:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return []
+    return value if isinstance(value, list) else []
+
+
 def export_unknown_voices(
     wav: Path, matches: list[SpeakerMatch], unknown_dir: Path,
     hints: Optional[dict] = None, turns: Optional[list] = None,
@@ -3277,6 +3508,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="собрать резюме по готовой стенограмме в каталоге _result")
     parser.add_argument("--assign", type=Path, default=None, metavar="КАТАЛОГ",
                         help="отнести встречу к проекту из --project")
+    parser.add_argument("--split-voice", type=Path, default=None, metavar="КАТАЛОГ",
+                        help="разделить один голос встречи на нескольких человек")
+    parser.add_argument("--voice", default="", help="какой голос делить, например SPEAKER_02")
+    parser.add_argument("--into", type=int, default=2, help="на сколько человек делить")
     parser.add_argument("--clarify", type=Path, default=None, metavar="КАТАЛОГ",
                         help="переспросить модель с ответами из --answers")
     parser.add_argument("--project", default="", help="название проекта для --assign")
@@ -3338,6 +3573,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             log("Укажите проект: --project «название»")
             return 2
         return assign_project(args.assign, args.project.strip(), args.add_project)
+
+    if args.split_voice:
+        try:
+            return split_voice(args.split_voice, args.voice.strip(), args.into)
+        except PipelineError as exc:
+            log(f"ОШИБКА: {exc.user_message}")
+            log(f"  {exc}")
+            return 1
 
     if args.clarify:
         return clarify_project(args.clarify, args.answers)

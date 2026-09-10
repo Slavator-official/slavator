@@ -65,6 +65,59 @@ final class Enrollment {
     }
 }
 
+/// Разделение одного голоса на несколько человек.
+///
+/// Обратная сторона объединения: диаризация склеивает людей так же охотно,
+/// как дробит одного. Автоматически склеенных уже не разделить — порог,
+/// который делит их, на той же записи разваливает и одного человека. Зато
+/// это знает тот, кто был на встрече: он слышит, что говорили двое, и знает,
+/// сколько их было. Число он и называет.
+@Observable
+final class VoiceSplit {
+    private(set) var isRunning = false
+    private(set) var failure: String?
+
+    func split(voice: UnknownVoice, into: Int, library: Library, done: @escaping () -> Void) {
+        guard !isRunning else { return }
+        isRunning = true
+        failure = nil
+
+        let process = Process()
+        process.executableURL = Paths.venvPython
+        process.arguments = ["-B", Paths.core.path,
+                             "--split-voice", voice.record.path,
+                             "--voice", voice.label,
+                             "--into", String(into)]
+        process.currentDirectoryURL = Paths.core.deletingLastPathComponent()
+        process.environment = AppConfiguration.environment(settings: library.settings)
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            try process.run()
+            var lines: [String] = []
+            ProcessOutput.read(pipe, process: process, onLine: { line in
+                guard !line.hasPrefix("@@PROGRESS@@") else { return }
+                lines.append(line)
+                if lines.count > 100 { lines.removeFirst(lines.count - 100) }
+            }, onExit: { status in
+                self.isRunning = false
+                if status == 0 {
+                    library.reload()
+                    done()
+                } else {
+                    self.failure = lines.last(where: { $0.contains("ОШИБКА") })
+                        ?? lines.suffix(3).joined(separator: "\n")
+                }
+            })
+        } catch {
+            isRunning = false
+            failure = error.localizedDescription
+        }
+    }
+}
+
 /// Окно привязки: либо к уже заведённому человеку, либо к новому.
 struct EnrollSheet: View {
     @Environment(\.palette) private var p
