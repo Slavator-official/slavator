@@ -59,6 +59,7 @@ enum AppConfiguration {
         if let settings {
             env["MEETING_TRANSCRIBER_LLM"] = settings.llm_model
             env["MEETING_TRANSCRIBER_WHISPER_MODEL"] = settings.asr_model
+            env["MEETING_TRANSCRIBER_VOICE_THRESHOLD"] = String(format: "%.2f", settings.voice_threshold)
         }
         else if let data = try? Data(contentsOf: settingsURL),
                 let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -118,12 +119,18 @@ struct Settings: Codable {
     var dictation_level = DesktopContract.defaults["dictation_level"] as? String ?? "structure"
     var llm_model = DesktopContract.defaults["llm_model"] as? String ?? "qwen3:8b"
     var asr_model = DesktopContract.defaults["asr_model"] as? String ?? "small"
+    /// Порог узнавания голоса, 0.70–0.98. Измеренное значение — 0.90: ниже
+    /// начинают склеиваться разные люди, выше не узнаётся никто. Зоны своих и
+    /// чужих перекрываются, единственно верного значения нет, поэтому оно
+    /// вынесено наружу.
+    var voice_threshold = 0.90
 
     enum CodingKeys: String, CodingKey {
         case menubar_enabled, meeting_watch_enabled, dictation_hotkey, dictation_tidy_hotkey, memory_graph_enabled, chat_memory_enabled, my_profile_key
         case theme, results_dir, recordings_dir, widget_enabled, widget_size, widget_output_dir
         case keep_diagnostics, my_name, my_position, my_company, project_grouping
         case dictation_enabled, dictation_model, dictation_level, llm_model, asr_model
+        case voice_threshold
     }
     init() {}
 
@@ -156,6 +163,8 @@ struct Settings: Codable {
         dictation_level = (try? values.decode(String.self, forKey: .dictation_level)) ?? dictation_level
         llm_model = (try? values.decode(String.self, forKey: .llm_model)) ?? llm_model
         asr_model = (try? values.decode(String.self, forKey: .asr_model)) ?? asr_model
+        voice_threshold = (try? values.decode(Double.self, forKey: .voice_threshold)) ?? voice_threshold
+        if !(0.70...0.98).contains(voice_threshold) { voice_threshold = Settings().voice_threshold }
         if asr_model.trimmingCharacters(in: .whitespaces).isEmpty { asr_model = Settings().asr_model }
         if llm_model.trimmingCharacters(in: .whitespaces).isEmpty { llm_model = Settings().llm_model }
     }

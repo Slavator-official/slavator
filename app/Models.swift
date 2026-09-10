@@ -68,6 +68,10 @@ enum Paths {
     /// Каталог с промежуточными файлами внутри результата. Имя задаётся ядром.
     static let extraDir = "доп файлы, на случай ошибки summary"
     static let unknownDir = "Новые спикеры"
+    /// Голоса, которых человек опознать не смог. Лежат подпапкой внутри
+    /// «Новых спикеров»: список читает только верхний уровень, поэтому
+    /// отложенные пропадают из него сами, но остаются файлами на диске.
+    static let dismissedDir = "Не удалось определить"
 
     /// Ядро приложения внутри бандла.
     static var core: URL {
@@ -278,6 +282,33 @@ final class Library {
         return speakers.first { $0.name.caseInsensitiveCompare(mine) == .orderedSame }
     }
 
+    /// Голоса, отложенные как неопознаваемые, по всем встречам.
+    var dismissed: [UnknownVoice] { records.flatMap(Self.readDismissed) }
+
+    /// Отложить голос: человек его не узнаёт, и в списке он только мешает.
+    ///
+    /// Файл переезжает в подпапку, а не удаляется: голос — единственный след
+    /// живого человека на записи, и стереть его насовсем из-за того, что не
+    /// вспомнили имя, — потеря без возврата.
+    func dismissUnknown(_ voice: UnknownVoice) {
+        let bin = voice.url.deletingLastPathComponent().appending(path: Paths.dismissedDir)
+        move(voice.url, to: bin)
+    }
+
+    /// Вернуть отложенный голос обратно в список.
+    func restoreUnknown(_ voice: UnknownVoice) {
+        move(voice.url, to: voice.url.deletingLastPathComponent().deletingLastPathComponent())
+    }
+
+    private func move(_ url: URL, to folder: URL) {
+        let files = FileManager.default
+        try? files.createDirectory(at: folder, withIntermediateDirectories: true)
+        let target = folder.appending(path: url.lastPathComponent)
+        guard !files.fileExists(atPath: target.path) else { return }
+        do { try files.moveItem(at: url, to: target) } catch { return }
+        unknown = records.flatMap(Self.readUnknown)
+    }
+
     /// Сохранить «о себе» и продублировать в свою карточку.
     ///
     /// Должность и компания видны в двух местах — в настройках и под именем в
@@ -481,6 +512,22 @@ final class Library {
 
     static func readUnknown(in record: Record) -> [UnknownVoice] {
         let folder = record.dir.appending(path: Paths.extraDir).appending(path: Paths.unknownDir)
+        let items = (try? FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: nil)) ?? []
+        let names = readNames(in: record.dir)
+        return items.filter { $0.pathExtension.lowercased() == "wav" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .map { url in
+                let id = url.deletingPathExtension().lastPathComponent
+                    .components(separatedBy: " — ").first ?? ""
+                return UnknownVoice(url: url, record: record.dir, inferred: names[id] ?? "")
+            }
+    }
+
+    /// Отложенные голоса — те же карточки, только из подпапки.
+    static func readDismissed(in record: Record) -> [UnknownVoice] {
+        let folder = record.dir.appending(path: Paths.extraDir)
+            .appending(path: Paths.unknownDir).appending(path: Paths.dismissedDir)
         let items = (try? FileManager.default.contentsOfDirectory(
             at: folder, includingPropertiesForKeys: nil)) ?? []
         let names = readNames(in: record.dir)

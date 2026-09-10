@@ -15,6 +15,24 @@ final class Pipeline {
     private(set) var detail = ""
     private(set) var percent: Double = 0
     private(set) var log: [String] = []
+    /// Сколько осталось, в секундах. nil — пока считать не из чего.
+    private(set) var remaining: TimeInterval?
+
+    private var startedAt: Date?
+    /// Сколько времени занимает этап от всей работы. Замер на встрече 22,6
+    /// минуты (M3, large-v3, CPU/int8): распознавание 48,1 мин, разделение по
+    /// голосам 27,6, всё остальное вместе 3,1. Равные доли, которыми ядро
+    /// рисует полосу, для оценки времени не годятся: распознавание занимает
+    /// десятую часть полосы и две трети ожидания.
+    private static let stageWeights: [String: Double] = [
+        "prepare": 0.01, "audio": 0.01, "asr": 0.60, "quality": 0.01,
+        "diarization": 0.35, "identify": 0.01, "names": 0.005,
+        "transcript": 0.005, "summary": 0.90, "documents": 0.005,
+    ]
+    /// Порядок этапов внутри ядра: по нему из общего процента вытаскивается
+    /// доля текущего этапа.
+    private static let coreOrder = ["prepare", "audio", "asr", "quality", "diarization",
+                                    "identify", "names", "transcript", "summary", "documents"]
 
     private var task: Process?
     private(set) var isCancelling = false
@@ -70,6 +88,7 @@ final class Pipeline {
 
         isRunning = true
         percent = 0
+        startedAt = Date(); remaining = nil
         stage = "Запуск"
         stageOrder = Self.fullOrder
         stageKey = "prepare"
@@ -115,6 +134,7 @@ final class Pipeline {
 
         isRunning = true
         percent = 0
+        startedAt = Date(); remaining = nil
         stage = "Анализ встречи"
         stageOrder = Self.summaryOrder
         stageKey = "summary"
@@ -146,6 +166,7 @@ final class Pipeline {
 
         isRunning = true
         percent = 0
+        startedAt = Date(); remaining = nil
         stage = "Дозагрузка"
         stageOrder = Self.repairOrder
         stageKey = ""
@@ -184,6 +205,7 @@ final class Pipeline {
         }
         isRunning = true
         percent = 0
+        startedAt = Date(); remaining = nil
         self.stage = stage
         stageOrder = []
         stageKey = ""
@@ -268,11 +290,47 @@ final class Pipeline {
                 stage = Self.stageNames[key] ?? key
             }
             detail = raw["detail"] as? String ?? ""
+            estimate()
             return
         }
         log.append(line)
         // Хвост лога держим коротким: он нужен для диагноза, а не для архива.
         if log.count > 400 { log.removeFirst(log.count - 400) }
+    }
+
+    /// Сколько ещё ждать.
+    ///
+    /// Считается по себе же: сколько времени ушло на пройденную долю работы,
+    /// столько же в пересчёте уйдёт на оставшуюся. Так оценка сама
+    /// подстраивается под машину, модель и длину встречи — таблица весов
+    /// говорит только о том, какая часть работы уже позади.
+    ///
+    /// Первые проценты не в счёт: на них уходит загрузка модели, и оценка по
+    /// ним завышена в разы. Пауза на диктовку тоже искажает — но честнее
+    /// показать съехавшую оценку, чем убрать её на полпути.
+    private func estimate() {
+        guard let startedAt, !stageOrder.isEmpty,
+              let index = Self.coreOrder.firstIndex(of: stageKey) else { remaining = nil; return }
+        let total = stageOrder.reduce(0.0) { $0 + (Self.stageWeights[$1] ?? 0) }
+        guard total > 0, let place = stageOrder.firstIndex(of: stageKey) else { remaining = nil; return }
+        let passed = stageOrder.prefix(place).reduce(0.0) { $0 + (Self.stageWeights[$1] ?? 0) }
+        let inside = min(1, max(0, percent / 10 - Double(index)))
+        let done = (passed + inside * (Self.stageWeights[stageKey] ?? 0)) / total
+        let elapsed = Date().timeIntervalSince(startedAt)
+        guard done >= 0.02, elapsed >= 20 else { remaining = nil; return }
+        remaining = elapsed / done * (1 - done)
+    }
+
+    /// Оставшееся время словами. Минуты, а не секунды: точность секунд эта
+    /// оценка не выдержит, а обратный отсчёт до секунды заставляет на него
+    /// смотреть.
+    var remainingText: String? {
+        guard let remaining, remaining.isFinite, remaining > 0 else { return nil }
+        let minutes = Int((remaining / 60).rounded())
+        if minutes < 1 { return "меньше минуты" }
+        if minutes < 60 { return "≈ \(minutes) мин" }
+        let hours = minutes / 60, rest = minutes % 60
+        return rest == 0 ? "≈ \(hours) ч" : "≈ \(hours) ч \(rest) мин"
     }
 
     /// Показать пользователю то, что ядро реально сказало, а не общую фразу.

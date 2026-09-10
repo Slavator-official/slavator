@@ -380,6 +380,9 @@ struct Shell: View {
                         Text(pipeline.detail).font(Kind.body(12)).foregroundStyle(palette.muted).lineLimit(1)
                     }
                     Spacer()
+                    if let left = pipeline.remainingText, !pipeline.isSuspended {
+                        Text(left).font(Kind.body(12)).foregroundStyle(palette.muted)
+                    }
                     Text("\(Int(pipeline.percent))% ").font(Kind.mono())
                     Button(pipeline.isCancelling ? "Останавливаю…" : "Прервать") { pipeline.cancel() }
                         .buttonStyle(QuietButton()).disabled(pipeline.isCancelling)

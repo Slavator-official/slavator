@@ -261,9 +261,12 @@ class Memory:
         return model
 
     def overview(self, build_graph=True):
+        # Название встречи нужно неподтверждённым голосам: они живут внутри
+        # одной встречи, и без него список превращается в десяток одинаковых
+        # строк «UNKNOWN», между которыми нельзя выбрать.
         people = [dict(r) for r in self.db.execute("""SELECT person id, name,
             COUNT(DISTINCT meeting) meetings, COUNT(*) quotes, MAX(m.date) last_seen,
-            MIN(identity) identity FROM quotes q JOIN meetings m ON m.id=q.meeting
+            MIN(identity) identity, MIN(m.title) title FROM quotes q JOIN meetings m ON m.id=q.meeting
             WHERE q.searchable=1 AND (q.voice NOT LIKE 'UNASSIGNED_%' OR q.identity='manual')
             GROUP BY person ORDER BY (person LIKE 'profile:%') DESC,meetings DESC,name,person""")]
         meetings = [dict(r) for r in self.db.execute("SELECT id,title,date FROM meetings ORDER BY date DESC,id")]

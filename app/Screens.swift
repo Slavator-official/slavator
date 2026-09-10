@@ -332,9 +332,14 @@ struct MainScreen: View {
                     }
                 }
                 Spacer()
-                Text("\(Int(pipeline.percent))%")
-                    .font(.system(size: 26, weight: .medium, design: .monospaced))
-                    .foregroundStyle(p.text)
+                VStack(alignment: .trailing, spacing: 1) {
+                    Text("\(Int(pipeline.percent))%")
+                        .font(.system(size: 26, weight: .medium, design: .monospaced))
+                        .foregroundStyle(p.text)
+                    if let left = pipeline.remainingText, !pipeline.isSuspended {
+                        Text(left).font(Kind.body(12)).foregroundStyle(p.muted)
+                    }
+                }
             }
 
             GeometryReader { geo in
@@ -560,7 +565,11 @@ struct RecordsScreen: View {
             HStack {
                 ScreenTitle(text: "Записи")
                 Spacer()
-                Menu("Корзина Славатора (\(memory.deleted.count))") {
+                // Корзина — не действие экрана, а место, куда изредка
+                // заглядывают. Широкая кнопка с числом стояла рядом с
+                // заголовком и читалась как главное здесь; значок с меткой
+                // занимает угол и не спорит со списком записей.
+                Menu {
                     if memory.deleted.isEmpty { Text("Корзина пуста") }
                     ForEach(memory.deleted) { entry in
                         Button("Восстановить: \(entry.title) · \(entry.date.prefix(10))") {
@@ -572,7 +581,26 @@ struct RecordsScreen: View {
                     Button("Показать папку корзины") {
                         NSWorkspace.shared.open(URL(fileURLWithPath: library.settings.results_dir).appending(path: ".slavator-trash"))
                     }.disabled(!FileManager.default.fileExists(atPath: URL(fileURLWithPath: library.settings.results_dir).appending(path: ".slavator-trash").path))
-                }.disabled(memory.busy || pipeline.isRunning)
+                } label: {
+                    ZStack(alignment: .topTrailing) {
+                        Image(systemName: "trash")
+                            .font(.system(size: 15, weight: .regular))
+                            .foregroundStyle(p.muted)
+                            .frame(width: 28, height: 24)
+                        if !memory.deleted.isEmpty {
+                            Text("\(memory.deleted.count)")
+                                .font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
+                                .padding(.horizontal, 4).padding(.vertical, 1)
+                                .background(Capsule().fill(p.accent))
+                                .offset(x: 5, y: -2)
+                        }
+                    }
+                }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden)
+                .frame(width: 34)
+                .disabled(memory.busy || pipeline.isRunning)
+                .help(memory.deleted.isEmpty ? "Корзина Славатора пуста"
+                      : "Корзина Славатора: \(memory.deleted.count)")
             }
             if memory.busy {
                 HStack {
@@ -642,6 +670,102 @@ struct RecordsScreen: View {
         memory.deleteMeeting(record, settings: library.settings) { library.reload() }
     }
 
+    /// Переименовать встречу.
+    ///
+    /// Имя встречи — это имя её папки: так его видит и список записей, и
+    /// память. Поэтому переименование трогает папку, а не запись в базе —
+    /// иначе имя разъехалось бы между экраном и поиском.
+    ///
+    /// Прошлые версии переезжают вместе с текущей: они узнаются по общему
+    /// началу имени, и оставленная позади копия «Старое имя_20260909_111354»
+    /// висела бы в списке отдельной встречей.
+    ///
+    /// Исходную запись не трогаем: на неё ссылается стенограмма, по ней
+    /// работает проигрыватель, и переносить файл ради названия папки — цена
+    /// выше пользы.
+    private func renameMeeting(_ record: Record) {
+        guard !pipeline.isRunning, !memory.busy else { return }
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.stringValue = record.title
+        let alert = NSAlert()
+        alert.messageText = "Новое название встречи"
+        alert.informativeText = "Так она будет называться в записях, поиске и на графе. Файлы внутри папки останутся прежними."
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Переименовать")
+        alert.addButton(withTitle: "Отмена")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let title = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard title != record.title else { return }
+        guard !title.isEmpty, !title.hasPrefix("."),
+              title.rangeOfCharacter(from: CharacterSet(charactersIn: "/:")) == nil else {
+            showAlert("Так назвать нельзя",
+                      "Название не должно быть пустым, начинаться с точки или содержать «/» и «:».")
+            return
+        }
+
+        let root = record.dir.deletingLastPathComponent()
+        let files = FileManager.default
+        // Текущая версия — «Имя_result», прошлые — «Имя_20260909_111354_result».
+        let family = (try? files.contentsOfDirectory(at: root, includingPropertiesForKeys: nil))?
+            .filter { folder in
+                let name = folder.lastPathComponent
+                guard name.hasSuffix("_result") else { return false }
+                let base = String(name.dropLast("_result".count))
+                return base == record.title
+                    || (base.hasPrefix(record.title + "_")
+                        && String(base.dropFirst(record.title.count + 1))
+                            .range(of: #"^\d{8}_\d{6}$"#, options: .regularExpression) != nil)
+            } ?? []
+        guard !family.isEmpty else { return }
+
+        var moves: [(URL, URL)] = []
+        for folder in family {
+            let tail = folder.lastPathComponent.dropFirst(record.title.count)
+            let target = root.appending(path: title + tail)
+            if files.fileExists(atPath: target.path) {
+                showAlert("Такая встреча уже есть",
+                          "В папке результатов уже лежит «\(target.lastPathComponent)». Выберите другое название.")
+                return
+            }
+            moves.append((folder, target))
+        }
+
+        player.stop()
+        var done: [(URL, URL)] = []
+        do {
+            for (from, to) in moves {
+                try files.moveItem(at: from, to: to)
+                done.append((from, to))
+            }
+        } catch {
+            // Переименование на полпути хуже, чем несделанное: возвращаем как было.
+            for (from, to) in done.reversed() { try? files.moveItem(at: to, to: from) }
+            showAlert("Не удалось переименовать", error.localizedDescription)
+            return
+        }
+        for (_, folder) in done { retitle(folder, to: title) }
+        library.reload()
+        memory.invalidate(settings: library.settings)
+    }
+
+    /// Стенограмма хранит своё название отдельно от папки, и память берёт его
+    /// оттуда. Не поправив, получим одну встречу под двумя именами.
+    private func retitle(_ folder: URL, to title: String) {
+        for path in [folder.appending(path: "transcript.json"),
+                     folder.appending(path: Paths.extraDir).appending(path: "transcript.json")] {
+            guard let data = try? Data(contentsOf: path),
+                  var raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+            raw["source"] = title
+            guard let out = try? JSONSerialization.data(withJSONObject: raw,
+                                                        options: [.prettyPrinted, .withoutEscapingSlashes])
+            else { continue }
+            try? out.write(to: path, options: .atomic)
+        }
+    }
+
     private func recordCard(_ record: Record) -> some View {
         Card {
             HStack(alignment: .top, spacing: 16) {
@@ -676,6 +800,11 @@ struct RecordsScreen: View {
                 Text("Резюме").font(Kind.body(12)).foregroundStyle(p.muted)
                 summaryButton(for: record)
                 Spacer()
+                Button { renameMeeting(record) } label: {
+                    Label("Переименовать", systemImage: "pencil").font(Kind.body(12))
+                }.buttonStyle(.plain).foregroundStyle(p.muted)
+                    .disabled(pipeline.isRunning || memory.busy)
+                    .help("Сменить название встречи вместе с её прошлыми версиями")
                 Button { NSWorkspace.shared.open(record.dir) } label: {
                     Label("Папка", systemImage: "folder").font(Kind.body(12))
                 }.buttonStyle(.plain).foregroundStyle(p.muted).help("Показать файлы встречи")
@@ -922,13 +1051,48 @@ struct NewVoicesScreen: View {
     @State private var selected: Set<URL> = []
     @State private var enrolling = false
 
+    private var dismissed: [UnknownVoice] { library.dismissed }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ScreenTitle(text: "Новые голоса")
+            HStack {
+                ScreenTitle(text: "Новые голоса")
+                Spacer()
+                // Отложенные голоса не исчезают навсегда: имя может
+                // вспомниться через неделю, а голос к тому времени должен
+                // где-то лежать.
+                Menu {
+                    if dismissed.isEmpty { Text("Здесь пусто") }
+                    ForEach(dismissed) { voice in
+                        Button("Вернуть: \(library.label(for: voice)) · \(voice.record.lastPathComponent.replacingOccurrences(of: "_result", with: ""))") {
+                            library.restoreUnknown(voice)
+                        }
+                    }
+                } label: {
+                    ZStack(alignment: .topTrailing) {
+                        Image(systemName: "person.fill.xmark")
+                            .font(.system(size: 15, weight: .regular))
+                            .foregroundStyle(p.muted)
+                            .frame(width: 28, height: 24)
+                        if !dismissed.isEmpty {
+                            Text("\(dismissed.count)")
+                                .font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
+                                .padding(.horizontal, 4).padding(.vertical, 1)
+                                .background(Capsule().fill(p.accent))
+                                .offset(x: 7, y: -2)
+                        }
+                    }
+                }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden)
+                .frame(width: 36)
+                .help(dismissed.isEmpty ? "Отложенных голосов нет"
+                      : "Отложено голосов: \(dismissed.count)")
+            }
 
             if library.unknown.isEmpty {
                 Card {
-                    Text("Все голоса определены")
+                    Text(dismissed.isEmpty ? "Все голоса определены"
+                         : "Все голоса разобраны. Отложенные лежат под значком справа сверху.")
                         .font(Kind.body(14)).foregroundStyle(p.muted)
                         .frame(maxWidth: .infinity).padding(.vertical, 26)
                 }
@@ -948,6 +1112,9 @@ struct NewVoicesScreen: View {
                             } assign: {
                                 selected = [voice.url]
                                 enrolling = true
+                            } dismiss: {
+                                selected.remove(voice.url)
+                                library.dismissUnknown(voice)
                             }
                         }
                     }
@@ -996,6 +1163,7 @@ private struct VoiceCard: View {
     var selected: Bool = false
     var toggle: () -> Void = {}
     var assign: () -> Void = {}
+    var dismiss: (() -> Void)? = nil
 
     /// Реплики встречи, из которой взят голос.
     private var turns: [Turn] {
@@ -1061,6 +1229,15 @@ private struct VoiceCard: View {
             HStack(spacing: 8) {
                 Button(voice.guess.map { "Это \($0)" } ?? "Выбрать человека") { assign() }
                     .buttonStyle(PrimaryButton())
+                Spacer(minLength: 0)
+                if let dismiss {
+                    Button(action: dismiss) {
+                        Label("Не определяется", systemImage: "person.fill.xmark")
+                            .font(Kind.body(12))
+                    }
+                    .buttonStyle(.plain).foregroundStyle(p.muted)
+                    .help("Убрать из списка: имя вспомнить не удалось. Голос останется на диске, его можно вернуть.")
+                }
             }
         }
         .overlay(RoundedRectangle(cornerRadius: 13)
@@ -1161,6 +1338,8 @@ struct SettingsScreen: View {
     /// разговора — вернулся в настройки, значит пришёл за другим.
     @State private var modelExtras = false
 
+    private var threshold: Double { library.settings.voice_threshold }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             ScreenTitle(text: "Настройки")
@@ -1256,6 +1435,27 @@ struct SettingsScreen: View {
                     Text("Модель должна быть заранее установлена. Старые расшифровки не меняются; выбор применяется к следующей встрече. Для GigaAM настройка Whisper не используется.")
                         .font(Kind.body(12)).foregroundStyle(p.muted)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                    Divider().overlay(p.line2)
+                    // Единственно верного порога нет: у одного человека
+                    // близость голоса лежит в 0,83–0,98, у разных доходит до
+                    // 0,91 — зоны перекрываются, и где резать, зависит от
+                    // микрофона и от того, что дороже: лишний вопрос или
+                    // склеенные люди.
+                    SettingRow(title: "Порог узнавания голоса",
+                               subtitle: threshold == 0.90 ? "Измеренное значение — 0,90"
+                                   : (threshold < 0.90 ? "Ниже измеренного: узнаёт чаще, но склеит похожих"
+                                                       : "Выше измеренного: спросит лишний раз, но не перепутает")) {
+                        HStack(spacing: 10) {
+                            Slider(value: Binding(
+                                get: { threshold },
+                                set: { library.settings.voice_threshold = (($0 * 100).rounded()) / 100
+                                       library.settings.save() }),
+                                in: 0.70...0.98, step: 0.01)
+                                .frame(width: 170)
+                            Text(String(format: "%.2f", threshold))
+                                .font(Kind.mono(13)).frame(width: 38, alignment: .trailing)
+                        }
+                    }
                     Divider().overlay(p.line2)
                     // Языковая модель тоже «доп. настройка»: её меняют раз в
                     // жизни, а стояла она в «Оформлении» — там её никто не
