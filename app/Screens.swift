@@ -433,7 +433,10 @@ struct MainScreen: View {
                                 .font(Kind.body(12.5)).foregroundStyle(p.muted)
                         }
                         Spacer(minLength: 8)
-                        Button(voice.guess != nil ? "Подтвердить" : "Выбрать человека") {
+                        // Кнопка ведёт в «Новые голоса» и называется так же,
+                        // как там: разные слова об одном пути заставляют
+                        // гадать, туда ли ведёт эта.
+                        Button(voice.guess != nil ? "Подтвердить" : "Привязать") {
                             screen = .newVoices
                         }
                         .buttonStyle(voice.guess != nil ? AnyButtonStyle(PrimaryButton())
