@@ -1,10 +1,15 @@
 import SwiftUI
 
-struct SpeakersScreen: View {
+/// Память встреч: поиск по сохранённым расшифровкам и граф участников.
+///
+/// Отдельный экран, а не вкладка у спикеров. Спикеры — это люди и их голоса,
+/// список, который правят руками. Память — то, что программа насчитала по
+/// расшифровкам. Общего у них только слово «голос», и сведённые в один экран
+/// они мешали друг другу: за списком людей нужно было идти через поиск.
+struct MemoryScreen: View {
     @Bindable var library: Library
     var player: Player
     @Bindable var memory: SpeakerMemory
-    @Binding var screen: Screen
     @Environment(\.palette) private var p
     @State private var detail: MemoryQuote?
 
@@ -12,7 +17,7 @@ struct SpeakersScreen: View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Спикеры и память встреч").font(Kind.title(24))
+                    Text("Память встреч").font(Kind.title(24))
                     Text("Кто, что и когда говорил — с опорой на сохранённые расшифровки.")
                         .font(Kind.body(13)).foregroundStyle(p.muted)
                 }
@@ -28,7 +33,9 @@ struct SpeakersScreen: View {
                 Label("Хранится на этом устройстве", systemImage: "lock.shield")
                     .font(Kind.body(12)).foregroundStyle(p.muted)
             }
-            Segmented(options: [("search", "Поиск и история"), ("graph", "Граф встреч"), ("profiles", "Голосовые профили")], selection: $memory.tab)
+            Segmented(options: [("search", "Поиск и история"), ("graph", "Граф встреч")],
+                      selection: $memory.tab)
+                .frame(width: 380)
             if memory.busy {
                 HStack(spacing: 10) {
                     ProgressView().controlSize(.small)
@@ -48,9 +55,7 @@ struct SpeakersScreen: View {
                     Text(memory.warnings.joined(separator: "\n")).font(Kind.body(12)).textSelection(.enabled)
                 }.font(Kind.body(12)).foregroundStyle(p.warn)
             }
-            if memory.tab == "profiles" {
-                SpeakerProfilesScreen(library: library, player: player, screen: $screen)
-            } else if memory.tab == "graph" {
+            if memory.tab == "graph" {
                 Toggle("Строить граф встреч", isOn: Binding(
                     get: { library.settings.memory_graph_enabled },
                     set: { library.settings.memory_graph_enabled = $0; library.settings.save()

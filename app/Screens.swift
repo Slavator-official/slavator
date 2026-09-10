@@ -1105,7 +1105,7 @@ struct PersonScreen: View {
                     }
                     Button("Открыть высказывания и поиск") {
                         memory.person = "profile:" + key; memory.query = ""; memory.meeting = ""
-                        memory.tab = "search"; screen = .speakers
+                        memory.tab = "search"; screen = .memory
                         memory.search(settings: library.settings)
                     }.buttonStyle(PrimaryButton()).disabled(memory.busy).padding(.top, 12)
                 }
@@ -1135,6 +1135,10 @@ struct PersonScreen: View {
                 Text("Человек не найден").font(Kind.body()).foregroundStyle(p.muted)
             }
         }
+        // Память живёт на своём экране, и раньше её считывал он же. Карточка
+        // человека без этого встречала пустым «история появится»: посчитано
+        // всё, но только для того, кто по дороге заглянул в «Память встреч».
+        .onAppear { memory.activate(settings: library.settings) }
     }
 
     private func sampleFiles(_ person: Speaker) -> [URL] {

@@ -48,7 +48,7 @@ struct SlavatorApp: App {
 }
 
 enum Screen: Hashable {
-    case main, records, speakers, newVoices, settings, chat
+    case main, memory, records, speakers, newVoices, settings, chat
     case person(String)
 }
 
@@ -317,7 +317,9 @@ struct Shell: View {
                                                     screen: $screen)
                         case .records:   RecordsScreen(library: library, player: player,
                                                       pipeline: pipeline, memory: memory, screen: $screen)
-                        case .speakers:  SpeakersScreen(library: library, player: player, memory: memory, screen: $screen)
+                        case .memory:    MemoryScreen(library: library, player: player, memory: memory)
+                        case .speakers:  SpeakerProfilesScreen(library: library, player: player,
+                                                               screen: $screen)
                         case .newVoices: NewVoicesScreen(library: library, player: player)
                         // Чат нарисован выше, вне прокрутки. Ветка нужна
                         // только чтобы перечисление было исчерпано.
@@ -399,6 +401,7 @@ struct Sidebar: View {
 
     private var items: [(Screen, String, String)] {
         [(.main, "Главная", "house"),
+         (.memory, "Память встреч", "brain"),
          (.records, "Записи", "clock"),
          (.speakers, "Спикеры", "person"),
          (.settings, "Настройки", "gearshape")]
