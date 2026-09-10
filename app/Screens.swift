@@ -1152,10 +1152,10 @@ struct NewVoicesScreen: View {
                         Spacer()
                         Button("Снять выбор") { selected.removeAll() }
                             .buttonStyle(.plain).font(Kind.body(13)).foregroundStyle(p.muted)
-                        Button(selected.count == 1 ? "Это человек…" : "Это один человек…") {
-                            enrolling = true
-                        }
-                        .buttonStyle(PrimaryButton())
+                        Button("Привязать") { enrolling = true }
+                            .buttonStyle(PrimaryButton())
+                            .help(selected.count == 1 ? "Назвать человека, чей это голос"
+                                  : "Отмеченные голоса принадлежат одному человеку")
                     }
                     .padding(14)
                     .background(p.accentSoft)
