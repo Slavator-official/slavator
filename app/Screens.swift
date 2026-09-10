@@ -1162,17 +1162,22 @@ struct NewVoicesScreen: View {
                         // одно и то же число, чего никто не имеет в виду.
                         Menu {
                             Button("Выбрать человека…") { enrolling = true }
-                            Divider()
-                            Menu("Здесь несколько человек") {
-                                ForEach(2...6, id: \.self) { count in
-                                    Button("Разделить на \(count) " + (count < 5 ? "человека" : "человек")) {
-                                        guard let voice = chosen.first else { return }
-                                        selected.removeAll()
-                                        split.split(voice: voice, into: count, library: library) { }
+                            // Делить можно только один голос: у отмеченной
+                            // пачки это означало бы разделить каждый на одно и
+                            // то же число, чего никто не имеет в виду. Пункт
+                            // не гасим, а убираем — погашенный заставляет
+                            // гадать, чего ему не хватает.
+                            if let voice = chosen.first, chosen.count == 1 {
+                                Divider()
+                                Menu("Здесь несколько человек") {
+                                    ForEach(2...6, id: \.self) { count in
+                                        Button("Разделить на \(count) " + (count < 5 ? "человека" : "человек")) {
+                                            selected.removeAll()
+                                            split.split(voice: voice, into: count, library: library) { }
+                                        }
                                     }
                                 }
                             }
-                            .disabled(chosen.count != 1)
                             Divider()
                             Button(chosen.count == 1 ? "Не определяется" : "Не определяются") {
                                 let voices = chosen
