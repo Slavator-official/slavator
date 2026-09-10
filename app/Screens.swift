@@ -1054,6 +1054,9 @@ struct NewVoicesScreen: View {
     private var dismissed: [UnknownVoice] { library.dismissed }
     @State private var split = VoiceSplit()
 
+    /// Отмеченные голоса. Порядок — как в списке.
+    private var chosen: [UnknownVoice] { library.unknown.filter { selected.contains($0.url) } }
+
     /// Встречи с неразобранными голосами, свежие сверху.
     private var meetings: [URL] {
         var seen: [URL] = []
@@ -1152,10 +1155,45 @@ struct NewVoicesScreen: View {
                         Spacer()
                         Button("Снять выбор") { selected.removeAll() }
                             .buttonStyle(.plain).font(Kind.body(13)).foregroundStyle(p.muted)
-                        Button("Привязать") { enrolling = true }
-                            .buttonStyle(PrimaryButton())
-                            .help(selected.count == 1 ? "Назвать человека, чей это голос"
-                                  : "Отмеченные голоса принадлежат одному человеку")
+                        // Те же пункты, что и на карточке: кнопка называется
+                        // так же, и открывать она должна то же самое.
+                        // Разделение — только для одного голоса: делить
+                        // отмеченную пачку сразу означало бы делить каждый на
+                        // одно и то же число, чего никто не имеет в виду.
+                        Menu {
+                            Button("Выбрать человека…") { enrolling = true }
+                            Divider()
+                            Menu("Здесь несколько человек") {
+                                ForEach(2...6, id: \.self) { count in
+                                    Button("Разделить на \(count) " + (count < 5 ? "человека" : "человек")) {
+                                        guard let voice = chosen.first else { return }
+                                        selected.removeAll()
+                                        split.split(voice: voice, into: count, library: library) { }
+                                    }
+                                }
+                            }
+                            .disabled(chosen.count != 1)
+                            Divider()
+                            Button(chosen.count == 1 ? "Не определяется" : "Не определяются") {
+                                let voices = chosen
+                                selected.removeAll()
+                                for voice in voices { library.dismissUnknown(voice) }
+                            }
+                        } label: {
+                            HStack(spacing: 7) {
+                                Text("Привязать").font(.system(size: 13, weight: .semibold))
+                                Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
+                            }
+                            .foregroundStyle(Color.white)
+                            .padding(.horizontal, 15).padding(.vertical, 8)
+                            .background(RoundedRectangle(cornerRadius: 9)
+                                .fill(split.isRunning ? p.raised : p.accent))
+                            .contentShape(Rectangle())
+                        }
+                        // Ширина числом: fixedSize() тянет _FixedSizeLayout из
+                        // SwiftUICore, которого в macOS 14 нет.
+                        .menuStyle(.borderlessButton).menuIndicator(.hidden)
+                        .frame(width: 124).disabled(split.isRunning)
                     }
                     .padding(14)
                     .background(p.accentSoft)
