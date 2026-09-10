@@ -1826,6 +1826,13 @@ extension SettingsScreen {
                         dictation.refresh(settings: library.settings)
                     }))
             }
+            SettingRow(title: "Приглушать звук на время диктовки",
+                       subtitle: "Музыка и чужая речь из динамиков попадают в микрофон вместе с вашим голосом") {
+                Toggle("Приглушать звук на время диктовки", isOn: Binding(
+                    get: { library.settings.dictation_duck },
+                    set: { library.settings.dictation_duck = $0; library.settings.save() }))
+                    .labelsHidden().toggleStyle(.switch)
+            }
             SettingRow(title: "Модель",
                        subtitle: "«Быстро» пишет на ходу, «точно» вставляет целиком через 3 секунды") {
                 Segmented(options: [("small", "Быстро"), ("large-v3-turbo", "Точно")],

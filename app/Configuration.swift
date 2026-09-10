@@ -117,6 +117,9 @@ struct Settings: Codable {
     var dictation_enabled = false
     var dictation_model = DesktopContract.defaults["dictation_model"] as? String ?? "small"
     var dictation_level = DesktopContract.defaults["dictation_level"] as? String ?? "structure"
+    /// Приглушать системный звук на время диктовки. Говорить поверх музыки
+    /// или чужой речи — значит отдавать их микрофону вместе со своим голосом.
+    var dictation_duck = true
     var llm_model = DesktopContract.defaults["llm_model"] as? String ?? "qwen3:8b"
     var asr_model = DesktopContract.defaults["asr_model"] as? String ?? "small"
     /// Порог узнавания голоса, 0.70–0.98. Измеренное значение — 0.90: ниже
@@ -129,7 +132,8 @@ struct Settings: Codable {
         case menubar_enabled, meeting_watch_enabled, dictation_hotkey, dictation_tidy_hotkey, memory_graph_enabled, chat_memory_enabled, my_profile_key
         case theme, results_dir, recordings_dir, widget_enabled, widget_size, widget_output_dir
         case keep_diagnostics, my_name, my_position, my_company, project_grouping
-        case dictation_enabled, dictation_model, dictation_level, llm_model, asr_model
+        case dictation_enabled, dictation_model, dictation_level, dictation_duck
+        case llm_model, asr_model
         case voice_threshold
     }
     init() {}
@@ -161,6 +165,7 @@ struct Settings: Codable {
         dictation_enabled = (try? values.decode(Bool.self, forKey: .dictation_enabled)) ?? dictation_enabled
         dictation_model = (try? values.decode(String.self, forKey: .dictation_model)) ?? dictation_model
         dictation_level = (try? values.decode(String.self, forKey: .dictation_level)) ?? dictation_level
+        dictation_duck = (try? values.decode(Bool.self, forKey: .dictation_duck)) ?? dictation_duck
         llm_model = (try? values.decode(String.self, forKey: .llm_model)) ?? llm_model
         asr_model = (try? values.decode(String.self, forKey: .asr_model)) ?? asr_model
         voice_threshold = (try? values.decode(Double.self, forKey: .voice_threshold)) ?? voice_threshold

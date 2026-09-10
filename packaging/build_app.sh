@@ -20,7 +20,7 @@ fail() { printf '\033[31mОШИБКА:\033[0m %s\n' "$1" >&2; exit 1; }
 
 command -v swiftc >/dev/null || fail "нет swiftc — поставьте Command Line Tools"
 
-SOURCES=(Configuration.swift ProcessOutput.swift Theme.swift Models.swift
+SOURCES=(Configuration.swift ProcessOutput.swift OutputVolume.swift Theme.swift Models.swift
          SpeakerMemory.swift SpeakerMemoryScreen.swift Ribbon.swift Player.swift
          Pipeline.swift SystemAudio.swift LiveCapture.swift Mixdown.swift
          Dictation.swift Chat.swift Enroll.swift Screens.swift Doctor.swift

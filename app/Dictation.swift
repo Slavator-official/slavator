@@ -56,6 +56,9 @@ final class Dictation {
     private var ticker: Timer?
     private var clock: Timer?
     private var settings = Settings.load()
+    /// Громкость до приглушения. nil — не приглушали: выключено в настройках
+    /// или устройство громкостью не управляет.
+    private var volumeBefore: Float?
 
     // MARK: жизненный цикл
 
@@ -165,6 +168,7 @@ final class Dictation {
         }
         recorder = rec
 
+        duck()
         indicator = indicator ?? Indicator()
         indicator?.show(self)
 
@@ -182,6 +186,7 @@ final class Dictation {
 
     private func end() {
         guard case .listening = state else { return }
+        unduck()
         ticker?.invalidate(); ticker = nil
         clock?.invalidate(); clock = nil
         state = .finishing
@@ -285,6 +290,27 @@ final class Dictation {
         let delta = String(target.dropFirst(typed.count))
         typer.type(delta)
         typed = target
+    }
+
+    /// Приглушить системный звук на время диктовки.
+    ///
+    /// Не до нуля: полная тишина неотличима от «звук пропал», и человек
+    /// полезет вернуть его руками — прямо посреди фразы. Пятая часть слышна,
+    /// но микрофон её почти не берёт.
+    ///
+    /// Запоминаем то, что было ровно перед нажатием: вернуть надо своё
+    /// значение, а не то, что система считает обычным.
+    private func duck() {
+        guard settings.dictation_duck, volumeBefore == nil,
+              let current = OutputVolume.read(), current > 0.05 else { return }
+        guard OutputVolume.set(current * 0.2) else { return }
+        volumeBefore = current
+    }
+
+    private func unduck() {
+        guard let before = volumeBefore else { return }
+        volumeBefore = nil
+        OutputVolume.set(before)
     }
 
     private func finish(raw: String = "") {
