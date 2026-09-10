@@ -1827,7 +1827,7 @@ extension SettingsScreen {
                     }))
             }
             SettingRow(title: "Приглушать звук на время диктовки",
-                       subtitle: "Музыка и чужая речь из динамиков попадают в микрофон вместе с вашим голосом") {
+                       subtitle: "Пока держите клавишу, музыка и видео почти умолкают; отпустили — звучат как раньше") {
                 Toggle("Приглушать звук на время диктовки", isOn: Binding(
                     get: { library.settings.dictation_duck },
                     set: { library.settings.dictation_duck = $0; library.settings.save() }))
