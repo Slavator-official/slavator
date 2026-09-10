@@ -1254,40 +1254,48 @@ private struct VoiceCard: View {
                 .fill(voice.guess != nil ? p.accentSoft : p.warnBg))
             .padding(.bottom, 12)
 
+            // Всё, что можно сделать с голосом, — под одной кнопкой.
+            // Разделение и «не определяется» стояли рядом с ней тремя
+            // равноправными действиями и на узкой карточке переносились по
+            // слогам, хотя выбирают из них раз в жизни.
             HStack(spacing: 8) {
-                Button(voice.guess.map { "Это \($0)" } ?? "Выбрать человека") { assign() }
-                    .buttonStyle(PrimaryButton())
-                if let split {
-                    // Сколько человек — говорит человек, а не подбор: подбор
-                    // на реальной записи перескакивает нужное число, ради
-                    // этого кнопка и нужна.
-                    Menu {
-                        ForEach(2...6, id: \.self) { count in
-                            Button("Разделить на \(count) " + (count < 5 ? "человека" : "человек")) {
-                                split(count)
+                Menu {
+                    Button(voice.guess.map { "Это \($0)" } ?? "Выбрать человека…") { assign() }
+                    if let split {
+                        Divider()
+                        // Сколько человек — говорит человек, а не подбор:
+                        // подбор на реальной записи перескакивает нужное
+                        // число, ради этого пункт и нужен.
+                        Menu("Здесь несколько человек") {
+                            ForEach(2...6, id: \.self) { count in
+                                Button("Разделить на \(count) " + (count < 5 ? "человека" : "человек")) {
+                                    split(count)
+                                }
                             }
                         }
-                    } label: {
-                        Label("Здесь несколько человек", systemImage: "person.2")
-                            .font(Kind.body(12))
                     }
-                    // Ширина задана числом: fixedSize() тянет за собой
-                    // _FixedSizeLayout из SwiftUICore, которого в macOS 14 нет,
-                    // и сборка такой бинарник не пропускает.
-                    .menuStyle(.borderlessButton).frame(width: 205)
-                    .foregroundStyle(p.accent2).disabled(busy)
-                    .help("Разложить реплики этого голоса по нескольким людям и заново нарезать образцы")
+                    if let dismiss {
+                        Divider()
+                        Button("Не определяется") { dismiss() }
+                    }
+                } label: {
+                    HStack(spacing: 7) {
+                        Text("Привязать").font(.system(size: 13, weight: .semibold))
+                        Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
+                    }
+                    .foregroundStyle(Color.white)
+                    .padding(.horizontal, 15).padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 9).fill(busy ? p.raised : p.accent))
+                    .contentShape(Rectangle())
                 }
-                Spacer(minLength: 0)
+                // Ширина задана числом: fixedSize() тянет за собой
+                // _FixedSizeLayout из SwiftUICore, которого в macOS 14 нет, и
+                // сборка такой бинарник не пропускает.
+                .menuStyle(.borderlessButton).menuIndicator(.hidden)
+                .frame(width: 124).disabled(busy)
+                .help("Назвать человека, разделить голос на нескольких или убрать из списка")
                 if busy { ProgressView().controlSize(.small) }
-                if let dismiss {
-                    Button(action: dismiss) {
-                        Label("Не определяется", systemImage: "person.fill.xmark")
-                            .font(Kind.body(12))
-                    }
-                    .buttonStyle(.plain).foregroundStyle(p.muted).disabled(busy)
-                    .help("Убрать из списка: имя вспомнить не удалось. Голос останется на диске, его можно вернуть.")
-                }
+                Spacer(minLength: 0)
             }
         }
         .overlay(RoundedRectangle(cornerRadius: 13)
