@@ -324,7 +324,8 @@ struct Shell: View {
                         // Чат нарисован выше, вне прокрутки. Ветка нужна
                         // только чтобы перечисление было исчерпано.
                         case .chat:      EmptyView()
-                        case .settings:  SettingsScreen(library: library, dictation: dictation)
+                        case .settings:  SettingsScreen(library: library, dictation: dictation,
+                                                        pipeline: pipeline)
                         case .person(let key): PersonScreen(library: library, player: player,
                                                             key: key, screen: $screen, memory: memory)
                         }

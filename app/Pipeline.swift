@@ -27,7 +27,7 @@ final class Pipeline {
     private static let stageWeights: [String: Double] = [
         "prepare": 0.01, "audio": 0.01, "asr": 0.60, "quality": 0.01,
         "diarization": 0.35, "identify": 0.01, "names": 0.005,
-        "transcript": 0.005, "summary": 0.90, "documents": 0.005,
+        "transcript": 0.005, "summary": 0.90, "documents": 0.005, "llm": 1.0,
     ]
     /// Порядок этапов внутри ядра: по нему из общего процента вытаскивается
     /// доля текущего этапа.
@@ -176,6 +176,30 @@ final class Pipeline {
         launch(arguments: ["-B", Paths.core.path, "--repair", "--allow-download"], library: library)
     }
 
+    /// Скачать языковую модель по имени.
+    ///
+    /// Полоса одна, «llm»: этапов здесь нет, есть проценты загрузки, которые
+    /// присылает сама Ollama.
+    func pullModel(_ name: String, library: Library) {
+        guard !isRunning else { return }
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        guard FileManager.default.fileExists(atPath: Paths.venvPython.path) else {
+            showAlert("Окружение не установлено",
+                      "Сначала завершите установку на вкладке «Главная».")
+            return
+        }
+        isRunning = true
+        percent = 0
+        startedAt = Date(); remaining = nil
+        stage = "Загрузка модели"
+        stageOrder = ["llm"]
+        stageKey = "llm"
+        detail = clean
+        log = []
+        launch(arguments: ["-B", Paths.core.path, "--pull-model", clean], library: library)
+    }
+
     /// Отнести встречу к проекту, названному человеком.
     func assign(record: Record, project: String, remember: Bool, library: Library) {
         guard !isRunning else { return }
@@ -309,12 +333,14 @@ final class Pipeline {
     /// ним завышена в разы. Пауза на диктовку тоже искажает — но честнее
     /// показать съехавшую оценку, чем убрать её на полпути.
     private func estimate() {
-        guard let startedAt, !stageOrder.isEmpty,
-              let index = Self.coreOrder.firstIndex(of: stageKey) else { remaining = nil; return }
+        guard let startedAt, !stageOrder.isEmpty else { remaining = nil; return }
         let total = stageOrder.reduce(0.0) { $0 + (Self.stageWeights[$1] ?? 0) }
         guard total > 0, let place = stageOrder.firstIndex(of: stageKey) else { remaining = nil; return }
         let passed = stageOrder.prefix(place).reduce(0.0) { $0 + (Self.stageWeights[$1] ?? 0) }
-        let inside = min(1, max(0, percent / 10 - Double(index)))
+        // Этапы разбора занимают по десятой части полосы; у загрузки модели
+        // этапов нет вовсе, и проценты Ollama — это и есть её доля.
+        let inside = Self.coreOrder.firstIndex(of: stageKey)
+            .map { min(1, max(0, percent / 10 - Double($0))) } ?? (percent / 100)
         let done = (passed + inside * (Self.stageWeights[stageKey] ?? 0)) / total
         let elapsed = Date().timeIntervalSince(startedAt)
         guard done >= 0.02, elapsed >= 20 else { remaining = nil; return }

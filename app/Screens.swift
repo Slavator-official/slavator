@@ -1437,12 +1437,18 @@ struct PersonScreen: View {
 struct SettingsScreen: View {
     @Bindable var library: Library
     var dictation: Dictation
+    var pipeline: Pipeline
     @Environment(\.palette) private var p
     /// Список моделей раскрыт. Не сохраняется: это не настройка, а состояние
     /// разговора — вернулся в настройки, значит пришёл за другим.
     @State private var modelExtras = false
 
     private var threshold: Double { library.settings.voice_threshold }
+
+    /// Готовые языковые модели: имя и вес на диске. Одна семья намеренно —
+    /// сравнивать надо скорость и качество, а не характеры разных моделей.
+    private static let models = [("qwen3:1.7b", "1,4 ГБ"), ("qwen3:4b", "2,6 ГБ"),
+                                 ("qwen3:8b", "5,2 ГБ")]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -1565,11 +1571,38 @@ struct SettingsScreen: View {
                     // жизни, а стояла она в «Оформлении» — там её никто не
                     // ищет, и рядом с темой она читалась как оформление.
                     SettingRow(title: "Модель для резюме и чата",
-                               subtitle: "Имя уже установленной модели Ollama") {
-                        TextField("qwen3:8b", text: Binding(
-                            get: { library.settings.llm_model },
-                            set: { library.settings.llm_model = $0; library.settings.save() }))
-                            .textFieldStyle(.roundedBorder).frame(width: 220)
+                               subtitle: "Имя модели Ollama. Кнопка рядом скачает её, если такой ещё нет") {
+                        HStack(spacing: 8) {
+                            // Готовые имена списком: набирать «qwen3:1.7b»
+                            // руками, чтобы узнать, что модели с таким именем
+                            // нет, — плохой способ выбрать модель полегче.
+                            Menu {
+                                ForEach(Self.models, id: \.0) { name, weight in
+                                    Button("\(name) · \(weight)") {
+                                        library.settings.llm_model = name
+                                        library.settings.save()
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "list.bullet")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(p.muted)
+                            }
+                            .menuStyle(.borderlessButton).menuIndicator(.hidden)
+                            .frame(width: 22)
+                            .help("Готовые модели: чем меньше, тем быстрее и хуже")
+                            TextField("qwen3:8b", text: Binding(
+                                get: { library.settings.llm_model },
+                                set: { library.settings.llm_model = $0; library.settings.save() }))
+                                .textFieldStyle(.roundedBorder).frame(width: 150)
+                            Button("Скачать") {
+                                pipeline.pullModel(library.settings.llm_model, library: library)
+                            }
+                            .buttonStyle(QuietButton())
+                            .disabled(pipeline.isRunning
+                                      || library.settings.llm_model.trimmingCharacters(in: .whitespaces).isEmpty)
+                            .help("Скачать эту модель через Ollama. Уже установленную не качает заново")
+                        }
                     }
                 }
             }

@@ -2136,7 +2136,7 @@ def ollama_has_model(names=None) -> bool:
     return OLLAMA_MODEL in known or (":" not in OLLAMA_MODEL and OLLAMA_MODEL + ":latest" in known)
 
 
-def ollama_pull(model: str = "") -> bool:
+def ollama_pull(model: str = "", base: float = 45.0, scale: float = 0.5) -> bool:
     """Скачать языковую модель, показывая, сколько уже пришло.
 
     Тянем по протоколу самой Ollama, а не командой «ollama pull»: так прогресс
@@ -2171,7 +2171,7 @@ def ollama_pull(model: str = "") -> bool:
                     pct = int(done * 100 / total)
                     if pct >= shown + 5:
                         shown = pct
-                        progress("llm", 45 + pct * 0.5,
+                        progress("llm", base + pct * scale,
                                  f"{pct}% из {total // (1024 * 1024)} МБ")
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         warn(f"Не удалось загрузить модель: {exc}")
@@ -3409,6 +3409,44 @@ def readiness() -> dict:
     }
 
 
+def pull_model(name: str) -> int:
+    """Скачать языковую модель по имени, подняв Ollama, если она не запущена.
+
+    Отдельная команда, а не часть --repair: там дозагружается то, чего не
+    хватает для работы, а здесь человек осознанно берёт другую модель —
+    полегче или потяжелее, — и менять ради этого настройки заранее незачем.
+    """
+    name = (name or "").strip()
+    if not name:
+        log("ОШИБКА: не указано имя модели")
+        return 2
+    if OLLAMA_HOST.rstrip("/") != "http://127.0.0.1:11434":
+        log("ОШИБКА: загрузка доступна только для локальной Ollama")
+        log(f"  Сейчас указана {OLLAMA_HOST}")
+        return 2
+
+    progress("llm", 5, name)
+    if not ollama_running():
+        log("Запускаю Ollama")
+        if not ollama_serve():
+            log("")
+            log("ОШИБКА: Ollama не запустилась")
+            log("  Установите Ollama или запустите её вручную: ollama serve")
+            return 1
+    if name in ollama_models():
+        log(f"Модель {name} уже установлена.")
+        progress("llm", 100, "готово")
+        return 0
+    if not ollama_pull(name, base=5.0, scale=0.94):
+        log("")
+        log(f"ОШИБКА: не удалось скачать {name}")
+        log("  Проверьте имя модели и связь с интернетом.")
+        return 1
+    progress("llm", 100, "готово")
+    log(f"Модель {name} установлена.")
+    return 0
+
+
 def repair(allow_download: bool = False) -> int:
     """Дозагрузить недостающее и поднять то, что не запущено."""
     if OLLAMA_HOST.rstrip("/") != "http://127.0.0.1:11434":
@@ -3524,6 +3562,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true",
                         help="с --check: выдать отчёт о готовности машинно")
     parser.add_argument("--allow-download", action="store_true", help="явно разрешить загрузки при --repair")
+    parser.add_argument("--pull-model", default="", metavar="ИМЯ",
+                        help="скачать языковую модель Ollama по имени")
     parser.add_argument("--repair", action="store_true",
                         help="дозагрузить недостающее и запустить Ollama")
     parser.add_argument("--enroll", metavar="ИМЯ",
@@ -3550,6 +3590,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     log(f"Meeting Transcriber v{APP_VERSION}")
+
+    if args.pull_model:
+        return pull_model(args.pull_model)
 
     if args.repair:
         return repair(allow_download=args.allow_download)
