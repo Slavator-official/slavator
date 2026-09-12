@@ -144,7 +144,10 @@ final class Chat {
     private func stream(history: [[String: String]], token: UUID, conversationID: UUID, localOnly: Bool) async {
         let env = AppConfiguration.environment()
         let host = localOnly ? "http://127.0.0.1:11434" : (env["MEETING_TRANSCRIBER_OLLAMA_HOST"] ?? "http://127.0.0.1:11434")
-        let model = env["MEETING_TRANSCRIBER_LLM"] ?? Settings().llm_model
+        // Не `Settings()`: там умолчание контракта, а оно тяжелее того, что
+        // советуют настройки этой машине, — чат просил бы у Ollama модель,
+        // которой на ней нет.
+        let model = env["MEETING_TRANSCRIBER_LLM"] ?? Settings.load().llm_model
 
         guard let url = URL(string: "\(host)/api/chat") else {
             await finish(error: "Неверный адрес модели", token: token, conversationID: conversationID); return

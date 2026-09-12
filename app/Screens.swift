@@ -1439,16 +1439,17 @@ struct SettingsScreen: View {
     var dictation: Dictation
     var pipeline: Pipeline
     @Environment(\.palette) private var p
-    /// Список моделей раскрыт. Не сохраняется: это не настройка, а состояние
-    /// разговора — вернулся в настройки, значит пришёл за другим.
+    /// Дополнительные настройки раскрыты. Не сохраняется: это не настройка,
+    /// а состояние разговора — вернулся в настройки, значит пришёл за другим.
     @State private var modelExtras = false
 
-    private var threshold: Double { library.settings.voice_threshold }
+    /// Что уже скачано. Считается при открытии настроек и после каждой
+    /// загрузки: строка «скачана» врёт хуже, чем её отсутствие.
+    /// У языковых `nil` — Ollama не ответила, это отдельный разговор.
+    @State private var installedASR: Set<String> = []
+    @State private var installedLLM: Set<String>? = nil
 
-    /// Готовые языковые модели: имя и вес на диске. Одна семья намеренно —
-    /// сравнивать надо скорость и качество, а не характеры разных моделей.
-    private static let models = [("qwen3:1.7b", "1,4 ГБ"), ("qwen3:4b", "2,6 ГБ"),
-                                 ("qwen3:8b", "5,2 ГБ")]
+    private var threshold: Double { library.settings.voice_threshold }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -1492,35 +1493,27 @@ struct SettingsScreen: View {
 
             Card {
                 Text("Распознавание речи").font(Kind.head(16)).padding(.bottom, 12)
-                SettingRow(title: "Что важнее",
-                           subtitle: library.settings.asr_model == "large-v3-turbo"
-                               ? "Быстрее: примерно столько же, сколько длится запись. Хуже с именами, терминами и латиницей"
-                               : "Точнее: считает примерно вдвое дольше самой записи") {
-                    Segmented(options: [("large-v3", "Точнее"), ("large-v3-turbo", "Быстрее")],
-                              selection: Binding(
+                // Выборов было два: переключатель «что важнее» на виду и
+                // список «другая модель» под кнопкой. Поле у них одно, спорить
+                // не о чем — а человек ни по одному из них не видел ни того,
+                // что уже скачано, ни того, что потянет его машина. Теперь
+                // выбор один и в нём всё это написано.
+                ModelPicker(options: ModelCatalog.asr,
+                            installed: installedASR,
+                            recommended: ModelCatalog.recommendedASR(),
+                            selection: Binding(
                                 get: { library.settings.asr_model },
                                 set: { library.settings.asr_model = $0; library.settings.save() }))
-                        .frame(width: 200)
-                }
-                if library.settings.asr_model == "large-v3-turbo" {
-                    Text("При первом запуске быстрая модель скачается — около 1,5 ГБ.")
-                        .font(Kind.body(12)).foregroundStyle(p.muted)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.top, 6)
-                }
-                Divider().overlay(p.line2)
-                // Двух ступеней хватает на каждый день, но на слабой машине
-                // большая модель не поедет вовсе — для таких случаев список.
-                // Обе настройки пишут в одно поле: разными они разъехались бы.
-                //
-                // Список убран под кнопку: на виду он спорит с переключателем
-                // за один и тот же выбор, и с двух шагов легко съехать на
-                // слабую модель, не поняв, что это была она.
+                Text("Ненайденная модель скачается сама перед первой встречей. Старые расшифровки не меняются: выбор применяется к следующей. Для GigaAM настройка Whisper не используется.")
+                    .font(Kind.body(12)).foregroundStyle(p.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 10)
+                Divider().overlay(p.line2).padding(.top, 6)
                 Button {
                     withAnimation(.easeOut(duration: 0.16)) { modelExtras.toggle() }
                 } label: {
                     HStack(spacing: 6) {
-                        Text("Доп. настройки модели").font(Kind.body(14))
+                        Text("Дополнительно").font(Kind.body(14))
                         Image(systemName: "chevron.right")
                             .font(.system(size: 11, weight: .semibold))
                             .rotationEffect(.degrees(modelExtras ? 90 : 0))
@@ -1532,20 +1525,6 @@ struct SettingsScreen: View {
                 }
                 .buttonStyle(.plain)
                 if modelExtras {
-                    SettingRow(title: "Другая модель",
-                               subtitle: "Для 8 ГБ памяти: small, CPU / int8. Без видеокарты NVIDIA") {
-                        Menu(library.settings.asr_model) {
-                            ForEach(["base", "small", "large-v3-turbo", "large-v3"], id: \.self) { model in
-                                Button(model == "small" ? "small · для 8 ГБ" : model) {
-                                    library.settings.asr_model = model; library.settings.save()
-                                }
-                            }
-                        }.frame(width: 220)
-                    }
-                    Text("Модель должна быть заранее установлена. Старые расшифровки не меняются; выбор применяется к следующей встрече. Для GigaAM настройка Whisper не используется.")
-                        .font(Kind.body(12)).foregroundStyle(p.muted)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Divider().overlay(p.line2)
                     // Единственно верного порога нет: у одного человека
                     // близость голоса лежит в 0,83–0,98, у разных доходит до
                     // 0,91 — зоны перекрываются, и где резать, зависит от
@@ -1566,44 +1545,33 @@ struct SettingsScreen: View {
                                 .font(Kind.mono(13)).frame(width: 38, alignment: .trailing)
                         }
                     }
-                    Divider().overlay(p.line2)
-                    // Языковая модель тоже «доп. настройка»: её меняют раз в
-                    // жизни, а стояла она в «Оформлении» — там её никто не
-                    // ищет, и рядом с темой она читалась как оформление.
-                    SettingRow(title: "Модель для резюме и чата",
-                               subtitle: "Имя модели Ollama. Кнопка рядом скачает её, если такой ещё нет") {
-                        HStack(spacing: 8) {
-                            // Готовые имена списком: набирать «qwen3:1.7b»
-                            // руками, чтобы узнать, что модели с таким именем
-                            // нет, — плохой способ выбрать модель полегче.
-                            Menu {
-                                ForEach(Self.models, id: \.0) { name, weight in
-                                    Button("\(name) · \(weight)") {
-                                        library.settings.llm_model = name
-                                        library.settings.save()
-                                    }
-                                }
-                            } label: {
-                                Image(systemName: "list.bullet")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(p.muted)
-                            }
-                            .menuStyle(.borderlessButton).menuIndicator(.hidden)
-                            .frame(width: 22)
-                            .help("Готовые модели: чем меньше, тем быстрее и хуже")
-                            TextField("qwen3:8b", text: Binding(
+                }
+            }
+
+            // Языковая модель — своя карточка, а не строка под кнопкой в
+            // распознавании речи: это другая работа и другая загрузка, и
+            // рядом с моделью распознавания её каждый раз принимали за неё же.
+            Card {
+                Text("Резюме и чат").font(Kind.head(16))
+                Text("Языковая модель Ollama: пишет резюме встречи, находит решения и отвечает в чате")
+                    .font(Kind.body(12.5)).foregroundStyle(p.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 3).padding(.bottom, 12)
+                ModelPicker(options: ModelCatalog.llm,
+                            installed: installedLLM ?? [],
+                            recommended: ModelCatalog.recommendedLLM(),
+                            download: { pipeline.pullModel($0, library: library) },
+                            busy: pipeline.isRunning,
+                            selection: Binding(
                                 get: { library.settings.llm_model },
                                 set: { library.settings.llm_model = $0; library.settings.save() }))
-                                .textFieldStyle(.roundedBorder).frame(width: 150)
-                            Button("Скачать") {
-                                pipeline.pullModel(library.settings.llm_model, library: library)
-                            }
-                            .buttonStyle(QuietButton())
-                            .disabled(pipeline.isRunning
-                                      || library.settings.llm_model.trimmingCharacters(in: .whitespaces).isEmpty)
-                            .help("Скачать эту модель через Ollama. Уже установленную не качает заново")
-                        }
-                    }
+                if installedLLM == nil {
+                    // «Ничего не установлено» и «некому ответить» — разные
+                    // вещи: во втором случае кнопка «Скачать» тоже не сработает.
+                    Text("Ollama не отвечает, поэтому не видно, что установлено. Она ставится вместе со Славатором и должна быть запущена.")
+                        .font(Kind.body(12)).foregroundStyle(p.warn)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 10)
                 }
             }
 
@@ -1709,6 +1677,20 @@ struct SettingsScreen: View {
                 }
             }
         }
+        .task { await refreshInstalled() }
+        // Загрузка кончилась — модель либо приехала, либо нет. Пересчитываем:
+        // иначе только что скачанная так и стоит в списке ненайденной.
+        .onChange(of: pipeline.isRunning) { _, running in
+            if !running { Task { await refreshInstalled() } }
+        }
+    }
+
+    /// Спросить диск и Ollama, что из списка уже стоит.
+    private func refreshInstalled() async {
+        let cached = await Task.detached(priority: .utility) { ModelCatalog.installedASR() }.value
+        let ollama = await ModelCatalog.installedLLM()
+        installedASR = cached
+        installedLLM = ollama
     }
 
     /// Сколько проектов в списке. Считаем по файлу: его правят руками, и
@@ -1972,6 +1954,115 @@ private struct HotkeyField: View {
         let chosen = HotCombo.tokens(fromKeyCodes: pressed)
         Dictation.logHotkey("записано: \(chosen.isEmpty ? "ничего" : chosen)")
         if !chosen.isEmpty { combo = chosen }
+    }
+}
+
+/// Выбор модели списком.
+///
+/// Переключателем такое не показать: у каждой строки своё состояние — скачана
+/// она или нет, сколько качать и какую мы советуем этой машине. Ровно об этом
+/// человек и спрашивает, открывая настройки моделей, а имя модели он набирать
+/// не должен: набранного руками «qwen3:1.7b» с опечаткой не существует, и
+/// узнаётся это уже посреди встречи.
+private struct ModelPicker: View {
+    @Environment(\.palette) private var p
+    let options: [ModelCatalog.Choice]
+    let installed: Set<String>
+    let recommended: String
+    /// Есть — рядом с ненайденной моделью появляется кнопка. Нет — модель
+    /// приезжает сама, и кнопка соврала бы, что без неё не обойтись.
+    var download: ((String) -> Void)? = nil
+    var busy = false
+    @Binding var selection: String
+
+    var body: some View {
+        VStack(spacing: 6) { ForEach(rows) { row($0) } }
+    }
+
+    /// Выбранное имя, которого нет в списке: его вписали в config.env или
+    /// оставила прежняя версия. Показать его надо — иначе список выглядит
+    /// так, будто не выбрано ничего.
+    private var rows: [ModelCatalog.Choice] {
+        guard !selection.isEmpty, !options.contains(where: { $0.name == selection })
+        else { return options }
+        return options + [ModelCatalog.Choice(name: selection, title: "Своя модель",
+                                              note: "Задана вручную — в config.env или прежней версией",
+                                              weight: "")]
+    }
+
+    /// Строка — кнопка, а не картинка с нажатием: иначе на неё не попасть ни
+    /// клавишей, ни голосом, и весь выбор модели остаётся только для мыши.
+    ///
+    /// «Скачать» стоит рядом с кнопкой строки, а не внутри неё: вложенная
+    /// кнопка спорит за тот же щелчок, и какая из двух его получит — вопрос
+    /// без надёжного ответа.
+    private func row(_ option: ModelCatalog.Choice) -> some View {
+        let chosen = option.name == selection
+        let pull = download != nil && !installed.contains(option.name) && !option.weight.isEmpty
+        return HStack(spacing: 12) {
+            Button {
+                selection = option.name
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: chosen ? "largecircle.fill.circle" : "circle")
+                        .font(.system(size: 15))
+                        .foregroundStyle(chosen ? p.accent : p.line)
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 7) {
+                            Text(option.title).font(Kind.strong(13.5))
+                            Text(option.name).font(Kind.mono(11.5)).foregroundStyle(p.faint)
+                            if option.name == recommended {
+                                Pill(text: "рекомендуем", fg: p.accent2, bg: p.accentSoft)
+                            }
+                        }
+                        Text(option.note).font(Kind.body(12.5)).foregroundStyle(p.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 8)
+                    if !pull { state(option) }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityAddTraits(chosen ? [.isButton, .isSelected] : .isButton)
+            .accessibilityLabel("\(option.title), \(option.name)")
+            .accessibilityValue(installed.contains(option.name) ? "скачана"
+                                : option.weight.isEmpty ? "" : "не скачана, \(option.weight)")
+            if pull { state(option) }
+        }
+        .padding(.horizontal, 13).padding(.vertical, 10)
+        .background(chosen ? p.accentSoft : p.row)
+        .overlay(RoundedRectangle(cornerRadius: 10)
+            .stroke(chosen ? p.accent : p.line2, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    @ViewBuilder
+    private func state(_ option: ModelCatalog.Choice) -> some View {
+        if installed.contains(option.name) {
+            HStack(spacing: 5) {
+                Image(systemName: "checkmark.circle.fill").font(.system(size: 12))
+                Text("скачана").font(Kind.body(12.5))
+            }
+            .foregroundStyle(p.ok)
+        } else if option.weight.isEmpty {
+            EmptyView()
+        } else if let download {
+            HStack(spacing: 9) {
+                Text(option.weight).font(Kind.body(12.5)).foregroundStyle(p.muted)
+                Button("Скачать") { download(option.name) }
+                    .buttonStyle(QuietButton())
+                    .disabled(busy)
+                    .help("Скачать через Ollama. Уже установленную не качает заново")
+            }
+        } else {
+            HStack(spacing: 5) {
+                Image(systemName: "arrow.down.circle").font(.system(size: 12))
+                Text(option.weight).font(Kind.body(12.5))
+            }
+            .foregroundStyle(p.muted)
+            .help("Ещё не скачана — приедет сама перед первой встречей")
+        }
     }
 }
 

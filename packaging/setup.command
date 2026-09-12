@@ -13,7 +13,14 @@ SUPPORT="$HOME/Library/Application Support/Славатор"
 VENV="$SUPPORT/env"
 UV="$HOME/.local/bin/uv"
 PYTHON_VERSION="3.12"
-DEFAULT_LLM="qwen3:8b"
+# Языковая модель по памяти машины. Те же ступени, что в приложении
+# (ModelCatalog.recommendedLLM в app/Configuration.swift): иначе установщик
+# скачает пять гигабайт, а окно настроек первым делом посоветует другое.
+MEM_GB=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 17179869184) / 1073741824 ))
+if   (( MEM_GB < 10 )); then DEFAULT_LLM="qwen3:1.7b"; DEFAULT_LLM_SIZE="1,4 ГБ"
+elif (( MEM_GB < 18 )); then DEFAULT_LLM="qwen3:4b";   DEFAULT_LLM_SIZE="2,6 ГБ"
+else                         DEFAULT_LLM="qwen3:8b";   DEFAULT_LLM_SIZE="5,2 ГБ"
+fi
 
 B=$'\033[1m'; DIM=$'\033[2m'; GREEN=$'\033[32m'; RED=$'\033[31m'; Y=$'\033[33m'; N=$'\033[0m'
 
@@ -218,13 +225,19 @@ if curl -fsS --max-time 4 http://127.0.0.1:11434/api/version >/dev/null 2>&1; th
     if ! curl -fsS --max-time 5 http://127.0.0.1:11434/api/tags 2>/dev/null \
          | grep -q "\"name\":\"${DEFAULT_LLM}\""; then
         if [[ -d "$PAYLOAD/ollama-models" ]]; then
-            printf '    Переношу модель %s из комплекта (5 ГБ, пара минут)...\n' "$DEFAULT_LLM"
+            printf '    Переношу модели из комплекта (пара минут)...\n'
             mkdir -p "$HOME/.ollama/models"
             cp -R "$PAYLOAD/ollama-models/"* "$HOME/.ollama/models/" \
-                && ok "модель $DEFAULT_LLM на месте" \
                 || warn "не удалось перенести модель"
+        fi
+        # Из комплекта приезжает то, что в него положили, а нужна модель по
+        # памяти этой машины. Поэтому переспрашиваем и при промахе качаем.
+        if curl -fsS --max-time 5 http://127.0.0.1:11434/api/tags 2>/dev/null \
+           | grep -q "\"name\":\"${DEFAULT_LLM}\""; then
+            ok "модель $DEFAULT_LLM на месте"
         else
-            printf '    Скачиваю языковую модель %s (около 5 ГБ)...\n' "$DEFAULT_LLM"
+            printf '    Скачиваю языковую модель %s (%s, памяти на этой машине %s ГБ)...\n' \
+                "$DEFAULT_LLM" "$DEFAULT_LLM_SIZE" "$MEM_GB"
             if "${OLLAMA_BIN:-ollama}" pull "$DEFAULT_LLM"; then
                 ok "модель $DEFAULT_LLM установлена"
             else

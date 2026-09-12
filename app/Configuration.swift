@@ -46,12 +46,26 @@ enum AppConfiguration {
         return result
     }
 
+    /// То, что написали явно: config.env установщика и переменные запуска.
+    /// Без наших умолчаний — по общему окружению не понять, выбирал ли
+    /// кто-нибудь модель или это мы её подставили.
+    static var declaredEnv: [String: String] {
+        var env: [String: String] = [:]
+        if let text = try? String(contentsOf: support.appendingPathComponent("config.env"), encoding: .utf8) {
+            env = readEnv(text)
+        }
+        env.merge(ProcessInfo.processInfo.environment) { _, new in new }
+        return env
+    }
+
     static func environment(settings: Settings? = nil) -> [String: String] {
         let data = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("whisper-work")
         var env = ["MEETING_TRANSCRIBER_APP_SUPPORT": support.path,
                    "MEETING_TRANSCRIBER_PROFILES": data.appendingPathComponent("speaker_profiles").path,
                    "MEETING_TRANSCRIBER_MODELS": data.appendingPathComponent("models").path,
-                   "MEETING_TRANSCRIBER_WHISPER_MODEL": DesktopContract.defaults["asr_model"] as? String ?? "small",
+                   // Пока своих настроек нет, модель выбирает память машины,
+                   // а не умолчание контракта: на 8 ГБ большая не поедет.
+                   "MEETING_TRANSCRIBER_WHISPER_MODEL": ModelCatalog.recommendedASR(),
                    "MEETING_TRANSCRIBER_GLOSSARY": data.appendingPathComponent("glossary.txt").path]
         if let text = try? String(contentsOf: support.appendingPathComponent("config.env"), encoding: .utf8) {
             env.merge(readEnv(text)) { _, new in new }
@@ -82,6 +96,149 @@ enum AppConfiguration {
         env["PYTHONUTF8"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
         return env
+    }
+}
+
+// MARK: - Модели и память машины
+
+/// Какие модели бывают, сколько их качать и что потянет этот компьютер.
+///
+/// Раньше это была строка подстрочником: «для 8 ГБ памяти — small». Её
+/// читают уже после того, как выбрали, и делить свою память на гигабайты
+/// человек должен был сам. Теперь считаем мы: первый запуск берёт подходящую
+/// модель, а дальше она просто помечена в списке. Выбор остаётся за
+/// человеком — мы только говорим, с чем эта машина справится.
+enum ModelCatalog {
+    /// Строка списка: системное имя, человеческое название, чем отличается
+    /// и сколько весит на диске.
+    struct Choice: Identifiable {
+        let name: String
+        let title: String
+        let note: String
+        let weight: String
+        var id: String { name }
+    }
+
+    /// Распознавание речи. Порядок — от лучшей к самой лёгкой: выбирают
+    /// сверху вниз, пока машина тянет.
+    static let asr: [Choice] = [
+        Choice(name: "large-v3", title: "Точнее",
+               note: "Считает примерно вдвое дольше самой записи",
+               weight: "2,9 ГБ"),
+        Choice(name: "large-v3-turbo", title: "Быстрее",
+               note: "Считает примерно столько же, сколько длится запись. Хуже с именами, терминами и латиницей",
+               weight: "1,5 ГБ"),
+        Choice(name: "small", title: "Для слабой машины",
+               note: "Идёт на 8 ГБ памяти и без видеокарты. Ошибается заметно чаще",
+               weight: "464 МБ"),
+        Choice(name: "base", title: "Самая лёгкая",
+               note: "Годится проверить, что всё работает, но не расшифровать встречу",
+               weight: "145 МБ"),
+    ]
+
+    /// Языковые модели: резюме встречи и чат. Семья одна намеренно —
+    /// сравнивать надо скорость и качество, а не характеры разных моделей.
+    static let llm: [Choice] = [
+        Choice(name: "qwen3:8b", title: "Полная",
+               note: "Лучше формулирует и меньше выдумывает",
+               weight: "5,2 ГБ"),
+        Choice(name: "qwen3:4b", title: "Средняя",
+               note: "Резюме проще, зато вдвое быстрее",
+               weight: "2,6 ГБ"),
+        Choice(name: "qwen3:1.7b", title: "Лёгкая",
+               note: "Для 8 ГБ памяти. Отвечает быстро, но путается в длинных встречах",
+               weight: "1,4 ГБ"),
+    ]
+
+    /// Сколько оперативной памяти у машины, в гигабайтах.
+    static var memoryGB: Int { Int(ProcessInfo.processInfo.physicalMemory / 1_073_741_824) }
+
+    /// Ступени совпадают с тем, что Apple ставит в маки: 8, 16, 18 и выше.
+    /// Модель распознавания держит веса в памяти целиком, и на восьми
+    /// гигабайтах большая уводит систему в своп — тогда расшифровка идёт
+    /// часами вместо минут.
+    static func recommendedASR(memoryGB: Int = memoryGB) -> String {
+        if memoryGB < 10 { return "small" }
+        if memoryGB < 18 { return "large-v3-turbo" }
+        return "large-v3"
+    }
+
+    /// То же для языковой модели: она поднимается после распознавания, но
+    /// делит память с самим приложением и Ollama.
+    static func recommendedLLM(memoryGB: Int = memoryGB) -> String {
+        if memoryGB < 10 { return "qwen3:1.7b" }
+        if memoryGB < 18 { return "qwen3:4b" }
+        return "qwen3:8b"
+    }
+
+    /// Какие модели распознавания уже лежат в кэше huggingface.
+    ///
+    /// Кэш смотрим сами, а не спрашиваем ядро: ядро отвечает про одну
+    /// выбранную модель и поднимается несколько секунд, а список должен
+    /// открываться сразу.
+    static func installedASR() -> Set<String> {
+        let fm = FileManager.default
+        let env = AppConfiguration.environment()
+        let hub: URL = {
+            if let path = env["HF_HUB_CACHE"], !path.isEmpty {
+                return URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+            }
+            if let path = env["HF_HOME"], !path.isEmpty {
+                return URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+                    .appendingPathComponent("hub")
+            }
+            return fm.homeDirectoryForCurrentUser.appendingPathComponent(".cache/huggingface/hub")
+        }()
+        let folders = (try? fm.contentsOfDirectory(atPath: hub.path)) ?? []
+        var found: Set<String> = []
+        for choice in asr {
+            // Одну и ту же модель выкладывают разные издатели: turbo лежит у
+            // mobiuslabs и deepdml, остальные у Systran. Сверяем хвост имени,
+            // а не издателя, иначе чужая раскладка читается как «нет модели».
+            let tail = "faster-whisper-\(choice.name)"
+            guard let folder = folders.first(where: { $0.hasPrefix("models--") && $0.hasSuffix(tail) })
+            else { continue }
+            if hasWeights(hub.appendingPathComponent(folder).appendingPathComponent("snapshots")) {
+                found.insert(choice.name)
+            }
+        }
+        return found
+    }
+
+    /// Веса на месте, а не половина скачанного: у прерванной загрузки папка
+    /// уже есть, а model.bin в ней ещё нет.
+    private static func hasWeights(_ snapshots: URL) -> Bool {
+        let fm = FileManager.default
+        let items = (try? fm.contentsOfDirectory(at: snapshots, includingPropertiesForKeys: nil)) ?? []
+        for snapshot in items {
+            // В кэше это ссылка на blobs — читаем по разрешённому пути.
+            let bin = snapshot.appendingPathComponent("model.bin").resolvingSymlinksInPath()
+            if let size = (try? fm.attributesOfItem(atPath: bin.path))?[.size] as? Int, size > 0 {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Какие языковые модели установлены. `nil` — Ollama не ответила: это не
+    /// то же самое, что «ничего не установлено», и говорить об этом надо
+    /// по-разному.
+    static func installedLLM() async -> Set<String>? {
+        let host = AppConfiguration.environment()["MEETING_TRANSCRIBER_OLLAMA_HOST"]
+            ?? "http://127.0.0.1:11434"
+        guard let url = URL(string: "\(host)/api/tags") else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 3
+        let config = URLSessionConfiguration.ephemeral
+        config.connectionProxyDictionary = [:]   // локальная Ollama мимо прокси
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        guard let (data, response) = try? await session.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let items = raw["models"] as? [[String: Any]]
+        else { return nil }
+        return Set(items.compactMap { $0["name"] as? String })
     }
 }
 
@@ -189,8 +346,14 @@ struct Settings: Codable {
                 hasSavedASR = true
             }
         }
-        if !hasSavedModel, let model = AppConfiguration.environment()["MEETING_TRANSCRIBER_LLM"], !model.isEmpty {
-            settings.llm_model = model
+        if !hasSavedModel {
+            // Явно названная модель важнее нашего совета: её вписали руками
+            // или скачал установщик, и подменять её молча нельзя.
+            if let model = AppConfiguration.declaredEnv["MEETING_TRANSCRIBER_LLM"], !model.isEmpty {
+                settings.llm_model = model
+            } else {
+                settings.llm_model = ModelCatalog.recommendedLLM()
+            }
         }
         // Настройки, записанные до слияния веток, знают не имя модели, а две
         // ступени: «точнее» и «быстрее». Без переноса человек молча съезжает
@@ -201,8 +364,13 @@ struct Settings: Codable {
             settings.asr_model = speed == "fast" ? "large-v3-turbo" : "large-v3"
             hasSavedASR = true
         }
-        if !hasSavedASR, let model = AppConfiguration.environment()["MEETING_TRANSCRIBER_WHISPER_MODEL"], !model.isEmpty {
-            settings.asr_model = model
+        // Первый запуск: модель распознавания выбирается по памяти машины.
+        if !hasSavedASR {
+            if let model = AppConfiguration.declaredEnv["MEETING_TRANSCRIBER_WHISPER_MODEL"], !model.isEmpty {
+                settings.asr_model = model
+            } else {
+                settings.asr_model = ModelCatalog.recommendedASR()
+            }
         }
         return settings
     }

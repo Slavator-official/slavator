@@ -20,6 +20,30 @@ struct RuntimeChecks {
         precondition((stored["future"] as? [String: Int])?["value"] == 42)
         print("PASS: старые настройки, повреждённое поле, сохранение неизвестных полей")
 
+        // Ступени памяти: 8 ГБ — слабая машина, 16 — середина, 18 и выше —
+        // полная модель. Раньше это был подстрочник, и делить свою память на
+        // гигабайты человек должен был сам.
+        precondition(ModelCatalog.recommendedASR(memoryGB: 8) == "small")
+        precondition(ModelCatalog.recommendedASR(memoryGB: 16) == "large-v3-turbo")
+        precondition(ModelCatalog.recommendedASR(memoryGB: 36) == "large-v3")
+        precondition(ModelCatalog.recommendedLLM(memoryGB: 8) == "qwen3:1.7b")
+        precondition(ModelCatalog.recommendedLLM(memoryGB: 16) == "qwen3:4b")
+        precondition(ModelCatalog.recommendedLLM(memoryGB: 64) == "qwen3:8b")
+        let firstRun = root.appendingPathComponent("first-run")
+        try fm.createDirectory(at: firstRun, withIntermediateDirectories: true)
+        setenv("MEETING_TRANSCRIBER_APP_SUPPORT", firstRun.path, 1)
+        let advised = Settings.load()
+        precondition(advised.asr_model == ModelCatalog.recommendedASR())
+        precondition(advised.llm_model == ModelCatalog.recommendedLLM())
+        // Названное в config.env важнее совета: эти модели уже скачаны
+        // установщиком, и молча подменять их нельзя.
+        try "MEETING_TRANSCRIBER_WHISPER_MODEL=base\nMEETING_TRANSCRIBER_LLM=qwen3:8b\n"
+            .write(to: firstRun.appendingPathComponent("config.env"), atomically: true, encoding: .utf8)
+        let declared = Settings.load()
+        precondition(declared.asr_model == "base" && declared.llm_model == "qwen3:8b")
+        setenv("MEETING_TRANSCRIBER_APP_SUPPORT", root.path, 1)
+        print("PASS: модель по памяти машины, config.env важнее совета")
+
         let env = AppConfiguration.readEnv("\u{FEFF}# header\nKEY = \"C:\\Мои файлы\\a=b\"\nSINGLE='value'\n")
         precondition(env["KEY"] == "C:\\Мои файлы\\a=b" && env["SINGLE"] == "value")
         precondition(DesktopContract.theme("dark")["bg"] as? String == "0D1420")
