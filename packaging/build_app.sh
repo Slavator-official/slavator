@@ -137,3 +137,46 @@ else
 fi
 
 say "Готово: $APP ($(du -sh "$APP" | cut -f1))"
+
+# Свежая сборка заменяет установленную копию.
+#
+# Без этого шага собранное лежало в dist, а человек запускал старое из
+# /Applications и не видел ни одной правки: три сборки подряд «прошли
+# успешно», а программа на экране оставалась позавчерашней.
+#
+# Работающий экземпляр перед заменой закрывается — подменить бандл под
+# запущенным процессом значит получить наполовину старое приложение, — и
+# поднимается снова, если он работал. Путь и подпись те же, поэтому
+# выданные разрешения на микрофон и системный звук остаются.
+#
+# SLAVATOR_NO_INSTALL=1 — собрать, не трогая установленное.
+INSTALLED="/Applications/$(basename "$APP")"
+if [[ -n "${SLAVATOR_NO_INSTALL:-}" ]]; then
+    say "Установка пропущена: SLAVATOR_NO_INSTALL"
+elif [[ ! -w /Applications ]]; then
+    say "Нет прав на запись в /Applications — установите вручную"
+else
+    # Ищем по имени исполняемого файла, а не по пути: имя бандла — кириллица,
+    # и pgrep -f по такому пути не находит ничего (проверено: процесс есть,
+    # а поиск пуст), из-за чего замена шла под работающим приложением.
+    RUNNING=""
+    pgrep -x slavator >/dev/null && RUNNING="да"
+    if [[ -n "$RUNNING" ]]; then
+        say "Закрываю работающий Славатор"
+        osascript -e 'quit app "Славатор"' 2>/dev/null || true
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            pgrep -x slavator >/dev/null || break
+            sleep 0.5
+        done
+        pkill -x slavator 2>/dev/null || true
+        sleep 0.5
+    fi
+    say "Ставлю в /Applications"
+    rm -rf "$INSTALLED"
+    ditto "$APP" "$INSTALLED" || fail "не удалось поставить в /Applications"
+    codesign -v "$INSTALLED" 2>/dev/null || say "внимание: подпись установленной копии не проверяется"
+    if [[ -n "$RUNNING" ]]; then
+        say "Запускаю заново"
+        open "$INSTALLED"
+    fi
+fi
