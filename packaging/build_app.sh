@@ -79,13 +79,33 @@ say "Собираю иконку"
 ICONSET="$DIST/AppIcon.iconset"
 rm -rf "$ICONSET"; mkdir -p "$ICONSET"
 MASTER="$ROOT/icon_master.png"
+
+# Иконка сборки из рабочего дерева красится в свой цвет.
+#
+# Рабочих копий репозитория на машине несколько — по одной на ветку, — и
+# каждая складывает свой бандл. Раньше все они выглядели одинаково: в
+# Spotlight и Launchpad висело несколько «Славаторов», различить которые
+# можно было только по дате файла. Теперь цвет иконки — это ветка.
+#
+# Основная копия остаётся с исходной иконкой: она и есть настоящий
+# Славатор, каким его видит человек, поставивший программу.
+TINTS=("FF6FB5:0.45:розовый" "30D5C8:0.45:бирюзовый" "FFB020:0.40:янтарный"
+       "A06CFF:0.45:сиреневый" "C8CEDA:0.55:бледный")
+if [[ "$(git -C "$PROJECT" rev-parse --git-dir 2>/dev/null || true)" == */worktrees/* ]]; then
+    COPY="$(basename "$PROJECT")"
+    INDEX=$(( $(printf '%s' "$COPY" | cksum | cut -d' ' -f1) % ${#TINTS[@]} ))
+    SPEC="${TINTS[$INDEX]}"
+    say "Рабочая копия «$COPY» — иконка ${SPEC##*:}"
+    /usr/bin/python3 "$ROOT/make_icon.py" --tint "${SPEC%:*}" "$MASTER" "$DIST/icon_tinted.png"
+    MASTER="$DIST/icon_tinted.png"
+fi
 for spec in "16:icon_16x16" "32:icon_16x16@2x" "32:icon_32x32" "64:icon_32x32@2x" \
             "128:icon_128x128" "256:icon_128x128@2x" "256:icon_256x256" \
             "512:icon_256x256@2x" "512:icon_512x512" "1024:icon_512x512@2x"; do
     sips -z "${spec%%:*}" "${spec%%:*}" "$MASTER" --out "$ICONSET/${spec##*:}.png" >/dev/null
 done
 iconutil -c icns "$ICONSET" -o "$RESOURCES/AppIcon.icns"
-rm -rf "$ICONSET"
+rm -rf "$ICONSET" "$DIST/icon_tinted.png"
 cp "$CORE/app_icon.png" "$RESOURCES/app_icon.png"
 
 say "Копирую ядро обработки"
