@@ -52,6 +52,19 @@ final class Dictation {
     private var pending = false
     /// Клавишу отпустили, пока предыдущий запрос не вернулся.
     private var finalPending = false
+    /// Куда диктуют: приложение, активное в момент нажатия клавиши.
+    ///
+    /// Нужно потому, что печать происходит не в момент речи, а через
+    /// секунды — когда вернётся расшифровка. Если за это время фокус ушёл
+    /// (всплыло чужое окно, пришло уведомление), синтезированные нажатия
+    /// уходят новому активному приложению: человек диктовал в браузер, а
+    /// текст оказался в чужом чате. Замерено на живом прогоне — старт в
+    /// Chrome, печать в Claude.
+    private var owner: NSRunningApplication?
+    /// Расшифровка, которая ждёт возврата фокуса.
+    private var outbox = ""
+    /// Возврат фокуса уже запрошен — второй раз не просим.
+    private var restoring = false
     private var watchdog: Timer?
     private var ticker: Timer?
     private var clock: Timer?
@@ -169,6 +182,10 @@ final class Dictation {
         recorder = rec
 
         duck()
+        owner = NSWorkspace.shared.frontmostApplication
+        outbox = ""
+        restoring = false
+        Dictation.logHotkey("старт диктовки, активно: \(Dictation.frontmost())")
         indicator = indicator ?? Indicator()
         indicator?.show(self)
         // Пока слушаем — плашка прозрачна для мыши: диктуют обычно поверх
@@ -295,8 +312,66 @@ final class Dictation {
     private func commit(_ target: String) {
         guard mode == .raw, target.count > typed.count else { return }
         let delta = String(target.dropFirst(typed.count))
-        typer.type(delta)
+        deliver(delta)
         typed = target
+    }
+
+    /// Отдать расшифровку туда, где диктовали.
+    ///
+    /// Печатаем только в то приложение, которое было активно при нажатии
+    /// клавиши. Если фокус ушёл, сначала возвращаем его: человек диктовал в
+    /// это окно, туда текст и должен попасть. Если вернуть не удалось —
+    /// текст уходит в буфер обмена, но не в чужое окно: попасть случайной
+    /// репликой в чужую переписку хуже, чем не напечатать вовсе.
+    private func deliver(_ text: String) {
+        outbox += text
+        flush()
+    }
+
+    private func flush() {
+        guard !outbox.isEmpty else { return }
+        guard let owner, !owner.isTerminated else {
+            // Цель неизвестна (диктовку начали без активного приложения) —
+            // печатаем как раньше, ничего другого не остаётся.
+            typer.type(outbox)
+            outbox = ""
+            return
+        }
+        let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        if front == owner.processIdentifier {
+            typer.type(outbox)
+            outbox = ""
+            restoring = false
+            return
+        }
+        guard !restoring else { return }
+        restoring = true
+        Dictation.logHotkey("фокус ушёл в \(Dictation.frontmost()), возвращаю "
+                            + "\(owner.localizedName ?? "приложение диктовки")")
+        owner.activate()
+        // Переключение окна занимает считанные кадры, но не мгновенно —
+        // печать сразу после activate() уходила бы ещё прежнему адресату.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self else { return }
+            self.restoring = false
+            let back = NSWorkspace.shared.frontmostApplication?.processIdentifier
+            if back == self.owner?.processIdentifier {
+                self.flush()
+            } else {
+                self.handOverClipboard()
+            }
+        }
+    }
+
+    /// Фокус вернуть не удалось: отдаём текст через буфер обмена.
+    private func handOverClipboard() {
+        let text = outbox
+        outbox = ""
+        guard !text.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        Dictation.logHotkey("фокус не вернулся, текст в буфере: \(text.count) знаков")
+        state = .failed("Окно сменилось — текст в буфере, вставьте ⌘V")
     }
 
     /// Приглушить системный звук на время диктовки.
@@ -327,7 +402,7 @@ final class Dictation {
             worker.tidy(text: raw, level: settings.dictation_level) { [weak self] text, ok in
                 DispatchQueue.main.async {
                     guard let self else { return }
-                    self.typer.type(text)
+                    self.deliver(text)
                     self.typed = text
                     if !ok && !self.tidyUnavailableShown {
                         self.tidyUnavailableShown = true
@@ -613,8 +688,19 @@ private final class Typer {
         return AXIsProcessTrustedWithOptions([key: prompt] as CFDictionary)
     }
 
+    /// Куда ушла прошлая порция — чтобы не писать в лог одно и то же.
+    private var lastTarget = ""
+
     func type(_ text: String) {
         guard !text.isEmpty else { return }
+        // Событие уходит тому, кто активен в этот момент, а не тому, кто был
+        // активен в начале диктовки. Пишем адресата в лог: иначе жалобу
+        // «текст ушёл не туда» нечем проверить — видно только результат.
+        let target = Dictation.frontmost()
+        if target != lastTarget {
+            lastTarget = target
+            Dictation.logHotkey("печатаю в: \(target)")
+        }
         let source = CGEventSource(stateID: .combinedSessionState)
         // Порциями: за одно событие система принимает ограниченную строку.
         var rest = Substring(text)
@@ -969,6 +1055,13 @@ extension Color {
 // MARK: - Журнал назначения клавиши
 
 extension Dictation {
+    /// Активное приложение — адресат синтезированных нажатий.
+    static func frontmost() -> String {
+        let app = NSWorkspace.shared.frontmostApplication
+        let name = app?.localizedName ?? "неизвестно"
+        return "\(name) [\(app?.bundleIdentifier ?? "—")]"
+    }
+
     /// Короткая запись о том, что происходит при назначении сочетания.
     ///
     /// Заведена не от любви к логам: поломку записи нельзя было увидеть со

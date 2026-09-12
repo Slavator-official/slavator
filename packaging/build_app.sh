@@ -185,7 +185,10 @@ else
     LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
     [[ -x "$LSREGISTER" ]] && "$LSREGISTER" -u "$APP" >/dev/null 2>&1 || true
     if [[ -n "$RUNNING" ]]; then
+        # -g: не выводить вперёд. Сборка идёт, пока человек занят другим, и
+        # выведенное окно забирает фокус посреди его работы — а диктовка,
+        # начатая после этого, печатала бы уже не туда, куда он смотрит.
         say "Запускаю заново"
-        open "$INSTALLED"
+        open -g "$INSTALLED"
     fi
 fi
