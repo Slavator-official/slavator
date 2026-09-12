@@ -34,15 +34,6 @@ final class Dictation {
     private(set) var seconds: Double = 0
     /// Что уже напечатано за эту диктовку — для индикатора.
     private(set) var typed = ""
-    /// Куда уйдёт текст — короткое имя приложения, для плашки.
-    ///
-    /// Видно его должно быть до печати, а не после. Фокус забирает себе не
-    /// только человек: чужое окно выходит вперёд само (пришёл ответ, пришло
-    /// уведомление), и тогда диктовка, начатая «в браузер», печатает в это
-    /// окно — она знает только то, что активно сейчас, а куда смотрит
-    /// человек, ей неизвестно. Имя в плашке превращает эту ошибку из
-    /// «текст ушёл неизвестно куда» в «вижу не то имя, отпускаю клавишу».
-    private(set) var targetName = ""
     /// Один раз за сеанс сообщаем, что обработка недоступна.
     private(set) var tidyUnavailableShown = false
 
@@ -61,19 +52,6 @@ final class Dictation {
     private var pending = false
     /// Клавишу отпустили, пока предыдущий запрос не вернулся.
     private var finalPending = false
-    /// Куда диктуют: приложение, активное в момент нажатия клавиши.
-    ///
-    /// Нужно потому, что печать происходит не в момент речи, а через
-    /// секунды — когда вернётся расшифровка. Если за это время фокус ушёл
-    /// (всплыло чужое окно, пришло уведомление), синтезированные нажатия
-    /// уходят новому активному приложению: человек диктовал в браузер, а
-    /// текст оказался в чужом чате. Замерено на живом прогоне — старт в
-    /// Chrome, печать в Claude.
-    private var owner: NSRunningApplication?
-    /// Расшифровка, которая ждёт возврата фокуса.
-    private var outbox = ""
-    /// Возврат фокуса уже запрошен — второй раз не просим.
-    private var restoring = false
     private var watchdog: Timer?
     private var ticker: Timer?
     private var clock: Timer?
@@ -191,16 +169,8 @@ final class Dictation {
         recorder = rec
 
         duck()
-        owner = NSWorkspace.shared.frontmostApplication
-        targetName = owner?.localizedName ?? ""
-        outbox = ""
-        restoring = false
-        Dictation.logHotkey("старт диктовки, активно: \(Dictation.frontmost())")
         indicator = indicator ?? Indicator()
         indicator?.show(self)
-        // Пока слушаем — плашка прозрачна для мыши: диктуют обычно поверх
-        // чужого окна, и щелчок должен доходить до него.
-        indicator?.allowDismiss(false)
 
         clock = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             self?.seconds += 0.1
@@ -221,10 +191,6 @@ final class Dictation {
         clock?.invalidate(); clock = nil
         state = .finishing
         level = 0
-        // Обработка занимает секунды, и всё это время плашка стоит над тем
-        // местом, куда человек уже пишет дальше. Теперь её можно убрать
-        // щелчком — на печать текста это не влияет.
-        indicator?.allowDismiss(true)
         recorder?.stop()
         // Сторож на случай, если процесс распознавания промолчит: висеть
         // с плашкой «Дописываю…» бесконечно нельзя.
@@ -322,66 +288,8 @@ final class Dictation {
     private func commit(_ target: String) {
         guard mode == .raw, target.count > typed.count else { return }
         let delta = String(target.dropFirst(typed.count))
-        deliver(delta)
+        typer.type(delta)
         typed = target
-    }
-
-    /// Отдать расшифровку туда, где диктовали.
-    ///
-    /// Печатаем только в то приложение, которое было активно при нажатии
-    /// клавиши. Если фокус ушёл, сначала возвращаем его: человек диктовал в
-    /// это окно, туда текст и должен попасть. Если вернуть не удалось —
-    /// текст уходит в буфер обмена, но не в чужое окно: попасть случайной
-    /// репликой в чужую переписку хуже, чем не напечатать вовсе.
-    private func deliver(_ text: String) {
-        outbox += text
-        flush()
-    }
-
-    private func flush() {
-        guard !outbox.isEmpty else { return }
-        guard let owner, !owner.isTerminated else {
-            // Цель неизвестна (диктовку начали без активного приложения) —
-            // печатаем как раньше, ничего другого не остаётся.
-            typer.type(outbox)
-            outbox = ""
-            return
-        }
-        let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        if front == owner.processIdentifier {
-            typer.type(outbox)
-            outbox = ""
-            restoring = false
-            return
-        }
-        guard !restoring else { return }
-        restoring = true
-        Dictation.logHotkey("фокус ушёл в \(Dictation.frontmost()), возвращаю "
-                            + "\(owner.localizedName ?? "приложение диктовки")")
-        owner.activate()
-        // Переключение окна занимает считанные кадры, но не мгновенно —
-        // печать сразу после activate() уходила бы ещё прежнему адресату.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            guard let self else { return }
-            self.restoring = false
-            let back = NSWorkspace.shared.frontmostApplication?.processIdentifier
-            if back == self.owner?.processIdentifier {
-                self.flush()
-            } else {
-                self.handOverClipboard()
-            }
-        }
-    }
-
-    /// Фокус вернуть не удалось: отдаём текст через буфер обмена.
-    private func handOverClipboard() {
-        let text = outbox
-        outbox = ""
-        guard !text.isEmpty else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-        Dictation.logHotkey("фокус не вернулся, текст в буфере: \(text.count) знаков")
-        state = .failed("Окно сменилось — текст в буфере, вставьте ⌘V")
     }
 
     /// Приглушить системный звук на время диктовки.
@@ -412,7 +320,7 @@ final class Dictation {
             worker.tidy(text: raw, level: settings.dictation_level) { [weak self] text, ok in
                 DispatchQueue.main.async {
                     guard let self else { return }
-                    self.deliver(text)
+                    self.typer.type(text)
                     self.typed = text
                     if !ok && !self.tidyUnavailableShown {
                         self.tidyUnavailableShown = true
@@ -698,19 +606,8 @@ private final class Typer {
         return AXIsProcessTrustedWithOptions([key: prompt] as CFDictionary)
     }
 
-    /// Куда ушла прошлая порция — чтобы не писать в лог одно и то же.
-    private var lastTarget = ""
-
     func type(_ text: String) {
         guard !text.isEmpty else { return }
-        // Событие уходит тому, кто активен в этот момент, а не тому, кто был
-        // активен в начале диктовки. Пишем адресата в лог: иначе жалобу
-        // «текст ушёл не туда» нечем проверить — видно только результат.
-        let target = Dictation.frontmost()
-        if target != lastTarget {
-            lastTarget = target
-            Dictation.logHotkey("печатаю в: \(target)")
-        }
         let source = CGEventSource(stateID: .combinedSessionState)
         // Порциями: за одно событие система принимает ограниченную строку.
         var rest = Substring(text)
@@ -919,99 +816,33 @@ private final class Hotkey {
 
 // MARK: - Плашка поверх окон
 
-/// Хост, который подгоняет окно под содержимое.
-///
-/// Само по себе окно за SwiftUI не следит: надпись сменилась, вид стал
-/// короче, а окно осталось прежней ширины. Обёртка над панелью из
-/// NSHostingController это делала бы сама, но такая панель не рисуется
-/// вовсе — проверено рядом на экране: окно есть, isVisible истинно, а на
-/// снимке пусто. Поэтому окно остаётся обычным, безрамочным, а размер ему
-/// сообщает вид — после каждой раскладки.
-private final class FittingHost<Root: View>: NSHostingView<Root> {
-    var onFit: ((NSSize) -> Void)?
-
-    required init(rootView: Root) { super.init(rootView: rootView) }
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("не используется") }
-
-    override func layout() {
-        super.layout()
-        onFit?(fittingSize)
-    }
-}
-
 /// Показывает, что микрофон слышит и что уже напечатано.
-///
-/// Плашка висит поверх всех окон, а значит стоит на чужом пути. Отсюда три
-/// правила. Ширина — по содержимому: фиксированные 360 точек оставались
-/// пустыми на короткой надписи и закрывали собой строку ввода. Место —
-/// впритык над доком, ниже всего, что можно закрыть. И на время обработки
-/// плашку можно убрать щелчком: расшифровка идёт секунды, всё это время
-/// плашка стояла над полем, куда человек уже пытался писать дальше.
-private final class Indicator: NSObject {
+private final class Indicator {
     private var panel: NSPanel?
-    /// Человек убрал плашку сам — до конца этой диктовки не показываем.
-    private var dismissed = false
 
     func show(_ dictation: Dictation) {
-        dismissed = false
         if panel == nil {
-            let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 200, height: 46),
+            let view = NSHostingView(rootView: IndicatorView(dictation: dictation))
+            let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 360, height: 46),
                                  styleMask: [.borderless, .nonactivatingPanel],
                                  backing: .buffered, defer: false)
-            let host = FittingHost(rootView: IndicatorView(dictation: dictation))
-            host.onFit = { [weak self] size in self?.fit(size) }
-            window.contentView = host
+            window.contentView = view
             window.isOpaque = false
             window.backgroundColor = .clear
             window.hasShadow = true
             window.level = .statusBar
-            // Пока идёт диктовка, щелчки проходят насквозь: плашка не должна
-            // перехватывать попадание по кнопке чужого окна под ней.
             window.ignoresMouseEvents = true
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-            // Щелчок по плашке убирает её. Обрабатываем жестом, а не кнопкой
-            // SwiftUI: кнопке нужно ключевое окно, а забрать фокус у окна, в
-            // которое сейчас печатается текст, нельзя.
-            host.addGestureRecognizer(NSClickGestureRecognizer(target: self,
-                                                               action: #selector(dismiss)))
             panel = window
         }
-        place()
-        panel?.orderFrontRegardless()
-    }
-
-    /// Разрешить убрать плашку щелчком. Включается на время обработки.
-    func allowDismiss(_ allowed: Bool) {
-        panel?.ignoresMouseEvents = !allowed
-    }
-
-    @objc private func dismiss() {
-        dismissed = true
-        hide()
+        guard let panel, let screen = NSScreen.main else { return }
+        let frame = screen.visibleFrame
+        panel.setFrameOrigin(NSPoint(x: frame.midX - panel.frame.width / 2,
+                                     y: frame.minY + 82))
+        panel.orderFrontRegardless()
     }
 
     func hide() { panel?.orderOut(nil) }
-
-    /// Подогнать окно под содержимое и поставить на место.
-    ///
-    /// Порог в половину точки — против бесконечного круга: смена размера
-    /// вызывает новую раскладку, а та снова придёт сюда.
-    private func fit(_ size: NSSize) {
-        guard let panel, size.width > 1, size.height > 1 else { return }
-        guard abs(panel.frame.width - size.width) > 0.5
-                || abs(panel.frame.height - size.height) > 0.5 else { return }
-        panel.setContentSize(size)
-        place()
-    }
-
-    /// Плашка стоит над доком по центру экрана.
-    private func place() {
-        guard let panel, !dismissed, let screen = NSScreen.main else { return }
-        let frame = screen.visibleFrame
-        panel.setFrameOrigin(NSPoint(x: frame.midX - panel.frame.width / 2,
-                                     y: frame.minY + 12))
-    }
 }
 
 private struct IndicatorView: View {
@@ -1019,10 +850,7 @@ private struct IndicatorView: View {
 
     private var label: String {
         switch dictation.state {
-        // Пока слушаем, надпись — имя адресата: что запись идёт, и так
-        // видно по красной точке и столбикам громкости, а вот куда уйдёт
-        // текст — единственное, чего из плашки было не узнать.
-        case .listening:  return dictation.targetName.isEmpty ? "Слушаю" : dictation.targetName
+        case .listening:  return "Слушаю"
         case .finishing:  return "Дописываю…"
         case .idle:       return "Готово"
         default:          return "Диктовка"
@@ -1034,41 +862,24 @@ private struct IndicatorView: View {
             Circle()
                 .fill(dictation.state == .listening ? Color(hex: 0xE0705F) : Color(hex: 0x19C37D))
                 .frame(width: 9, height: 9)
-            // Столбики — это громкость микрофона. После отпускания клавиши
-            // микрофон уже выключен, они стояли бы неподвижно и занимали
-            // место: на обработке показываем только надпись.
-            if dictation.state == .listening {
-                HStack(alignment: .bottom, spacing: 2.5) {
-                    ForEach(0..<6, id: \.self) { i in
-                        RoundedRectangle(cornerRadius: 1.5)
-                            .fill(Color(hex: 0x5590FF))
-                            .frame(width: 3, height: barHeight(i))
-                    }
+            HStack(alignment: .bottom, spacing: 2.5) {
+                ForEach(0..<6, id: \.self) { i in
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(Color(hex: 0x5590FF))
+                        .frame(width: 3, height: barHeight(i))
                 }
-                .frame(height: 17)
             }
+            .frame(height: 17)
             Text(label).font(.system(size: 13, weight: .medium))
-            // Адресат: единственный способ заметить, что фокус увело чужое
-            // окно, до того как текст уйдёт туда.
             if dictation.state == .listening {
                 Text(String(format: "%d:%02d", Int(dictation.seconds) / 60, Int(dictation.seconds) % 60))
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
-            if dictation.state == .finishing {
-                // Подсказка, что плашку можно убрать: обработка идёт своим
-                // чередом и без неё, текст всё равно будет напечатан.
-                Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(Color(hex: 0x8FA6C4))
-                    .padding(4)
-                    .background(Circle().fill(Color(hex: 0x18293F)))
-            }
+            Spacer(minLength: 0)
         }
-        // Плашка шириной ровно по содержимому: на «Дописываю…» она короче,
-        // чем на «Слушаю» с таймером, и закрывает собой меньше чужого окна.
         .padding(.horizontal, 16)
-        .frame(height: 46)
+        .frame(width: 360, height: 46)
         .background(
             RoundedRectangle(cornerRadius: 23)
                 .fill(Color(hex: 0x0C1826))
@@ -1095,13 +906,6 @@ extension Color {
 // MARK: - Журнал назначения клавиши
 
 extension Dictation {
-    /// Активное приложение — адресат синтезированных нажатий.
-    static func frontmost() -> String {
-        let app = NSWorkspace.shared.frontmostApplication
-        let name = app?.localizedName ?? "неизвестно"
-        return "\(name) [\(app?.bundleIdentifier ?? "—")]"
-    }
-
     /// Короткая запись о том, что происходит при назначении сочетания.
     ///
     /// Заведена не от любви к логам: поломку записи нельзя было увидеть со
