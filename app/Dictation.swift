@@ -34,6 +34,15 @@ final class Dictation {
     private(set) var seconds: Double = 0
     /// Что уже напечатано за эту диктовку — для индикатора.
     private(set) var typed = ""
+    /// Куда уйдёт текст — короткое имя приложения, для плашки.
+    ///
+    /// Видно его должно быть до печати, а не после. Фокус забирает себе не
+    /// только человек: чужое окно выходит вперёд само (пришёл ответ, пришло
+    /// уведомление), и тогда диктовка, начатая «в браузер», печатает в это
+    /// окно — она знает только то, что активно сейчас, а куда смотрит
+    /// человек, ей неизвестно. Имя в плашке превращает эту ошибку из
+    /// «текст ушёл неизвестно куда» в «вижу не то имя, отпускаю клавишу».
+    private(set) var targetName = ""
     /// Один раз за сеанс сообщаем, что обработка недоступна.
     private(set) var tidyUnavailableShown = false
 
@@ -183,6 +192,7 @@ final class Dictation {
 
         duck()
         owner = NSWorkspace.shared.frontmostApplication
+        targetName = owner?.localizedName ?? ""
         outbox = ""
         restoring = false
         Dictation.logHotkey("старт диктовки, активно: \(Dictation.frontmost())")
@@ -1009,7 +1019,10 @@ private struct IndicatorView: View {
 
     private var label: String {
         switch dictation.state {
-        case .listening:  return "Слушаю"
+        // Пока слушаем, надпись — имя адресата: что запись идёт, и так
+        // видно по красной точке и столбикам громкости, а вот куда уйдёт
+        // текст — единственное, чего из плашки было не узнать.
+        case .listening:  return dictation.targetName.isEmpty ? "Слушаю" : dictation.targetName
         case .finishing:  return "Дописываю…"
         case .idle:       return "Готово"
         default:          return "Диктовка"
@@ -1035,6 +1048,8 @@ private struct IndicatorView: View {
                 .frame(height: 17)
             }
             Text(label).font(.system(size: 13, weight: .medium))
+            // Адресат: единственный способ заметить, что фокус увело чужое
+            // окно, до того как текст уйдёт туда.
             if dictation.state == .listening {
                 Text(String(format: "%d:%02d", Int(dictation.seconds) / 60, Int(dictation.seconds) % 60))
                     .font(.system(size: 12, design: .monospaced))
