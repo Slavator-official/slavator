@@ -210,7 +210,7 @@ final class Dictation {
         indicator?.allowMove(true)
         // Отсчёт до исчезновения плашки идёт с отпускания клавиши, а каждая
         // напечатанная порция его продлевает: плашка живёт, пока печатает,
-        // и уходит через пару секунд тишины.
+        // и уходит через полторы секунды тишины.
         holdPlate()
         recorder?.stop()
         // Сторож на случай, если процесс распознавания промолчит: висеть
@@ -326,11 +326,11 @@ final class Dictation {
     /// на длинной фразе это до десятка секунд. Текст к этому времени уже
     /// напечатан предыдущими проходами, и плашка всё это время просто
     /// стояла над чужим окном с надписью «Дописываю…». Теперь она уходит
-    /// через пару секунд после последней напечатанной порции; сама
+    /// через полторы секунды после последней напечатанной порции; сама
     /// обработка идёт как шла, и остаток допечатается без неё.
     private func holdPlate() {
         plate?.invalidate()
-        plate = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: false) { [weak self] _ in
+        plate = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
             guard let self, case .finishing = self.state else { return }
             self.indicator?.hide()
         }
