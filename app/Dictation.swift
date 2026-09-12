@@ -909,6 +909,27 @@ private final class Hotkey {
 
 // MARK: - Плашка поверх окон
 
+/// Хост, который подгоняет окно под содержимое.
+///
+/// Само по себе окно за SwiftUI не следит: надпись сменилась, вид стал
+/// короче, а окно осталось прежней ширины. Обёртка над панелью из
+/// NSHostingController это делала бы сама, но такая панель не рисуется
+/// вовсе — проверено рядом на экране: окно есть, isVisible истинно, а на
+/// снимке пусто. Поэтому окно остаётся обычным, безрамочным, а размер ему
+/// сообщает вид — после каждой раскладки.
+private final class FittingHost<Root: View>: NSHostingView<Root> {
+    var onFit: ((NSSize) -> Void)?
+
+    required init(rootView: Root) { super.init(rootView: rootView) }
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("не используется") }
+
+    override func layout() {
+        super.layout()
+        onFit?(fittingSize)
+    }
+}
+
 /// Показывает, что микрофон слышит и что уже напечатано.
 ///
 /// Плашка висит поверх всех окон, а значит стоит на чужом пути. Отсюда три
@@ -917,7 +938,7 @@ private final class Hotkey {
 /// впритык над доком, ниже всего, что можно закрыть. И на время обработки
 /// плашку можно убрать щелчком: расшифровка идёт секунды, всё это время
 /// плашка стояла над полем, куда человек уже пытался писать дальше.
-private final class Indicator: NSObject, NSWindowDelegate {
+private final class Indicator: NSObject {
     private var panel: NSPanel?
     /// Человек убрал плашку сам — до конца этой диктовки не показываем.
     private var dismissed = false
@@ -925,12 +946,12 @@ private final class Indicator: NSObject, NSWindowDelegate {
     func show(_ dictation: Dictation) {
         dismissed = false
         if panel == nil {
-            // Размер окна ведёт SwiftUI: preferredContentSize пересчитывается
-            // на каждую смену надписи, и окно ужимается вместе с плашкой.
-            let controller = NSHostingController(rootView: IndicatorView(dictation: dictation))
-            controller.sizingOptions = [.preferredContentSize]
-            let window = NSPanel(contentViewController: controller)
-            window.styleMask = [.borderless, .nonactivatingPanel]
+            let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 200, height: 46),
+                                 styleMask: [.borderless, .nonactivatingPanel],
+                                 backing: .buffered, defer: false)
+            let host = FittingHost(rootView: IndicatorView(dictation: dictation))
+            host.onFit = { [weak self] size in self?.fit(size) }
+            window.contentView = host
             window.isOpaque = false
             window.backgroundColor = .clear
             window.hasShadow = true
@@ -939,12 +960,11 @@ private final class Indicator: NSObject, NSWindowDelegate {
             // перехватывать попадание по кнопке чужого окна под ней.
             window.ignoresMouseEvents = true
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-            window.delegate = self
             // Щелчок по плашке убирает её. Обрабатываем жестом, а не кнопкой
             // SwiftUI: кнопке нужно ключевое окно, а забрать фокус у окна, в
             // которое сейчас печатается текст, нельзя.
-            let click = NSClickGestureRecognizer(target: self, action: #selector(dismiss))
-            controller.view.addGestureRecognizer(click)
+            host.addGestureRecognizer(NSClickGestureRecognizer(target: self,
+                                                               action: #selector(dismiss)))
             panel = window
         }
         place()
@@ -963,19 +983,24 @@ private final class Indicator: NSObject, NSWindowDelegate {
 
     func hide() { panel?.orderOut(nil) }
 
+    /// Подогнать окно под содержимое и поставить на место.
+    ///
+    /// Порог в половину точки — против бесконечного круга: смена размера
+    /// вызывает новую раскладку, а та снова придёт сюда.
+    private func fit(_ size: NSSize) {
+        guard let panel, size.width > 1, size.height > 1 else { return }
+        guard abs(panel.frame.width - size.width) > 0.5
+                || abs(panel.frame.height - size.height) > 0.5 else { return }
+        panel.setContentSize(size)
+        place()
+    }
+
     /// Плашка стоит над доком по центру экрана.
     private func place() {
-        guard let panel, let screen = NSScreen.main else { return }
+        guard let panel, !dismissed, let screen = NSScreen.main else { return }
         let frame = screen.visibleFrame
         panel.setFrameOrigin(NSPoint(x: frame.midX - panel.frame.width / 2,
                                      y: frame.minY + 12))
-    }
-
-    /// Ширина меняется вместе с надписью — плашку надо заново поставить по
-    /// центру, иначе она ползёт вбок при каждой смене состояния.
-    func windowDidResize(_ notification: Notification) {
-        guard !dismissed else { return }
-        place()
     }
 }
 
