@@ -10,7 +10,12 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 PROJECT="$(cd "$ROOT/.." && pwd)"
 SWIFT="$PROJECT/app"
 CORE="$PROJECT/core"
-DIST="$ROOT/dist"
+# Сборочная папка — с суффиксом .noindex: Spotlight и Launchpad не
+# заглядывают внутрь таких папок. Иначе рядом с установленным «Славатором»
+# в поиске висел второй, точно такой же, и какой из них настоящий — было
+# не понять. Проверено: .metadata_never_index в обычной папке Spotlight
+# игнорирует, суффикс .noindex работает.
+DIST="$ROOT/dist.noindex"
 APP="$DIST/Славатор.app"
 CONTENTS="$APP/Contents"
 RESOURCES="$CONTENTS/Resources"
@@ -175,6 +180,10 @@ else
     rm -rf "$INSTALLED"
     ditto "$APP" "$INSTALLED" || fail "не удалось поставить в /Applications"
     codesign -v "$INSTALLED" 2>/dev/null || say "внимание: подпись установленной копии не проверяется"
+    # Снимаем сборочную копию с учёта: иначе Launchpad и Spotlight держат её
+    # как ещё одно приложение рядом с установленным.
+    LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+    [[ -x "$LSREGISTER" ]] && "$LSREGISTER" -u "$APP" >/dev/null 2>&1 || true
     if [[ -n "$RUNNING" ]]; then
         say "Запускаю заново"
         open "$INSTALLED"

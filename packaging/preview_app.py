@@ -14,7 +14,7 @@ def write_json(path, value):
 
 def main():
     project = Path(__file__).resolve().parent.parent
-    executable = project / "packaging/dist/Славатор.app/Contents/MacOS/slavator"
+    executable = project / "packaging/dist.noindex/Славатор.app/Contents/MacOS/slavator"
     if not executable.is_file():
         raise SystemExit("Сначала соберите приложение: bash packaging/build_app.sh")
     preview = Path(tempfile.mkdtemp(prefix="slavator-preview-"))

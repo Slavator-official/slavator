@@ -43,7 +43,7 @@ Mac-профили в `~/whisper-work` остаются на прежнем ме
 Изменения объединены в ветке `ios/macbook` репозитория
 [Slavator-official/slavator](https://github.com/Slavator-official/slavator/tree/ios/macbook).
 Рабочий запуск на настоящих встречах после сборки:
-`packaging/dist/Славатор.app`. Вкладка «Спикеры» содержит поиск и граф;
+`packaging/dist.noindex/Славатор.app`. Вкладка «Спикеры» содержит поиск и граф;
 подробности — [память встреч](docs/ПАМЯТЬ_ВСТРЕЧ.md).
 В чате выберите свой профиль в поле «Ваш голос», чтобы вопросы «когда я
 говорил» искали именно ваши реплики. Для остальных вопросов выбор не нужен.
@@ -116,8 +116,8 @@ packaging/make_dmg.sh --full    # полный (~5 ГБ): Ollama и модель
 Две вещи ломались молча и стоили дня работы, поэтому проверяются всегда:
 
 ```bash
-otool -L packaging/dist/Славатор.app/Contents/MacOS/slavator | grep -c SwiftUICore   # 0
-codesign --verify packaging/dist/Славатор.app                                        # valid
+otool -L packaging/dist.noindex/Славатор.app/Contents/MacOS/slavator | grep -c SwiftUICore   # 0
+codesign --verify packaging/dist.noindex/Славатор.app                                        # valid
 ```
 
 `SwiftUICore` — фреймворк из macOS 15. Если линковщик его пропишет,
@@ -159,7 +159,7 @@ git push && git push --tags
 git clone https://github.com/pvaleragpt/-.git slavator
 cd slavator
 packaging/build_app.sh                    # соберёт Славатор.app
-open packaging/dist/Славатор.app          # запустится, дальше кнопка «Установить»
+open packaging/dist.noindex/Славатор.app          # запустится, дальше кнопка «Установить»
 ```
 
 Первый запуск предложит развернуть окружение: Python, модели распознавания,
