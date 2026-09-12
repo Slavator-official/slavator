@@ -210,7 +210,7 @@ final class Dictation {
         indicator?.allowMove(true)
         // Отсчёт до исчезновения плашки идёт с отпускания клавиши, а каждая
         // напечатанная порция его продлевает: плашка живёт, пока печатает,
-        // и уходит через полторы секунды тишины.
+        // и уходит через секунду тишины.
         holdPlate()
         recorder?.stop()
         // Сторож на случай, если процесс распознавания промолчит: висеть
@@ -268,9 +268,20 @@ final class Dictation {
                 // начинаем запись заново. Это чинит сразу две беды —
                 // перераспознавание всей записи (чем дольше говоришь, тем
                 // медленнее) и накопление правок в уже напечатанном.
-                if !text.isEmpty, rec.silentTail() > 1.1 {
-                    self.commit(text + " ")
-                    self.spoken += text + " "
+                // Фразу закрывает пауза — но не тогда, когда расшифровка
+                // оборвана на середине слова. Такой обрыв модель помечает
+                // многоточием или дефисом, и если закрыть фразу на нём,
+                // начало слова уходит в поле как есть, а остаток приходит
+                // следующей фразой с заглавной буквы: «ты под… Терял
+                // части». Ждём ещё проход — слово дополнится целиком.
+                // Затянувшаяся тишина закрывает фразу всё равно: иначе она
+                // не закроется никогда, а перераспознавание будет расти.
+                let broken = Self.brokenTail(text)
+                if !text.isEmpty, rec.silentTail() > 1.1,
+                   !broken || rec.silentTail() > 2.5 {
+                    let closing = broken ? Self.withoutBrokenTail(text) : text
+                    self.commit(closing + " ")
+                    self.spoken += closing + " "
                     rec.reset()
                     self.typed = ""
                     self.lastText = ""
@@ -285,6 +296,30 @@ final class Dictation {
                 }
             }
         }
+    }
+
+    /// Расшифровка оборвана на полуслове: так модель помечает фрагмент,
+    /// кончившийся посреди речи.
+    private static func brokenTail(_ text: String) -> Bool {
+        let tail = text.trimmingCharacters(in: .whitespaces)
+        return tail.hasSuffix("...") || tail.hasSuffix("…")
+            || tail.hasSuffix("-") || tail.hasSuffix("—")
+    }
+
+    /// Убрать след обрыва: в поле он остался бы мусором.
+    ///
+    /// Снимаем знаки по одному, а не проверкой «кончается на многоточие»:
+    /// сняв у «под...» последнюю точку, получаешь «под..», что на
+    /// многоточие уже не похоже — и две точки оставались в поле.
+    /// Вызывается только на обрыве, поэтому обычная точка в конце фразы
+    /// сюда не попадает.
+    private static func withoutBrokenTail(_ text: String) -> String {
+        let marks: Set<Character> = [".", "…", "-", "—"]
+        var tail = text.trimmingCharacters(in: .whitespaces)
+        while let last = tail.last, marks.contains(last) {
+            tail = String(tail.dropLast()).trimmingCharacters(in: .whitespaces)
+        }
+        return tail
     }
 
     /// Общее начало двух расшифровок, обрезанное по границе слова.
@@ -326,11 +361,11 @@ final class Dictation {
     /// на длинной фразе это до десятка секунд. Текст к этому времени уже
     /// напечатан предыдущими проходами, и плашка всё это время просто
     /// стояла над чужим окном с надписью «Дописываю…». Теперь она уходит
-    /// через полторы секунды после последней напечатанной порции; сама
+    /// через секунду после последней напечатанной порции; сама
     /// обработка идёт как шла, и остаток допечатается без неё.
     private func holdPlate() {
         plate?.invalidate()
-        plate = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
+        plate = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { [weak self] _ in
             guard let self, case .finishing = self.state else { return }
             self.indicator?.hide()
         }
