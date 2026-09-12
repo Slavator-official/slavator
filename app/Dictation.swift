@@ -941,15 +941,18 @@ private final class FittingHost<Root: View>: NSHostingView<Root> {
 ///
 /// А на время обработки плашку можно оттащить мышью: расшифровка идёт
 /// секунды, и всё это время плашка стоит над тем местом, куда человек уже
-/// пишет дальше. Куда оттащили, там она и будет появляться впредь.
+/// пишет дальше. Сдвиг действует до конца этой диктовки: следующая снова
+/// появится по центру. Запоминать сдвинутое место означало бы, что плашка
+/// навсегда уезжает туда, куда её один раз убрали с чужого текста — а
+/// убирают её от помехи, а не выбирают ей новый дом.
 private final class Indicator: NSObject, NSWindowDelegate {
-    /// Где человек поставил плашку сам.
-    private static let place = "ru.slavator.dictation.indicator.origin"
-
     private var panel: NSPanel?
+    /// Плашку оттащили в этой диктовке — не возвращаем её под курсором.
+    private var moved = false
     private var host: FittingHost<IndicatorView>?
 
     func show(_ dictation: Dictation) {
+        moved = false
         if panel == nil {
             let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 200, height: 46),
                                  styleMask: [.borderless, .nonactivatingPanel],
@@ -969,7 +972,7 @@ private final class Indicator: NSObject, NSWindowDelegate {
             window.delegate = self
             panel = window
         }
-        position()
+        center()
         panel?.orderFrontRegardless()
     }
 
@@ -986,10 +989,10 @@ private final class Indicator: NSObject, NSWindowDelegate {
 
     func hide() { panel?.orderOut(nil) }
 
-    /// Перетащили — запоминаем точку.
+    /// Перетащили — держим это место до конца диктовки.
     func windowDidMove(_ notification: Notification) {
-        guard let panel, host?.movable == true else { return }
-        UserDefaults.standard.set(NSStringFromPoint(panel.frame.origin), forKey: Self.place)
+        guard host?.movable == true else { return }
+        moved = true
     }
 
     /// Подогнать окно под содержимое и поставить на место.
@@ -1001,21 +1004,14 @@ private final class Indicator: NSObject, NSWindowDelegate {
         guard abs(panel.frame.width - size.width) > 0.5
                 || abs(panel.frame.height - size.height) > 0.5 else { return }
         panel.setContentSize(size)
-        position()
+        // Сдвинутую плашку не трогаем: она стоит там, куда её отвели, и
+        // прыжок в центр на смене надписи выглядел бы поломкой.
+        if !moved { center() }
     }
 
-    /// Где плашке стоять: где её поставил человек, иначе над доком.
-    ///
-    /// Своя точка — это левый нижний угол, как у виджета: плашка меняет
-    /// ширину вместе с надписью, и держать угол честнее, чем центр —
-    /// поставленная в край, она иначе уезжала бы за край.
-    private func position() {
+    /// Плашка стоит по центру экрана, впритык над доком.
+    private func center() {
         guard let panel, let screen = NSScreen.main else { return }
-        let saved = UserDefaults.standard.string(forKey: Self.place).map(NSPointFromString)
-        if let saved, NSScreen.screens.contains(where: { $0.frame.contains(saved) }) {
-            panel.setFrameOrigin(saved)
-            return
-        }
         let frame = screen.visibleFrame
         panel.setFrameOrigin(NSPoint(x: frame.midX - panel.frame.width / 2,
                                      y: frame.minY + 12))
