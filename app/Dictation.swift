@@ -34,6 +34,13 @@ final class Dictation {
     private(set) var seconds: Double = 0
     /// Что уже напечатано за эту диктовку — для индикатора.
     private(set) var typed = ""
+    /// Куда уходит текст — имя приложения, которому достаются нажатия.
+    ///
+    /// Диктовка печатает в активное приложение, а активным становится не
+    /// только то, на которое человек смотрит: чужое окно выходит вперёд
+    /// само, когда приходит ответ или уведомление. Имя в плашке — способ
+    /// увидеть это до того, как текст уйдёт не туда.
+    private(set) var targetName = ""
     /// Один раз за сеанс сообщаем, что обработка недоступна.
     private(set) var tidyUnavailableShown = false
 
@@ -53,6 +60,8 @@ final class Dictation {
     /// Клавишу отпустили, пока предыдущий запрос не вернулся.
     private var finalPending = false
     private var watchdog: Timer?
+    /// Ждёт, не пора ли убрать плашку: печатать нечего, а обработка идёт.
+    private var plate: Timer?
     private var ticker: Timer?
     private var clock: Timer?
     private var settings = Settings.load()
@@ -155,6 +164,7 @@ final class Dictation {
         if mode == .tidy { worker.warm() }
         self.mode = mode
         lastText = ""; typed = ""; spoken = ""; seconds = 0
+        targetName = Dictation.frontmostName()
         state = .listening
         onBusyChanged?(true)
 
@@ -169,6 +179,7 @@ final class Dictation {
         recorder = rec
 
         duck()
+        plate?.invalidate(); plate = nil
         indicator = indicator ?? Indicator()
         indicator?.show(self)
         // Пока слушаем — плашка прозрачна для мыши: диктуют поверх чужого
@@ -197,6 +208,10 @@ final class Dictation {
         // Обработка занимает секунды, и всё это время плашка стоит над тем
         // местом, куда человек уже пишет дальше: разрешаем оттащить её.
         indicator?.allowMove(true)
+        // Отсчёт до исчезновения плашки идёт с отпускания клавиши, а каждая
+        // напечатанная порция его продлевает: плашка живёт, пока печатает,
+        // и уходит через пару секунд тишины.
+        holdPlate()
         recorder?.stop()
         // Сторож на случай, если процесс распознавания промолчит: висеть
         // с плашкой «Дописываю…» бесконечно нельзя.
@@ -294,8 +309,31 @@ final class Dictation {
     private func commit(_ target: String) {
         guard mode == .raw, target.count > typed.count else { return }
         let delta = String(target.dropFirst(typed.count))
+        targetName = Dictation.frontmostName()
         typer.type(delta)
         typed = target
+        holdPlate()
+    }
+
+    /// Имя приложения, которому достанутся нажатия.
+    private static func frontmostName() -> String {
+        NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
+    }
+
+    /// Убрать плашку, если печатать уже нечего, а обработка ещё идёт.
+    ///
+    /// После отпускания клавиши остаётся последний проход распознавания —
+    /// на длинной фразе это до десятка секунд. Текст к этому времени уже
+    /// напечатан предыдущими проходами, и плашка всё это время просто
+    /// стояла над чужим окном с надписью «Дописываю…». Теперь она уходит
+    /// через пару секунд после последней напечатанной порции; сама
+    /// обработка идёт как шла, и остаток допечатается без неё.
+    private func holdPlate() {
+        plate?.invalidate()
+        plate = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: false) { [weak self] _ in
+            guard let self, case .finishing = self.state else { return }
+            self.indicator?.hide()
+        }
     }
 
     /// Приглушить системный звук на время диктовки.
@@ -326,6 +364,7 @@ final class Dictation {
             worker.tidy(text: raw, level: settings.dictation_level) { [weak self] text, ok in
                 DispatchQueue.main.async {
                     guard let self else { return }
+                    self.targetName = Dictation.frontmostName()
                     self.typer.type(text)
                     self.typed = text
                     if !ok && !self.tidyUnavailableShown {
@@ -342,6 +381,7 @@ final class Dictation {
 
     private func done() {
         watchdog?.invalidate(); watchdog = nil
+        plate?.invalidate(); plate = nil
         finalPending = false
         state = .idle
         level = 0
@@ -952,7 +992,10 @@ private struct IndicatorView: View {
 
     private var label: String {
         switch dictation.state {
-        case .listening:  return "Слушаю"
+        // Пока слушаем, надпись — имя адресата: что запись идёт, видно по
+        // красной точке и столбикам громкости, а куда уйдёт текст — из
+        // плашки было не узнать никак.
+        case .listening:  return dictation.targetName.isEmpty ? "Слушаю" : dictation.targetName
         case .finishing:  return "Дописываю…"
         case .idle:       return "Готово"
         default:          return "Диктовка"
