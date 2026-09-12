@@ -13,7 +13,8 @@ import AVFoundation
 /// собеседников второй раз. Простая сумма даёт их удвоенными, с задержкой —
 /// расшифровка на такой записи разваливается. Поэтому перед сведением
 /// проверяется, слышит ли микрофон динамики, и если слышит — он приглушается
-/// ровно там, где звучит системная дорожка.
+/// ровно там, где в нём звучит эхо: с той задержкой, с какой звук доходит от
+/// динамика до микрофона.
 enum Mixdown {
 
     /// Формат обеих дорожек и результата: 16 кГц, моно, 16 бит.
@@ -33,6 +34,18 @@ enum Mixdown {
     /// 15 окон — 300 мс: быстрее начинает щёлкать на паузах между словами.
     private static let release = 15
 
+    /// Насколько далеко ищется задержка эха.
+    ///
+    /// Путь от динамика до микрофона — единицы миллисекунд, но к нему
+    /// прибавляются буферы обеих дорожек: отвод Core Audio отдаёт кадр
+    /// заметно раньше, чем тот же звук доходит до входа микрофона. Замер на
+    /// реальной записи встречи (45 минут, ноутбук с динамиками) дал 120 мс.
+    /// Прежние 3 окна (60 мс) до этого не дотягивались: корреляция на них
+    /// падала до 0.29 при 0.83 на настоящем сдвиге — эхо не находилось
+    /// вовсе, и микрофон уходил в сведение неприглушённым.
+    /// 20 окон — 400 мс с запасом на медленные машины.
+    private static let maxLag = 20
+
     /// Порог, выше которого считаем, что микрофон слышит динамики.
     /// Речь двух разных людей так не совпадает: 0.4 по огибающим — это уже
     /// одна и та же звуковая волна, пойманная дважды.
@@ -48,10 +61,10 @@ enum Mixdown {
     static func combine(system: URL, microphone: URL, into target: URL) throws -> Bool {
         let sys = try envelope(of: system)
         let mic = try envelope(of: microphone)
-        let ducking = echoLikely(system: sys, microphone: mic)
+        let lag = echoLag(system: sys, microphone: mic)
         try write(system: system, microphone: microphone,
-                  systemEnvelope: sys, into: target, ducking: ducking)
-        return ducking
+                  systemEnvelope: sys, into: target, lag: lag)
+        return lag != nil
     }
 
     // MARK: громкость по окнам
@@ -105,16 +118,21 @@ enum Mixdown {
         return result
     }
 
-    /// Слышит ли микрофон то же, что играет в динамиках.
+    /// Слышит ли микрофон то же, что играет в динамиках, и с какой задержкой.
     ///
     /// Считается корреляция громкостей двух дорожек по тем окнам, где
     /// системный звук вообще есть. Своя речь идёт своим ритмом и даёт около
-    /// нуля; эхо повторяет чужую громкость почти точно. Небольшой сдвиг —
-    /// путь от динамика до микрофона плюс буферы — перебирается лагом.
-    private static func echoLikely(system: [Float], microphone: [Float]) -> Bool {
+    /// нуля; эхо повторяет чужую громкость почти точно. Задержка — путь от
+    /// динамика до микрофона плюс буферы обеих дорожек — перебирается лагом,
+    /// и найденный лаг возвращается: приглушать микрофон надо там, где эхо
+    /// звучит, а не там, где звучал оригинал.
+    ///
+    /// Возвращает nil, если эха нет — человек в наушниках.
+    private static func echoLag(system: [Float], microphone: [Float]) -> Int? {
         let level = speechFloor(system)
         var best: Float = 0
-        for lag in 0...3 {
+        var bestLag = 0
+        for lag in 0...maxLag {
             var xs: [Float] = [], ys: [Float] = []
             var index = 0
             while index + lag < min(system.count, microphone.count) {
@@ -125,9 +143,10 @@ enum Mixdown {
                 index += 1
             }
             if xs.count < 50 { continue }
-            best = max(best, correlation(xs, ys))
+            let value = correlation(xs, ys)
+            if value > best { best = value; bestLag = lag }
         }
-        return best >= echoThreshold
+        return best >= echoThreshold ? bestLag : nil
     }
 
     /// Граница между тишиной и речью: тихие три четверти записи — это фон.
@@ -154,7 +173,7 @@ enum Mixdown {
     // MARK: сведение
 
     private static func write(system: URL, microphone: URL, systemEnvelope: [Float],
-                              into target: URL, ducking: Bool) throws {
+                              into target: URL, lag: Int?) throws {
         guard let sysFile = try? AVAudioFile(forReading: system),
               let micFile = try? AVAudioFile(forReading: microphone)
         else { throw Failure.unreadable }
@@ -164,7 +183,7 @@ enum Mixdown {
                                          commonFormat: .pcmFormatInt16, interleaved: true)
         else { throw Failure.unwritable }
 
-        let gains = ducking ? gainCurve(systemEnvelope) : []
+        let gains = lag.map { gainCurve(systemEnvelope, lag: $0) } ?? []
 
         let chunk = AVAudioFrameCount(window * 50)
         guard let sysBuffer = AVAudioPCMBuffer(pcmFormat: sysFile.processingFormat,
@@ -197,7 +216,7 @@ enum Mixdown {
                 let b = (mic != nil && i < Int(micBuffer.frameLength)) ? mic![i] : 0
                 // Приглушение меняется плавно внутри окна: ступенька на
                 // границе слышна щелчком и сама попадает в расшифровку.
-                let gain = ducking ? gain(at: position + i, in: gains) : 1
+                let gain = gains.isEmpty ? 1 : gain(at: position + i, in: gains)
                 let sum = max(-1, min(1, a + b * gain)) * 32767
                 mixed[i] = Int16(sum.rounded())
             }
@@ -207,14 +226,20 @@ enum Mixdown {
         }
     }
 
-    /// Коэффициент микрофона для каждого окна: тихо там, где звучит
-    /// системная дорожка, и плавный возврат к единице после неё.
-    private static func gainCurve(_ envelope: [Float]) -> [Float] {
+    /// Коэффициент микрофона для каждого окна: тихо там, где в микрофоне
+    /// звучит эхо системной дорожки, и плавный возврат к единице после неё.
+    ///
+    /// Кривая строится по системной громкости и сдвигается на задержку эха:
+    /// без сдвига приглушение приходило на 120 мс раньше самого эха, и начало
+    /// каждой чужой фразы проходило в сведение в полный голос.
+    /// Одно окно сверху — запас на дрожание задержки внутри записи.
+    private static func gainCurve(_ envelope: [Float], lag: Int) -> [Float] {
         let level = speechFloor(envelope)
-        var gains = [Float](repeating: 1, count: envelope.count)
+        let shift = max(lag - 1, 0)
+        var gains = [Float](repeating: 1, count: envelope.count + shift)
         var hold = 0
-        for index in 0..<envelope.count {
-            if envelope[index] > level {
+        for index in shift..<gains.count {
+            if envelope[index - shift] > level {
                 hold = release
                 gains[index] = duckGain
             } else if hold > 0 {
