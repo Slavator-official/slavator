@@ -171,6 +171,9 @@ final class Dictation {
         duck()
         indicator = indicator ?? Indicator()
         indicator?.show(self)
+        // Пока слушаем — плашка прозрачна для мыши: диктуют обычно поверх
+        // чужого окна, и щелчок должен доходить до него.
+        indicator?.allowDismiss(false)
 
         clock = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             self?.seconds += 0.1
@@ -191,6 +194,10 @@ final class Dictation {
         clock?.invalidate(); clock = nil
         state = .finishing
         level = 0
+        // Обработка занимает секунды, и всё это время плашка стоит над тем
+        // местом, куда человек уже пишет дальше. Теперь её можно убрать
+        // щелчком — на печать текста это не влияет.
+        indicator?.allowDismiss(true)
         recorder?.stop()
         // Сторож на случай, если процесс распознавания промолчит: висеть
         // с плашкой «Дописываю…» бесконечно нельзя.
@@ -817,32 +824,73 @@ private final class Hotkey {
 // MARK: - Плашка поверх окон
 
 /// Показывает, что микрофон слышит и что уже напечатано.
-private final class Indicator {
+///
+/// Плашка висит поверх всех окон, а значит стоит на чужом пути. Отсюда три
+/// правила. Ширина — по содержимому: фиксированные 360 точек оставались
+/// пустыми на короткой надписи и закрывали собой строку ввода. Место —
+/// впритык над доком, ниже всего, что можно закрыть. И на время обработки
+/// плашку можно убрать щелчком: расшифровка идёт секунды, всё это время
+/// плашка стояла над полем, куда человек уже пытался писать дальше.
+private final class Indicator: NSObject, NSWindowDelegate {
     private var panel: NSPanel?
+    /// Человек убрал плашку сам — до конца этой диктовки не показываем.
+    private var dismissed = false
 
     func show(_ dictation: Dictation) {
+        dismissed = false
         if panel == nil {
-            let view = NSHostingView(rootView: IndicatorView(dictation: dictation))
-            let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 360, height: 46),
-                                 styleMask: [.borderless, .nonactivatingPanel],
-                                 backing: .buffered, defer: false)
-            window.contentView = view
+            // Размер окна ведёт SwiftUI: preferredContentSize пересчитывается
+            // на каждую смену надписи, и окно ужимается вместе с плашкой.
+            let controller = NSHostingController(rootView: IndicatorView(dictation: dictation))
+            controller.sizingOptions = [.preferredContentSize]
+            let window = NSPanel(contentViewController: controller)
+            window.styleMask = [.borderless, .nonactivatingPanel]
             window.isOpaque = false
             window.backgroundColor = .clear
             window.hasShadow = true
             window.level = .statusBar
+            // Пока идёт диктовка, щелчки проходят насквозь: плашка не должна
+            // перехватывать попадание по кнопке чужого окна под ней.
             window.ignoresMouseEvents = true
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+            window.delegate = self
+            // Щелчок по плашке убирает её. Обрабатываем жестом, а не кнопкой
+            // SwiftUI: кнопке нужно ключевое окно, а забрать фокус у окна, в
+            // которое сейчас печатается текст, нельзя.
+            let click = NSClickGestureRecognizer(target: self, action: #selector(dismiss))
+            controller.view.addGestureRecognizer(click)
             panel = window
         }
-        guard let panel, let screen = NSScreen.main else { return }
-        let frame = screen.visibleFrame
-        panel.setFrameOrigin(NSPoint(x: frame.midX - panel.frame.width / 2,
-                                     y: frame.minY + 82))
-        panel.orderFrontRegardless()
+        place()
+        panel?.orderFrontRegardless()
+    }
+
+    /// Разрешить убрать плашку щелчком. Включается на время обработки.
+    func allowDismiss(_ allowed: Bool) {
+        panel?.ignoresMouseEvents = !allowed
+    }
+
+    @objc private func dismiss() {
+        dismissed = true
+        hide()
     }
 
     func hide() { panel?.orderOut(nil) }
+
+    /// Плашка стоит над доком по центру экрана.
+    private func place() {
+        guard let panel, let screen = NSScreen.main else { return }
+        let frame = screen.visibleFrame
+        panel.setFrameOrigin(NSPoint(x: frame.midX - panel.frame.width / 2,
+                                     y: frame.minY + 12))
+    }
+
+    /// Ширина меняется вместе с надписью — плашку надо заново поставить по
+    /// центру, иначе она ползёт вбок при каждой смене состояния.
+    func windowDidResize(_ notification: Notification) {
+        guard !dismissed else { return }
+        place()
+    }
 }
 
 private struct IndicatorView: View {
@@ -862,24 +910,39 @@ private struct IndicatorView: View {
             Circle()
                 .fill(dictation.state == .listening ? Color(hex: 0xE0705F) : Color(hex: 0x19C37D))
                 .frame(width: 9, height: 9)
-            HStack(alignment: .bottom, spacing: 2.5) {
-                ForEach(0..<6, id: \.self) { i in
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(Color(hex: 0x5590FF))
-                        .frame(width: 3, height: barHeight(i))
+            // Столбики — это громкость микрофона. После отпускания клавиши
+            // микрофон уже выключен, они стояли бы неподвижно и занимали
+            // место: на обработке показываем только надпись.
+            if dictation.state == .listening {
+                HStack(alignment: .bottom, spacing: 2.5) {
+                    ForEach(0..<6, id: \.self) { i in
+                        RoundedRectangle(cornerRadius: 1.5)
+                            .fill(Color(hex: 0x5590FF))
+                            .frame(width: 3, height: barHeight(i))
+                    }
                 }
+                .frame(height: 17)
             }
-            .frame(height: 17)
             Text(label).font(.system(size: 13, weight: .medium))
             if dictation.state == .listening {
                 Text(String(format: "%d:%02d", Int(dictation.seconds) / 60, Int(dictation.seconds) % 60))
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
-            Spacer(minLength: 0)
+            if dictation.state == .finishing {
+                // Подсказка, что плашку можно убрать: обработка идёт своим
+                // чередом и без неё, текст всё равно будет напечатан.
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(Color(hex: 0x8FA6C4))
+                    .padding(4)
+                    .background(Circle().fill(Color(hex: 0x18293F)))
+            }
         }
+        // Плашка шириной ровно по содержимому: на «Дописываю…» она короче,
+        // чем на «Слушаю» с таймером, и закрывает собой меньше чужого окна.
         .padding(.horizontal, 16)
-        .frame(width: 360, height: 46)
+        .frame(height: 46)
         .background(
             RoundedRectangle(cornerRadius: 23)
                 .fill(Color(hex: 0x0C1826))
