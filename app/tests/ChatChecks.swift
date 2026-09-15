@@ -52,6 +52,12 @@ struct Record {
         let old = Data("{\"role\":\"user\",\"id\":\"00000000-0000-0000-0000-000000000001\",\"text\":\"old\"}".utf8)
         let message = try JSONDecoder().decode(Chat.Message.self, from: old)
         precondition(message.sources == nil && message.fromMemory == nil && message.documentNotice == nil)
+        let legacyText = "Ответ [1].\n\nОтвет локальной модели — проверьте по источникам.\n\nИспользовано фрагментов: 6 из 8. Это выборка, не полный разбор всего документа."
+        let legacyDocument = Chat.Message(role: .model, text: legacyText, fromDocument: true)
+        precondition(legacyDocument.documentPresentation.text == "Ответ [1].")
+        precondition(legacyDocument.documentPresentation.notice?.contains("выборка") == true)
+        precondition(legacyDocument.text == legacyText)
+        precondition(Chat.Message(role: .user, text: legacyText).documentPresentation.text == legacyText)
         print("PASS: чат — источники, сохранение, старый формат, отмена и изоляция переписок")
 
         let documentWorker = """

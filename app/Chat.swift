@@ -22,6 +22,25 @@ final class Chat {
         var documentSources: [DocumentCitation]? = nil
         var documentName: String? = nil
         var documentNotice: String? = nil
+
+        // Older conversations stored this generated footer in the answer.
+        // Separate it only for display; never rewrite the saved message.
+        var documentPresentation: (text: String, notice: String?) {
+            guard role == .model, fromDocument == true else { return (text, documentNotice) }
+            var answer = text
+            var notice = documentNotice
+            if notice == nil, let range = answer.range(of: "\n\nИспользовано фрагментов:", options: .backwards) {
+                notice = String(answer[range.lowerBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                answer = String(answer[..<range.lowerBound])
+            }
+            let disclaimer = "\n\nОтвет локальной модели — проверьте по источникам."
+            if answer.hasSuffix(disclaimer) {
+                answer.removeLast(disclaimer.count)
+                notice = "Ответ локальной модели — проверьте по источникам." +
+                    ((notice ?? "").isEmpty ? "" : "\n" + (notice ?? ""))
+            }
+            return (answer, notice)
+        }
     }
 
     struct Conversation: Identifiable, Codable, Equatable {
@@ -478,7 +497,7 @@ struct ChatScreen: View {
             Text(message.role == .user ? "Вы" : "Модель")
                 .font(Kind.eyebrow()).tracking(0.8)
                 .foregroundStyle(message.role == .user ? p.accent2 : p.faint)
-            Text(Self.rendered(message.text))
+            Text(Self.rendered(message.documentPresentation.text))
                 .font(Kind.body(14)).textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .layoutPriority(1)
@@ -486,8 +505,8 @@ struct ChatScreen: View {
                 Text("Документ: " + name + " · локально").font(Kind.body(11)).foregroundStyle(p.muted)
                     .lineLimit(1).truncationMode(.middle).help(name)
             }
-            if !(message.documentSources ?? []).isEmpty || !(message.documentNotice ?? "").isEmpty {
-                DocumentSourcesView(sources: message.documentSources ?? [], notice: message.documentNotice)
+            if !(message.documentSources ?? []).isEmpty || !(message.documentPresentation.notice ?? "").isEmpty {
+                DocumentSourcesView(sources: message.documentSources ?? [], notice: message.documentPresentation.notice)
             }
             if let sources = message.sources {
                 ForEach(Array(sources.enumerated()), id: \.element.id) { number, quote in
