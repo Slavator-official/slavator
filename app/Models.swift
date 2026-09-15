@@ -138,13 +138,21 @@ struct UnknownVoice: Identifiable {
     /// (тогда оно лежит в speaker_names.json) или только предложено.
     var inferred: String = ""
 
-    /// Ядро кладёт догадку прямо в имя файла: «SPEAKER_01 — возможно, Богдан».
+    /// Ядро кладёт догадку прямо в имя файла: «SPEAKER_01 — возможно, Богдан»,
+    /// если имя прозвучало в разговоре, и «SPEAKER_01 — по голосу, Богдан»,
+    /// если голос похож на карточку, у которой слишком мало образцов, чтобы
+    /// подписать без спроса.
     var guess: String? {
         if !inferred.isEmpty { return inferred }
         let stem = url.deletingPathExtension().lastPathComponent
-        guard let range = stem.range(of: "возможно,") else { return nil }
+        guard let range = stem.range(of: "возможно,") ?? stem.range(of: "по голосу,") else { return nil }
         let value = stem[range.upperBound...].trimmingCharacters(in: .whitespaces)
         return value.isEmpty ? nil : value
+    }
+
+    /// Догадка сделана по сходству голоса, а не по разговору.
+    var guessedByVoice: Bool {
+        inferred.isEmpty && url.deletingPathExtension().lastPathComponent.contains("по голосу,")
     }
 
     var label: String {

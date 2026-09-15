@@ -184,6 +184,12 @@ VOICE_THRESHOLD = float(os.environ.get("MEETING_TRANSCRIBER_VOICE_THRESHOLD", "0
 # Одного порога мало: лучший кандидат должен ещё и заметно опережать второго.
 # На тех же данных верное совпадение опережало следующее минимум на 0.050.
 VOICE_MARGIN = float(os.environ.get("MEETING_TRANSCRIBER_VOICE_MARGIN", "0.03"))
+# Сколько образцов нужно карточке, чтобы подписывать голос её именем без
+# спроса. Отпечаток из одного образца — это один микрофон и один день: запись
+# 15.09 с голосом Славы через наушники оказалась ближе к единственному образцу
+# Мигалина (0.83), чем к шести образцам самого Славы (0.67), и 88% встречи
+# было подписано чужим именем. Такое совпадение предлагаем, а не применяем.
+MIN_PROFILE_SAMPLES = int(os.environ.get("MEETING_TRANSCRIBER_MIN_PROFILE_SAMPLES", "2"))
 # Эмбеддинг с короткого фрагмента нестабилен, поэтому есть нижняя граница.
 MIN_EMBED_SECONDS = 0.8
 # Длина WAV-образца для неопознанного голоса, который увидит пользователь в GUI.
@@ -365,6 +371,9 @@ class SpeakerMatch:
     similarity: float = 0.0
     total_speech: float = 0.0
     best_segment: Optional[Tuple[float, float]] = None
+    # На кого голос похож, если имя не применено: карточке не хватило
+    # образцов. Уходит в подсказку «по голосу», решает человек.
+    voice_guess: str = ""
 
     @property
     def known(self) -> bool:
@@ -1633,9 +1642,16 @@ def identify_speakers(
         if best_key and best_score >= VOICE_THRESHOLD and (
             len(scores) == 1 or margin >= VOICE_MARGIN
         ):
-            match.profile_key = best_key
-            match.name = str(profiles.get(best_key, {}).get("name", best_key))
-            log(f"    {speaker} -> {match.name} (близость {best_score:.2f})")
+            name = str(profiles.get(best_key, {}).get("name", best_key))
+            samples = int(profiles.get(best_key, {}).get("samples") or 1)
+            if samples < MIN_PROFILE_SAMPLES:
+                match.voice_guess = name
+                log(f"    {speaker} -> похож на {name} ({best_score:.2f}), но у карточки "
+                    f"образцов: {samples} - только предлагаем")
+            else:
+                match.profile_key = best_key
+                match.name = name
+                log(f"    {speaker} -> {match.name} (близость {best_score:.2f})")
         elif best_key and best_score >= VOICE_THRESHOLD:
             # Похож сразу на двоих - честнее отдать пользователю, чем гадать.
             log(f"    {speaker} -> неоднозначно: {best_score:.2f} против {runner_up:.2f}")
@@ -1966,6 +1982,12 @@ def export_unknown_voices(
         if hint and not hint.get("applied"):
             safe = re.sub(r"[^\w\s.-]", "", hint["name"]).strip()
             target = unknown_dir / f"{match.speaker_id} — возможно, {safe}.wav"
+        elif match.voice_guess:
+            # Своя пометка, а не «возможно»: интерфейс должен сказать, что
+            # имя определено по голосу, а не по разговору, — это разные
+            # степени доверия, и путать их значит вводить в заблуждение.
+            safe = re.sub(r"[^\w\s.-]", "", match.voice_guess).strip()
+            target = unknown_dir / f"{match.speaker_id} — по голосу, {safe}.wav"
         else:
             target = unknown_dir / f"{match.speaker_id}.wav"
         length = write_wav_excerpt(wav, target, chosen)
@@ -1975,7 +1997,8 @@ def export_unknown_voices(
             {
                 "speaker_id": match.speaker_id,
                 "wav": target.name,
-                "suggested_name": (hints.get(match.speaker_id) or {}).get("name", ""),
+                "suggested_name": (hints.get(match.speaker_id) or {}).get("name", "")
+                                  or match.voice_guess,
                 "suggested_confidence": (hints.get(match.speaker_id) or {}).get("confidence", 0),
                 "duration": round(length, 2),
                 "total_speech": round(match.total_speech, 2),
@@ -2394,6 +2417,8 @@ NAMES_TEMPLATE = """Определи, как зовут участников в�
 - НЕ придумывай и НЕ угадывай имена, которых в тексте нет;
 - если про голос ничего не понятно - не включай его в ответ;
 - confidence 0.9+ только при самопредставлении или явном обращении;
+- подпись перед двоеточием в стенограмме - НЕ доказательство: имя должно
+  прозвучать в самих словах участников;
 - уже названных по имени участников (не SPEAKER_XX) в ответ не включай.
 
 Неопознанные голоса: {unknown}
@@ -2437,7 +2462,13 @@ def infer_speaker_names(utterances: list, extra_dir: Path) -> dict:
         warn(f"Определение имён по контексту пропущено: {exc}")
         return {}
 
-    haystack = _normalized(transcript_as_text(utterances))
+    # Проверяем по сказанному, без подписей голосов. В стенограмме для
+    # модели уже опознанные голоса подписаны именами, и проверка по ней
+    # пропускала любое такое имя: «Мигалин Сергей: большой экран...» — имя
+    # «встречается в тексте», хотя вслух его никто не произносил. Модель брала
+    # подпись за доказательство и раздавала то же имя соседнему голосу, а
+    # ошибка сличения подтверждала сама себя под видом подсказки по разговору.
+    haystack = _normalized(" ".join(item.text for item in utterances))
     hints: dict = {}
     for entry in answer.get("speakers", []) or []:
         if not isinstance(entry, dict):

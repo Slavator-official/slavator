@@ -428,8 +428,9 @@ struct MainScreen: View {
                             Text(voice.guess.map { "Похоже, это \($0)" }
                                  ?? library.label(for: voice))
                                 .font(Kind.strong(14))
-                            Text(voice.guess != nil ? "имя определено по разговору"
-                                                    : "по имени к нему не обращались")
+                            Text(voice.guess == nil ? "по имени к нему не обращались"
+                                 : voice.guessedByVoice ? "похож по голосу, проверьте"
+                                 : "имя определено по разговору")
                                 .font(Kind.body(12.5)).foregroundStyle(p.muted)
                         }
                         Spacer(minLength: 8)
@@ -1300,8 +1301,13 @@ private struct VoiceCard: View {
             HStack(alignment: .top, spacing: 9) {
                 Image(systemName: voice.guess != nil ? "sparkles" : "questionmark.circle")
                     .font(.system(size: 13)).foregroundStyle(voice.guess != nil ? p.accent2 : p.warn)
-                Text(voice.guess.map { "Похоже, это \($0) — определено по разговору" }
-                     ?? "По разговору имя определить не удалось: по имени к нему не обращались.")
+                Text(voice.guess.map {
+                    voice.guessedByVoice
+                        // Честно про степень доверия: сходство голоса с
+                        // карточкой из одного образца уже ошибалось.
+                        ? "Голосом похож на \($0), но образцов у карточки мало — послушайте и проверьте"
+                        : "Похоже, это \($0) — определено по разговору"
+                } ?? "По разговору имя определить не удалось: по имени к нему не обращались.")
                     .font(Kind.body(13)).foregroundStyle(p.text)
             }
             .padding(11)
