@@ -125,6 +125,10 @@ struct EnrollSheet: View {
 
     var library: Library
     let samples: [URL]
+    /// Имя, определённое по разговору. Окно открывается уже заполненным:
+    /// если такой человек есть в списке — выбран он, если нет — поля нового
+    /// заполнены. nil — окно пустое, человек выбирает сам.
+    var suggestion: String? = nil
     var onDone: () -> Void
 
     @State private var enrollment = Enrollment()
@@ -191,7 +195,40 @@ struct EnrollSheet: View {
         .background(p.surface)
         .interactiveDismissDisabled(enrollment.isRunning)
         .environment(\.palette, library.palette)
-        .onAppear { existing = library.speakers.first?.name ?? "" }
+        .onAppear { preset() }
+    }
+
+    /// Заполнить окно по подсказке.
+    ///
+    /// Раньше «Это Мигалин Сергей» открывал такое же пустое окно, как
+    /// «Выбрать человека…»: подсказку показывали, но в привязку не
+    /// передавали, и имя приходилось искать или набирать заново.
+    private func preset() {
+        existing = library.speakers.first?.name ?? ""
+        guard let suggestion, !suggestion.isEmpty else { return }
+        // Ядро пишет догадку как «Имя Фамилия, организация».
+        let parts = suggestion.split(separator: ",", maxSplits: 1)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        let person = parts.first ?? suggestion
+        if let known = library.speakers.first(where: { Self.sameName($0.name, person) }) {
+            mode = "old"
+            existing = known.name
+        } else {
+            mode = "new"
+            name = person
+            if parts.count > 1 { company = parts[1] }
+        }
+    }
+
+    /// Одно ли это имя. Порядок в разговоре произвольный — «Мигалин Сергей»
+    /// и «Сергей Мигалин» один человек; ё и е тоже не различаем.
+    static func sameName(_ a: String, _ b: String) -> Bool {
+        func words(_ text: String) -> Set<String> {
+            Set(text.lowercased().replacingOccurrences(of: "ё", with: "е")
+                .split(whereSeparator: { !$0.isLetter }).map(String.init))
+        }
+        let left = words(a)
+        return !left.isEmpty && left == words(b)
     }
 
     private var canSave: Bool {

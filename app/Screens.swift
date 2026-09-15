@@ -1053,6 +1053,9 @@ struct NewVoicesScreen: View {
     @Environment(\.palette) private var p
     @State private var selected: Set<URL> = []
     @State private var enrolling = false
+    /// Имя, с которым открыть окно привязки: подсказка «по разговору» или
+    /// ничего, если человек выбрал «Другой человек…».
+    @State private var suggested: String?
 
     private var dismissed: [UnknownVoice] { library.dismissed }
     @State private var split = VoiceSplit()
@@ -1136,8 +1139,9 @@ struct NewVoicesScreen: View {
                                           busy: split.isRunning) {
                                     if selected.contains(voice.url) { selected.remove(voice.url) }
                                     else { selected.insert(voice.url) }
-                                } assign: {
+                                } assign: { suggestion in
                                     selected = [voice.url]
+                                    suggested = suggestion
                                     enrolling = true
                                 } dismiss: {
                                     selected.remove(voice.url)
@@ -1164,7 +1168,10 @@ struct NewVoicesScreen: View {
                         // отмеченную пачку сразу означало бы делить каждый на
                         // одно и то же число, чего никто не имеет в виду.
                         Menu {
-                            Button("Выбрать человека…") { enrolling = true }
+                            Button("Выбрать человека…") {
+                                suggested = nil
+                                enrolling = true
+                            }
                             // Делить можно только один голос: у отмеченной
                             // пачки это означало бы разделить каждый на одно и
                             // то же число, чего никто не имеет в виду. Пункт
@@ -1211,8 +1218,9 @@ struct NewVoicesScreen: View {
             }
         }
         .sheet(isPresented: $enrolling) {
-            EnrollSheet(library: library, samples: Array(selected)) {
+            EnrollSheet(library: library, samples: Array(selected), suggestion: suggested) {
                 selected.removeAll()
+                suggested = nil
             }
         }
     }
@@ -1235,7 +1243,9 @@ private struct VoiceCard: View {
     var selected: Bool = false
     var busy = false
     var toggle: () -> Void = {}
-    var assign: () -> Void = {}
+    /// Привязать голос. Аргумент — имя, которым заполнить окно: подсказка
+    /// по разговору, или nil, чтобы выбрать человека самому.
+    var assign: (String?) -> Void = { _ in }
     var dismiss: (() -> Void)? = nil
     var split: ((Int) -> Void)? = nil
 
@@ -1306,7 +1316,15 @@ private struct VoiceCard: View {
             // слогам, хотя выбирают из них раз в жизни.
             HStack(spacing: 8) {
                 Menu {
-                    Button(voice.guess.map { "Это \($0)" } ?? "Выбрать человека…") { assign() }
+                    if let guess = voice.guess {
+                        Button("Это \(guess)") { assign(guess) }
+                        // Подсказка по разговору ошибается: человека зовут по
+                        // имени, а говорит в этот момент другой. Выбрать
+                        // иначе раньше было некуда — пункт вёл в то же окно.
+                        Button("Другой человек…") { assign(nil) }
+                    } else {
+                        Button("Выбрать человека…") { assign(nil) }
+                    }
                     if let split {
                         Divider()
                         // Сколько человек — говорит человек, а не подбор:
