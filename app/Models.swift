@@ -61,10 +61,17 @@ enum Paths {
     static var glossary: URL {
         URL(fileURLWithPath: (AppConfiguration.environment()["MEETING_TRANSCRIBER_GLOSSARY"]! as NSString).expandingTildeInPath)
     }
+    /// Список проектов: лежит рядом со словарём терминов — оба про то, как
+    /// программа понимает вашу работу, и оба правятся руками.
+    static var projects: URL { glossary.deletingLastPathComponent().appending(path: "projects.json") }
 
     /// Каталог с промежуточными файлами внутри результата. Имя задаётся ядром.
     static let extraDir = "доп файлы, на случай ошибки summary"
     static let unknownDir = "Новые спикеры"
+    /// Голоса, которых человек опознать не смог. Лежат подпапкой внутри
+    /// «Новых спикеров»: список читает только верхний уровень, поэтому
+    /// отложенные пропадают из него сами, но остаются файлами на диске.
+    static let dismissedDir = "Не удалось определить"
 
     /// Ядро приложения внутри бандла.
     static var core: URL {
@@ -131,13 +138,21 @@ struct UnknownVoice: Identifiable {
     /// (тогда оно лежит в speaker_names.json) или только предложено.
     var inferred: String = ""
 
-    /// Ядро кладёт догадку прямо в имя файла: «SPEAKER_01 — возможно, Богдан».
+    /// Ядро кладёт догадку прямо в имя файла: «SPEAKER_01 — возможно, Богдан»,
+    /// если имя прозвучало в разговоре, и «SPEAKER_01 — по голосу, Богдан»,
+    /// если голос похож на карточку, у которой слишком мало образцов, чтобы
+    /// подписать без спроса.
     var guess: String? {
         if !inferred.isEmpty { return inferred }
         let stem = url.deletingPathExtension().lastPathComponent
-        guard let range = stem.range(of: "возможно,") else { return nil }
+        guard let range = stem.range(of: "возможно,") ?? stem.range(of: "по голосу,") else { return nil }
         let value = stem[range.upperBound...].trimmingCharacters(in: .whitespaces)
         return value.isEmpty ? nil : value
+    }
+
+    /// Догадка сделана по сходству голоса, а не по разговору.
+    var guessedByVoice: Bool {
+        inferred.isEmpty && url.deletingPathExtension().lastPathComponent.contains("по голосу,")
     }
 
     var label: String {
@@ -147,6 +162,18 @@ struct UnknownVoice: Identifiable {
 }
 
 /// Обработанная встреча.
+/// Что ядро решило о принадлежности встречи: проект, тип и — если решить не
+/// смогло — вопросы человеку.
+struct MeetingCard: Decodable {
+    var project = ""
+    var known = false
+    var confidence = 0.0
+    var type = ""
+    var why = ""
+    var questions: [String] = []
+    var needs_review = false
+}
+
 struct Record: Identifiable {
     var id: URL { dir }
     let dir: URL
@@ -160,6 +187,14 @@ struct Record: Identifiable {
     /// Резюме встречи: решения, поручения и кто за что отвечает.
     /// Появляется после расшифровки и разделения по голосам.
     var summary: URL? { existing("02_summary_todo.docx") }
+
+    /// Проект и тип встречи. Пусто, пока не собрано резюме или пока
+    /// автоопределение выключено.
+    var meeting: MeetingCard? {
+        guard let url = existing("meeting.json"),
+              let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(MeetingCard.self, from: data)
+    }
     var transcript: URL? { existing("01_transcript.docx") }
 
     /// Исходная запись встречи. Ядро удаляет свою рабочую копию после
@@ -187,8 +222,11 @@ struct Record: Identifiable {
         return existing("\(Paths.extraDir)/work/audio_16k.wav")
     }
 
-    /// Дорожка с вашим голосом: при записи звонка она пишется отдельным
-    /// файлом, и фрагменты ваших реплик звучат из неё, а не из системной.
+    /// Дорожка с вашим голосом — у записей, сделанных до сведения дорожек.
+    ///
+    /// Тогда живой захват оставлял два файла, и реплики с меткой OWN звучали
+    /// из микрофонного. Новые записи сводятся в одну дорожку ещё при
+    /// остановке, метки OWN в них нет, и этот путь просто не находит файла.
     var ownTrack: URL? {
         // Ищем рядом с самой записью, а не рядом с результатом: при живом
         // захвате обе дорожки пишутся в одну папку, но результат может
@@ -240,6 +278,92 @@ final class Library {
         let shades = palette.speakers
         colors = Dictionary(uniqueKeysWithValues:
             speakers.map(\.key).sorted().enumerated().map { ($1, shades[$0 % shades.count]) })
+        adoptMyCard()
+    }
+
+    // MARK: о себе
+
+    /// Карточка самого владельца среди «Спикеров» — та, что названа его именем.
+    var mySpeaker: Speaker? {
+        let mine = settings.my_name.trimmingCharacters(in: .whitespaces)
+        guard !mine.isEmpty else { return nil }
+        return speakers.first { $0.name.caseInsensitiveCompare(mine) == .orderedSame }
+    }
+
+    /// Голоса, отложенные как неопознаваемые, по всем встречам.
+    var dismissed: [UnknownVoice] { records.flatMap(Self.readDismissed) }
+
+    /// Отложить голос: человек его не узнаёт, и в списке он только мешает.
+    ///
+    /// Файл переезжает в подпапку, а не удаляется: голос — единственный след
+    /// живого человека на записи, и стереть его насовсем из-за того, что не
+    /// вспомнили имя, — потеря без возврата.
+    func dismissUnknown(_ voice: UnknownVoice) {
+        let bin = voice.url.deletingLastPathComponent().appending(path: Paths.dismissedDir)
+        move(voice.url, to: bin)
+    }
+
+    /// Вернуть отложенный голос обратно в список.
+    func restoreUnknown(_ voice: UnknownVoice) {
+        move(voice.url, to: voice.url.deletingLastPathComponent().deletingLastPathComponent())
+    }
+
+    private func move(_ url: URL, to folder: URL) {
+        let files = FileManager.default
+        try? files.createDirectory(at: folder, withIntermediateDirectories: true)
+        let target = folder.appending(path: url.lastPathComponent)
+        guard !files.fileExists(atPath: target.path) else { return }
+        do { try files.moveItem(at: url, to: target) } catch { return }
+        unknown = records.flatMap(Self.readUnknown)
+    }
+
+    /// Сохранить «о себе» и продублировать в свою карточку.
+    ///
+    /// Должность и компания видны в двух местах — в настройках и под именем в
+    /// «Спикерах». Пишем сразу в оба: иначе человек, поправив одно, увидит в
+    /// другом старое и не поймёт, какое из них настоящее.
+    func saveMyCard() {
+        settings.save()
+        guard let mine = mySpeaker else { return }
+        writeCard(key: mine.key, position: settings.my_position, company: settings.my_company)
+        guard let index = speakers.firstIndex(where: { $0.key == mine.key }) else { return }
+        speakers[index].position = settings.my_position
+        speakers[index].company = settings.my_company
+    }
+
+    /// Подхватить должность и компанию из своей карточки.
+    ///
+    /// Раньше вписать их можно было только при заведении человека, и у тех,
+    /// кто так и сделал, они лежат в profiles.json. Если в настройках пусто —
+    /// берём оттуда, иначе поля «о себе» встретят человека пустыми, и он
+    /// решит, что введённое пропало.
+    private func adoptMyCard() {
+        guard settings.my_position.isEmpty, settings.my_company.isEmpty,
+              let mine = mySpeaker,
+              !(mine.position.isEmpty && mine.company.isEmpty) else { return }
+        settings.my_position = mine.position
+        settings.my_company = mine.company
+        settings.save()
+    }
+
+    /// Переписать в profiles.json две строки одной карточки.
+    ///
+    /// Файл перечитывается перед записью и меняется по одному ключу: ядро
+    /// пишет туда же — новые профили и отпечатки, — и целиком записанный
+    /// файл затёр бы его работу.
+    private func writeCard(key: String, position: String, company: String) {
+        let path = Paths.profiles.appending(path: "profiles.json")
+        guard let data = try? Data(contentsOf: path),
+              let stored = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var info = stored[key] as? [String: Any] else { return }
+        info["position"] = position
+        info["company"] = company
+        var raw = stored
+        raw[key] = info
+        guard let out = try? JSONSerialization.data(
+            withJSONObject: raw, options: [.prettyPrinted, .withoutEscapingSlashes])
+        else { return }
+        try? out.write(to: path, options: .atomic)
     }
 
     /// Цвет реплики.
@@ -315,10 +439,32 @@ final class Library {
         }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
+    /// Названия проектов из списка — для выбора руками.
+    static func projectNames() -> [String] {
+        guard let data = try? Data(contentsOf: Paths.projects),
+              let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let items = raw["projects"] as? [[String: Any]] else { return [] }
+        return items.compactMap { $0["name"] as? String }
+            .filter { !$0.isEmpty }
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
     static func readRecords(in folder: String) -> [Record] {
         let root = URL(fileURLWithPath: folder)
-        let items = (try? FileManager.default.contentsOfDirectory(
+        let manager = FileManager.default
+        let top = (try? manager.contentsOfDirectory(
             at: root, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+
+        // Разложенные по проектам встречи лежат на уровень глубже. Ищем и там,
+        // иначе включённая группировка выглядела бы как пропажа записей.
+        var items = top
+        for folder in top where !folder.lastPathComponent.hasSuffix("_result") {
+            var isDir: ObjCBool = false
+            guard manager.fileExists(atPath: folder.path, isDirectory: &isDir),
+                  isDir.boolValue else { continue }
+            items += (try? manager.contentsOfDirectory(
+                at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        }
 
         return items
             .filter { $0.lastPathComponent.hasSuffix("_result") }
@@ -374,6 +520,22 @@ final class Library {
 
     static func readUnknown(in record: Record) -> [UnknownVoice] {
         let folder = record.dir.appending(path: Paths.extraDir).appending(path: Paths.unknownDir)
+        let items = (try? FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: nil)) ?? []
+        let names = readNames(in: record.dir)
+        return items.filter { $0.pathExtension.lowercased() == "wav" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .map { url in
+                let id = url.deletingPathExtension().lastPathComponent
+                    .components(separatedBy: " — ").first ?? ""
+                return UnknownVoice(url: url, record: record.dir, inferred: names[id] ?? "")
+            }
+    }
+
+    /// Отложенные голоса — те же карточки, только из подпапки.
+    static func readDismissed(in record: Record) -> [UnknownVoice] {
+        let folder = record.dir.appending(path: Paths.extraDir)
+            .appending(path: Paths.unknownDir).appending(path: Paths.dismissedDir)
         let items = (try? FileManager.default.contentsOfDirectory(
             at: folder, includingPropertiesForKeys: nil)) ?? []
         let names = readNames(in: record.dir)

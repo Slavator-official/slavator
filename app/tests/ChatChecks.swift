@@ -51,7 +51,7 @@ struct Record {
         precondition(restored.conversations.contains { $0.messages.contains { $0.sources?.first?.id == "quote" } })
         let old = Data("{\"role\":\"user\",\"id\":\"00000000-0000-0000-0000-000000000001\",\"text\":\"old\"}".utf8)
         let message = try JSONDecoder().decode(Chat.Message.self, from: old)
-        precondition(message.sources == nil && message.fromMemory == nil)
+        precondition(message.sources == nil && message.fromMemory == nil && message.documentNotice == nil)
         print("PASS: чат — источники, сохранение, старый формат, отмена и изоляция переписок")
 
         let documentWorker = """
@@ -69,7 +69,7 @@ struct Record {
         elif action=='answer':
             citations=[dict(id='1',locator='Страница 1',text='Точная цитата из файла',block='1',shortened=False)]
             print(json.dumps(dict(event='sources',citations=citations)),flush=True)
-            result=dict(text=r['question'],citations=citations)
+            result=dict(text=r['question'],citations=citations,notice='Выбрана часть документа')
         elif action=='conversation': result=dict(text='Локальное продолжение')
         elif action=='export_docx': result={'data':'Y2xlYW4='}
         print(json.dumps(dict(event='result',**result)),flush=True)
@@ -132,6 +132,9 @@ struct Record {
         spin { !chat.isAnswering }
         precondition(chat.messages.last?.text == "По файлу" && chat.messages.last?.fromDocument == true)
         precondition(chat.messages.last?.documentSources?.first?.locator == "Страница 1")
+        precondition(chat.messages.last?.text == "По файлу")
+        precondition(chat.messages.last?.documentNotice == "Выбрана часть документа")
+        precondition(Chat().conversations.contains { $0.messages.contains { $0.documentNotice == "Выбрана часть документа" } })
         precondition(!(try! String(contentsOf: dir.appendingPathComponent("chats.json"))).contains("RAW_DOCUMENT_NOT_IN_HISTORY"))
         chat.detachDocument()
         precondition(chat.containsDocumentData)

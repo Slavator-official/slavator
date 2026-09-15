@@ -2,11 +2,18 @@
 """Сборка иконки Славатора из портрета. Только стандартная библиотека.
 
     python3 make_icon.py <исходник.png> [результат.png]
+    python3 make_icon.py --tint РРGGBB[:сила] <иконка.png> <результат.png>
 
 Что делает: вырезает квадрат вокруг лица, масштабирует его методом ближайшего
 соседа (пиксель-арт нельзя размывать интерполяцией), вписывает в squircle -
 скруглённый квадрат по форме иконок macOS - и кладёт на подложку цвета
 приложения, чтобы иконка читалась и на светлом, и на тёмном фоне.
+
+Режим --tint красит готовую иконку в заданный цвет. Он нужен сборке: на
+машине разработчика рабочих копий репозитория несколько, и приложения из
+них раньше выглядели одинаково — в Spotlight и Launchpad висели три
+«Славатора», и какой из них свежий, было видно только по дате файла.
+Теперь копия из рабочего дерева красится, а сборка из основной — нет.
 """
 import struct
 import sys
@@ -169,25 +176,63 @@ def build(src: Path, dst: Path) -> None:
             row += bytes((r, g, b, int(alpha * 255)))
         rows.append(row)
 
-    raw = b"".join(b"\x00" + bytes(r) for r in rows)
+    write_png(dst, size, size, b"".join(bytes(r) for r in rows))
+    print(f"готово: {dst} ({dst.stat().st_size // 1024} КБ, {size}×{size})")
+
+
+def write_png(dst: Path, width: int, height: int, pixels: bytes) -> None:
+    """Записать RGBA-пиксели в PNG без фильтров."""
+    stride = width * 4
+    raw = b"".join(b"\x00" + pixels[row * stride:(row + 1) * stride]
+                   for row in range(height))
 
     def chunk(tag: bytes, body: bytes) -> bytes:
         payload = tag + body
         return struct.pack(">I", len(body)) + payload + struct.pack(">I", zlib.crc32(payload))
 
-    png = (
+    dst.write_bytes(
         b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
         + chunk(b"IDAT", zlib.compress(raw, 9))
         + chunk(b"IEND", b"")
     )
-    dst.write_bytes(png)
-    print(f"готово: {dst} ({dst.stat().st_size // 1024} КБ, {size}×{size})")
+
+
+def tint(src: Path, dst: Path, colour: tuple, strength: float) -> None:
+    """Покрасить готовую иконку, сохранив рисунок.
+
+    Пиксель тянется к заданному цвету тем сильнее, чем он светлее: тени
+    остаются тёмными, и портрет читается — иначе получилась бы плоская
+    цветная плитка. Прозрачные места (поле вокруг squircle) не трогаем,
+    иначе вокруг иконки появится цветной квадрат.
+    """
+    width, height, pixels = read_png(src)
+    for i in range(0, len(pixels), 4):
+        if pixels[i + 3] == 0:
+            continue
+        r, g, b = pixels[i], pixels[i + 1], pixels[i + 2]
+        light = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+        k = strength * (0.35 + 0.65 * light)
+        pixels[i] = min(255, int(r * (1 - k) + colour[0] * k))
+        pixels[i + 1] = min(255, int(g * (1 - k) + colour[1] * k))
+        pixels[i + 2] = min(255, int(b * (1 - k) + colour[2] * k))
+    write_png(dst, width, height, bytes(pixels))
+    print(f"покрашено: {dst} ({dst.stat().st_size // 1024} КБ, {width}×{height})")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        raise SystemExit("Укажите исходное изображение")
-    source = Path(sys.argv[1]).expanduser()
-    target = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("icon_master.png")
-    build(source, target)
+    args = sys.argv[1:]
+    if args and args[0] == "--tint":
+        if len(args) < 4:
+            raise SystemExit("--tint RRGGBB[:сила] <иконка.png> <результат.png>")
+        spec, rest = args[1], args[2:]
+        value, _, force = spec.partition(":")
+        colour = tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
+        tint(Path(rest[0]).expanduser(), Path(rest[1]).expanduser(),
+             colour, float(force) if force else 0.45)
+    else:
+        if not args:
+            raise SystemExit("Укажите исходное изображение")
+        source = Path(args[0]).expanduser()
+        target = Path(args[1]) if len(args) > 1 else Path("icon_master.png")
+        build(source, target)

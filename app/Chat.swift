@@ -21,6 +21,7 @@ final class Chat {
         var fromDocument: Bool? = nil
         var documentSources: [DocumentCitation]? = nil
         var documentName: String? = nil
+        var documentNotice: String? = nil
     }
 
     struct Conversation: Identifiable, Codable, Equatable {
@@ -193,8 +194,8 @@ final class Chat {
             guard let self, self.requestID == token else { return }
             if let reply, let index = self.conversations.firstIndex(where: { $0.id == conversationID }),
                let last = self.conversations[index].messages.indices.last {
-                self.conversations[index].messages[last].text = (reply.text ?? "")
-                    + ((reply.notice ?? "").isEmpty ? "" : "\n\n" + (reply.notice ?? ""))
+                self.conversations[index].messages[last].text = reply.text ?? ""
+                self.conversations[index].messages[last].documentNotice = reply.notice
                 self.conversations[index].messages[last].documentSources = reply.citations
             }
             Task { @MainActor in self.finish(error: error, token: token, conversationID: conversationID) }
@@ -206,7 +207,10 @@ final class Chat {
     private func stream(history: [[String: String]], token: UUID, conversationID: UUID, localOnly: Bool) async {
         let env = AppConfiguration.environment()
         let host = localOnly ? "http://127.0.0.1:11434" : (env["MEETING_TRANSCRIBER_OLLAMA_HOST"] ?? "http://127.0.0.1:11434")
-        let model = env["MEETING_TRANSCRIBER_LLM"] ?? Settings().llm_model
+        // Не `Settings()`: там умолчание контракта, а оно тяжелее того, что
+        // советуют настройки этой машине, — чат просил бы у Ollama модель,
+        // которой на ней нет.
+        let model = env["MEETING_TRANSCRIBER_LLM"] ?? Settings.load().llm_model
 
         guard let url = URL(string: "\(host)/api/chat") else {
             await finish(error: "Неверный адрес модели", token: token, conversationID: conversationID); return
@@ -411,6 +415,24 @@ struct ChatScreen: View {
         // Внутри общей прокрутки высота не задавалась вовсе, и экран
         // обрывался на середине, оставляя полокна пустыми.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .onAppear(perform: fillMyVoice)
+        // Голоса подгружаются не мгновенно: к первому появлению чата списка
+        // может ещё не быть, и подставлять тогда нечего.
+        .onChange(of: library.speakers) { _, _ in fillMyVoice() }
+    }
+
+    /// Подставить свой голос, не спрашивая.
+    ///
+    /// Кто вы — уже сказано в настройках, именем. Спрашивать то же самое
+    /// второй раз, да ещё в чате, незачем: без выбора вопросы «когда я
+    /// говорил» упираются в предупреждение, и человек не понимает, чего от
+    /// него хотят. Явный отказ пишется отдельным значением и переживает
+    /// возвращение в чат — иначе выбор «не указывать» стирался бы сразу.
+    private func fillMyVoice() {
+        guard library.settings.my_profile_key.isEmpty,
+              let mine = library.mySpeaker else { return }
+        library.settings.my_profile_key = mine.key
+        library.settings.save()
     }
 
     // MARK: переписка
@@ -459,18 +481,13 @@ struct ChatScreen: View {
             Text(Self.rendered(message.text))
                 .font(Kind.body(14)).textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .layoutPriority(1)
             if let name = message.documentName {
                 Text("Документ: " + name + " · локально").font(Kind.body(11)).foregroundStyle(p.muted)
+                    .lineLimit(1).truncationMode(.middle).help(name)
             }
-            if let sources = message.documentSources {
-                ForEach(sources) { source in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("[\(source.id)] \(source.locator) · фрагмент \(source.block)")
-                            .font(Kind.strong(12))
-                        Text(source.text + (source.shortened ? "\n[Показана часть фрагмента]" : ""))
-                            .font(Kind.body(12)).textSelection(.enabled)
-                    }.padding(10).background(RoundedRectangle(cornerRadius: 8).fill(p.surface))
-                }
+            if !(message.documentSources ?? []).isEmpty || !(message.documentNotice ?? "").isEmpty {
+                DocumentSourcesView(sources: message.documentSources ?? [], notice: message.documentNotice)
             }
             if let sources = message.sources {
                 ForEach(Array(sources.enumerated()), id: \.element.id) { number, quote in
@@ -542,7 +559,9 @@ struct ChatScreen: View {
                 Spacer(minLength: 12)
                 if library.settings.chat_memory_enabled {
                     Menu("Ваш голос: " + (library.speakers.first(where: { $0.key == library.settings.my_profile_key })?.name ?? "не выбран")) {
-                        Button("Не указывать свой голос") { library.settings.my_profile_key = ""; library.settings.save() }
+                        Button("Не указывать свой голос") {
+                            library.settings.my_profile_key = Settings.noVoice; library.settings.save()
+                        }
                         ForEach(library.speakers) { person in
                             Button(person.name) { library.settings.my_profile_key = person.key; library.settings.save() }
                         }
@@ -618,6 +637,42 @@ struct ChatScreen: View {
 
 /// Список переписок в боковом меню. В режиме чата он занимает место
 /// обычной навигации: «Главная» и «Записи» там всё равно не нужны.
+private struct DocumentSourcesView: View {
+    let sources: [DocumentCitation]
+    let notice: String?
+    @State private var expanded = false
+    @Environment(\.palette) private var p
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            VStack(alignment: .leading, spacing: 8) {
+                if let notice, !notice.isEmpty {
+                    Text(notice).font(Kind.body(11)).foregroundStyle(p.muted)
+                        .layoutPriority(1)
+                }
+                ForEach(sources) { source in
+                    DisclosureGroup {
+                        Text(source.text + (source.shortened ? "\n[Показана часть фрагмента]" : ""))
+                            .font(Kind.body(12)).textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .layoutPriority(1)
+                            .padding(.vertical, 6)
+                    } label: {
+                        Text("[\(source.id)] \(source.locator) · фрагмент \(source.block)")
+                            .font(Kind.strong(12)).lineLimit(2).help(source.locator)
+                    }
+                    .padding(8).background(RoundedRectangle(cornerRadius: 8).fill(p.surface))
+                }
+            }.padding(.top, 6)
+        } label: {
+            Text(sources.isEmpty ? "О контексте ответа" :
+                    ((notice?.contains("выборка") == true ? "Выборочный контекст · " : "") + "Источники · \(sources.count)"))
+                .font(Kind.body(12)).foregroundStyle(p.accent2)
+        }
+        .padding(.top, 5)
+    }
+}
+
 struct ChatHistory: View {
     var chat: Chat
     var showsSelection = true

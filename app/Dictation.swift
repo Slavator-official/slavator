@@ -34,6 +34,13 @@ final class Dictation {
     private(set) var seconds: Double = 0
     /// Что уже напечатано за эту диктовку — для индикатора.
     private(set) var typed = ""
+    /// Куда уходит текст — имя приложения, которому достаются нажатия.
+    ///
+    /// Диктовка печатает в активное приложение, а активным становится не
+    /// только то, на которое человек смотрит: чужое окно выходит вперёд
+    /// само, когда приходит ответ или уведомление. Имя в плашке — способ
+    /// увидеть это до того, как текст уйдёт не туда.
+    private(set) var targetName = ""
     /// Один раз за сеанс сообщаем, что обработка недоступна.
     private(set) var tidyUnavailableShown = false
 
@@ -53,9 +60,14 @@ final class Dictation {
     /// Клавишу отпустили, пока предыдущий запрос не вернулся.
     private var finalPending = false
     private var watchdog: Timer?
+    /// Ждёт, не пора ли убрать плашку: печатать нечего, а обработка идёт.
+    private var plate: Timer?
     private var ticker: Timer?
     private var clock: Timer?
     private var settings = Settings.load()
+    /// Громкость до приглушения. nil — не приглушали: выключено в настройках
+    /// или устройство громкостью не управляет.
+    private var volumeBefore: Float?
 
     // MARK: жизненный цикл
 
@@ -152,6 +164,7 @@ final class Dictation {
         if mode == .tidy { worker.warm() }
         self.mode = mode
         lastText = ""; typed = ""; spoken = ""; seconds = 0
+        targetName = Dictation.frontmostName()
         state = .listening
         onBusyChanged?(true)
 
@@ -165,8 +178,13 @@ final class Dictation {
         }
         recorder = rec
 
+        duck()
+        plate?.invalidate(); plate = nil
         indicator = indicator ?? Indicator()
         indicator?.show(self)
+        // Пока слушаем — плашка прозрачна для мыши: диктуют поверх чужого
+        // окна, и щелчок должен доходить до него.
+        indicator?.allowMove(false)
 
         clock = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             self?.seconds += 0.1
@@ -182,10 +200,18 @@ final class Dictation {
 
     private func end() {
         guard case .listening = state else { return }
+        unduck()
         ticker?.invalidate(); ticker = nil
         clock?.invalidate(); clock = nil
         state = .finishing
         level = 0
+        // Обработка занимает секунды, и всё это время плашка стоит над тем
+        // местом, куда человек уже пишет дальше: разрешаем оттащить её.
+        indicator?.allowMove(true)
+        // Отсчёт до исчезновения плашки идёт с отпускания клавиши, а каждая
+        // напечатанная порция его продлевает: плашка живёт, пока печатает,
+        // и уходит через секунду тишины.
+        holdPlate()
         recorder?.stop()
         // Сторож на случай, если процесс распознавания промолчит: висеть
         // с плашкой «Дописываю…» бесконечно нельзя.
@@ -242,9 +268,20 @@ final class Dictation {
                 // начинаем запись заново. Это чинит сразу две беды —
                 // перераспознавание всей записи (чем дольше говоришь, тем
                 // медленнее) и накопление правок в уже напечатанном.
-                if !text.isEmpty, rec.silentTail() > 1.1 {
-                    self.commit(text + " ")
-                    self.spoken += text + " "
+                // Фразу закрывает пауза — но не тогда, когда расшифровка
+                // оборвана на середине слова. Такой обрыв модель помечает
+                // многоточием или дефисом, и если закрыть фразу на нём,
+                // начало слова уходит в поле как есть, а остаток приходит
+                // следующей фразой с заглавной буквы: «ты под… Терял
+                // части». Ждём ещё проход — слово дополнится целиком.
+                // Затянувшаяся тишина закрывает фразу всё равно: иначе она
+                // не закроется никогда, а перераспознавание будет расти.
+                let broken = Self.brokenTail(text)
+                if !text.isEmpty, rec.silentTail() > 1.1,
+                   !broken || rec.silentTail() > 2.5 {
+                    let closing = broken ? Self.withoutBrokenTail(text) : text
+                    self.commit(closing + " ")
+                    self.spoken += closing + " "
                     rec.reset()
                     self.typed = ""
                     self.lastText = ""
@@ -259,6 +296,30 @@ final class Dictation {
                 }
             }
         }
+    }
+
+    /// Расшифровка оборвана на полуслове: так модель помечает фрагмент,
+    /// кончившийся посреди речи.
+    private static func brokenTail(_ text: String) -> Bool {
+        let tail = text.trimmingCharacters(in: .whitespaces)
+        return tail.hasSuffix("...") || tail.hasSuffix("…")
+            || tail.hasSuffix("-") || tail.hasSuffix("—")
+    }
+
+    /// Убрать след обрыва: в поле он остался бы мусором.
+    ///
+    /// Снимаем знаки по одному, а не проверкой «кончается на многоточие»:
+    /// сняв у «под...» последнюю точку, получаешь «под..», что на
+    /// многоточие уже не похоже — и две точки оставались в поле.
+    /// Вызывается только на обрыве, поэтому обычная точка в конце фразы
+    /// сюда не попадает.
+    private static func withoutBrokenTail(_ text: String) -> String {
+        let marks: Set<Character> = [".", "…", "-", "—"]
+        var tail = text.trimmingCharacters(in: .whitespaces)
+        while let last = tail.last, marks.contains(last) {
+            tail = String(tail.dropLast()).trimmingCharacters(in: .whitespaces)
+        }
+        return tail
     }
 
     /// Общее начало двух расшифровок, обрезанное по границе слова.
@@ -283,8 +344,53 @@ final class Dictation {
     private func commit(_ target: String) {
         guard mode == .raw, target.count > typed.count else { return }
         let delta = String(target.dropFirst(typed.count))
+        targetName = Dictation.frontmostName()
         typer.type(delta)
         typed = target
+        holdPlate()
+    }
+
+    /// Имя приложения, которому достанутся нажатия.
+    private static func frontmostName() -> String {
+        NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
+    }
+
+    /// Убрать плашку, если печатать уже нечего, а обработка ещё идёт.
+    ///
+    /// После отпускания клавиши остаётся последний проход распознавания —
+    /// на длинной фразе это до десятка секунд. Текст к этому времени уже
+    /// напечатан предыдущими проходами, и плашка всё это время просто
+    /// стояла над чужим окном с надписью «Дописываю…». Теперь она уходит
+    /// через секунду после последней напечатанной порции; сама
+    /// обработка идёт как шла, и остаток допечатается без неё.
+    private func holdPlate() {
+        plate?.invalidate()
+        plate = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { [weak self] _ in
+            guard let self, case .finishing = self.state else { return }
+            self.indicator?.hide()
+        }
+    }
+
+    /// Приглушить системный звук на время диктовки.
+    ///
+    /// Тысячная доля прежней громкости — на слух тишина. Ровно нуля всё же
+    /// не ставим: у части устройств ноль включает системный «без звука» со
+    /// своим значком и перечёркнутым динамиком, а это уже не приглушение на
+    /// секунду, а выключенный звук, который человек пойдёт чинить руками.
+    ///
+    /// Запоминаем то, что было ровно перед нажатием: вернуть надо своё
+    /// значение, а не то, что система считает обычным.
+    private func duck() {
+        guard settings.dictation_duck, volumeBefore == nil,
+              let current = OutputVolume.read(), current > 0.05 else { return }
+        guard OutputVolume.set(current * 0.001) else { return }
+        volumeBefore = current
+    }
+
+    private func unduck() {
+        guard let before = volumeBefore else { return }
+        volumeBefore = nil
+        OutputVolume.set(before)
     }
 
     private func finish(raw: String = "") {
@@ -293,6 +399,7 @@ final class Dictation {
             worker.tidy(text: raw, level: settings.dictation_level) { [weak self] text, ok in
                 DispatchQueue.main.async {
                     guard let self else { return }
+                    self.targetName = Dictation.frontmostName()
                     self.typer.type(text)
                     self.typed = text
                     if !ok && !self.tidyUnavailableShown {
@@ -309,6 +416,7 @@ final class Dictation {
 
     private func done() {
         watchdog?.invalidate(); watchdog = nil
+        plate?.invalidate(); plate = nil
         finalPending = false
         state = .idle
         level = 0
@@ -789,33 +897,125 @@ private final class Hotkey {
 
 // MARK: - Плашка поверх окон
 
+/// Хост, который подгоняет окно под содержимое.
+///
+/// Само по себе окно за SwiftUI не следит: надпись сменилась, вид стал
+/// короче, а окно осталось прежней ширины. Панель из NSHostingController
+/// делала бы это сама, но такая панель не рисуется вовсе — проверено
+/// рядом на экране: окно есть, isVisible истинно, а на снимке пусто.
+/// Поэтому окно остаётся обычным, безрамочным, а размер ему сообщает сам
+/// вид — после каждой раскладки.
+private final class FittingHost<Root: View>: NSHostingView<Root> {
+    var onFit: ((NSSize) -> Void)?
+    /// Плашку разрешено тащить.
+    var movable = false
+
+    required init(rootView: Root) { super.init(rootView: rootView) }
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("не используется") }
+
+    override func layout() {
+        super.layout()
+        onFit?(fittingSize)
+    }
+
+    /// Перетаскивание запускаем сами, а не полагаемся на
+    /// isMovableByWindowBackground: до окна нажатие может и не дойти —
+    /// содержимое плашки рисует SwiftUI, и оно вправе забрать событие себе.
+    /// performDrag ведёт окно до отпускания кнопки.
+    override func mouseDown(with event: NSEvent) {
+        guard movable, let window else {
+            super.mouseDown(with: event)
+            return
+        }
+        window.performDrag(with: event)
+    }
+}
+
 /// Показывает, что микрофон слышит и что уже напечатано.
-private final class Indicator {
+///
+/// Плашка висит поверх всех окон, а значит стоит на чужом пути. Отсюда два
+/// правила. Ширина — по содержимому: фиксированные 360 точек оставались
+/// наполовину пустыми и закрывали собой строку ввода. Место — впритык над
+/// доком, ниже всего, что можно закрыть.
+///
+/// А на время обработки плашку можно оттащить мышью: расшифровка идёт
+/// секунды, и всё это время плашка стоит над тем местом, куда человек уже
+/// пишет дальше. Сдвиг действует до конца этой диктовки: следующая снова
+/// появится по центру. Запоминать сдвинутое место означало бы, что плашка
+/// навсегда уезжает туда, куда её один раз убрали с чужого текста — а
+/// убирают её от помехи, а не выбирают ей новый дом.
+private final class Indicator: NSObject, NSWindowDelegate {
     private var panel: NSPanel?
+    /// Плашку оттащили в этой диктовке — не возвращаем её под курсором.
+    private var moved = false
+    private var host: FittingHost<IndicatorView>?
 
     func show(_ dictation: Dictation) {
+        moved = false
         if panel == nil {
-            let view = NSHostingView(rootView: IndicatorView(dictation: dictation))
-            let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 360, height: 46),
+            let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 200, height: 46),
                                  styleMask: [.borderless, .nonactivatingPanel],
                                  backing: .buffered, defer: false)
-            window.contentView = view
+            let host = FittingHost(rootView: IndicatorView(dictation: dictation))
+            host.onFit = { [weak self] size in self?.fit(size) }
+            window.contentView = host
+            self.host = host
             window.isOpaque = false
             window.backgroundColor = .clear
             window.hasShadow = true
             window.level = .statusBar
+            // Пока идёт диктовка, щелчки проходят насквозь: плашка не должна
+            // перехватывать попадание по кнопке чужого окна под ней.
             window.ignoresMouseEvents = true
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+            window.delegate = self
             panel = window
         }
-        guard let panel, let screen = NSScreen.main else { return }
-        let frame = screen.visibleFrame
-        panel.setFrameOrigin(NSPoint(x: frame.midX - panel.frame.width / 2,
-                                     y: frame.minY + 82))
-        panel.orderFrontRegardless()
+        center()
+        panel?.orderFrontRegardless()
+    }
+
+    /// Разрешить таскать плашку мышью. Включается на время обработки.
+    ///
+    /// Панель не становится ключевой и не выводит программу вперёд
+    /// (nonactivatingPanel), поэтому окно, в которое сейчас печатается
+    /// текст, фокуса не теряет.
+    func allowMove(_ allowed: Bool) {
+        panel?.ignoresMouseEvents = !allowed
+        panel?.isMovableByWindowBackground = allowed
+        host?.movable = allowed
     }
 
     func hide() { panel?.orderOut(nil) }
+
+    /// Перетащили — держим это место до конца диктовки.
+    func windowDidMove(_ notification: Notification) {
+        guard host?.movable == true else { return }
+        moved = true
+    }
+
+    /// Подогнать окно под содержимое и поставить на место.
+    ///
+    /// Порог в половину точки — против бесконечного круга: смена размера
+    /// вызывает новую раскладку, а та снова придёт сюда.
+    private func fit(_ size: NSSize) {
+        guard let panel, size.width > 1, size.height > 1 else { return }
+        guard abs(panel.frame.width - size.width) > 0.5
+                || abs(panel.frame.height - size.height) > 0.5 else { return }
+        panel.setContentSize(size)
+        // Сдвинутую плашку не трогаем: она стоит там, куда её отвели, и
+        // прыжок в центр на смене надписи выглядел бы поломкой.
+        if !moved { center() }
+    }
+
+    /// Плашка стоит по центру экрана, впритык над доком.
+    private func center() {
+        guard let panel, let screen = NSScreen.main else { return }
+        let frame = screen.visibleFrame
+        panel.setFrameOrigin(NSPoint(x: frame.midX - panel.frame.width / 2,
+                                     y: frame.minY + 12))
+    }
 }
 
 private struct IndicatorView: View {
@@ -823,7 +1023,10 @@ private struct IndicatorView: View {
 
     private var label: String {
         switch dictation.state {
-        case .listening:  return "Слушаю"
+        // Пока слушаем, надпись — имя адресата: что запись идёт, видно по
+        // красной точке и столбикам громкости, а куда уйдёт текст — из
+        // плашки было не узнать никак.
+        case .listening:  return dictation.targetName.isEmpty ? "Слушаю" : dictation.targetName
         case .finishing:  return "Дописываю…"
         case .idle:       return "Готово"
         default:          return "Диктовка"
@@ -835,24 +1038,30 @@ private struct IndicatorView: View {
             Circle()
                 .fill(dictation.state == .listening ? Color(hex: 0xE0705F) : Color(hex: 0x19C37D))
                 .frame(width: 9, height: 9)
-            HStack(alignment: .bottom, spacing: 2.5) {
-                ForEach(0..<6, id: \.self) { i in
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(Color(hex: 0x5590FF))
-                        .frame(width: 3, height: barHeight(i))
+            // Столбики — это громкость микрофона. После отпускания клавиши
+            // микрофон уже выключен, они стояли бы неподвижно и занимали
+            // место: на обработке показываем только надпись.
+            if dictation.state == .listening {
+                HStack(alignment: .bottom, spacing: 2.5) {
+                    ForEach(0..<6, id: \.self) { i in
+                        RoundedRectangle(cornerRadius: 1.5)
+                            .fill(Color(hex: 0x5590FF))
+                            .frame(width: 3, height: barHeight(i))
+                    }
                 }
+                .frame(height: 17)
             }
-            .frame(height: 17)
             Text(label).font(.system(size: 13, weight: .medium))
             if dictation.state == .listening {
                 Text(String(format: "%d:%02d", Int(dictation.seconds) / 60, Int(dictation.seconds) % 60))
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
-            Spacer(minLength: 0)
         }
+        // Ширина ровно по содержимому: на «Дописываю…» плашка короче, чем
+        // на «Слушаю» с таймером, и закрывает собой меньше чужого окна.
         .padding(.horizontal, 16)
-        .frame(width: 360, height: 46)
+        .frame(height: 46)
         .background(
             RoundedRectangle(cornerRadius: 23)
                 .fill(Color(hex: 0x0C1826))

@@ -41,7 +41,9 @@ final class LiveCapture: NSObject {
     private var micConverter: AVAudioConverter?
     private var systemURL: URL?
     private var micURL: URL?
-    private var target: URL?
+    /// Куда ляжет готовая запись. Известно с самого начала: в режиме
+    /// микрофона туда пишут сразу, в режиме встречи — после сведения.
+    private var result: URL?
     /// Сколько кадров реально пришло с системного захвата. Разрешение может
     /// быть выдано, а поток при этом молчать — тогда честнее сказать об этом,
     /// чем отдать в обработку пустой файл.
@@ -84,40 +86,46 @@ final class LiveCapture: NSObject {
         originHost = 0
 
         let stamp = DateFormatter()
+        // Секунды в имени, а не только минуты: две записи, начатые в одну
+        // минуту, складывались в одну семью результатов и затирали друг друга.
         stamp.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-        let url = folder.appending(path: "Встреча \(stamp.string(from: Date()))_\(UUID().uuidString.prefix(6)).wav")
+        let name = "Встреча \(stamp.string(from: Date())).wav"
+        let url = folder.appending(path: name)
+        result = url
         systemURL = nil
         micURL = nil
         systemConverter = nil
         micConverter = nil
 
-        // Обе дорожки лежат рядом с результатами: они обе нужны обработке и
-        // обе стоит сохранить — это исходники встречи, а не мусор.
-        let base = url.deletingPathExtension().lastPathComponent
+        // Черновики дорожек лежат не рядом с результатом, а у приложения.
+        // В папке записей человек должен видеть один файл — свою встречу, а
+        // не пару служебных дорожек, из которых непонятно, какая настоящая.
+        // Здесь же они переживут падение: файл остаётся на диске и его можно
+        // отдать в обработку руками.
+        let drafts = Paths.support.appending(path: "capture")
+        sweepDrafts(in: drafts)
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: drafts, withIntermediateDirectories: true)
 
             if source == .meeting {
-                // Основной файл — системный звук: в нём собеседники, то есть
-                // большая часть встречи. Микрофон идёт отдельной дорожкой.
-                let sys = folder.appending(path: "\(base).wav")
+                let base = url.deletingPathExtension().lastPathComponent
+                let sys = drafts.appending(path: "\(base) — компьютер.wav")
                 systemFile = try AVAudioFile(forWriting: sys, settings: Self.format.settings,
                                              commonFormat: .pcmFormatInt16, interleaved: true)
                 systemURL = sys
 
-                let mic = folder.appending(path: "\(base) — мой голос.wav")
+                let mic = drafts.appending(path: "\(base) — микрофон.wav")
                 micFile = try AVAudioFile(forWriting: mic, settings: Self.format.settings,
                                           commonFormat: .pcmFormatInt16, interleaved: true)
                 micURL = mic
-                target = sys
-                lastFile = sys
+                lastFile = url
             } else {
-                let mic = folder.appending(path: "\(base).wav")
-                micFile = try AVAudioFile(forWriting: mic, settings: Self.format.settings,
+                // Только микрофон — сводить нечего, пишем сразу набело.
+                micFile = try AVAudioFile(forWriting: url, settings: Self.format.settings,
                                           commonFormat: .pcmFormatInt16, interleaved: true)
-                micURL = mic
-                target = mic
-                lastFile = mic
+                micURL = url
+                lastFile = url
             }
         } catch {
             failure = "Не удалось создать файл записи: \(error.localizedDescription)"
@@ -127,11 +135,12 @@ final class LiveCapture: NSObject {
 
         // Отсчёт открываем сразу, до запуска дорожек.
         //
-        // Ждать первого кадра со звука компьютера нельзя: замером выяснено,
-        // что отвод молчит, пока устройство вывода простаивает, - в тишине
-        // кадров нет вовсе. Запись повисла бы до первого звука собеседника.
-        // Провалы закрывает выравнивание: пропущенное время дописывается
-        // тишиной, и дорожка остаётся привязанной к настоящим часам.
+        // Ждать первого кадра со звука компьютера нельзя: отвод поднимается
+        // сотни миллисекунд, а прежде, пока агрегат строился на устройстве
+        // вывода, на простаивающем выводе кадров не было вовсе. Запись
+        // повисла бы до первого звука собеседника. Провалы закрывает
+        // выравнивание: пропущенное время дописывается тишиной, и дорожка
+        // остаётся привязанной к настоящим часам.
         originHost = mach_absolute_time()
 
         // Микрофон нужен в обоих режимах: в нём ваш собственный голос.
@@ -139,6 +148,23 @@ final class LiveCapture: NSObject {
         guard engine != nil else { active = false; return }
         startTicker()
         if source == .meeting { startSystemAudio() }
+    }
+
+    /// Убрать черновики, оставшиеся от прерванных записей.
+    ///
+    /// В обычной жизни они удаляются сразу после сведения. Остаются только
+    /// после падения или выключения посреди встречи — тогда неделя есть,
+    /// чтобы забрать их руками, а дальше они просто занимают место.
+    private func sweepDrafts(in folder: URL) {
+        let fm = FileManager.default
+        let items = (try? fm.contentsOfDirectory(at: folder,
+                                                 includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        let deadline = Date().addingTimeInterval(-7 * 24 * 3600)
+        for url in items {
+            let stamp = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? Date()
+            if stamp < deadline { try? fm.removeItem(at: url) }
+        }
     }
 
     private func startTicker() {
@@ -306,28 +332,70 @@ final class LiveCapture: NSObject {
         micConverter = nil
         systemConverter = nil
 
-        // Дорожки НЕ сводятся. Смешивать их — значит записать один и тот же
-        // звук дважды: собеседники приходят и из системного захвата, и с
-        // микрофона, который слышит динамики. Ядро разбирает дорожки по
-        // отдельности и склеивает стенограммы по времени.
+        // Дорожки сводятся в одну.
         //
-        // Если системный захват промолчал, отдавать его в обработку нельзя:
-        // получится «в файле нет звука». В этом случае основным становится
-        // микрофон — он записал хотя бы вашу часть встречи.
-        if systemURL != nil, systemFrames < 16000 {
+        // Раньше обе уходили в обработку по отдельности: ядро распознавало
+        // каждую и склеивало стенограммы по времени. Это стоило двух полных
+        // проходов распознавания — на встрече в двадцать минут лишние полчаса
+        // ожидания, — и оставляло в папке два файла вместо записи встречи.
+        // Теперь склейка происходит здесь, на звуке: одна дорожка, один
+        // проход, один файл.
+        //
+        // Эхо от динамиков (микрофон слышит собеседников второй раз) снимает
+        // Mixdown: он сам проверяет, есть ли оно, и приглушает микрофон под
+        // системную речь. Если человек в наушниках, приглушения не будет.
+        guard let target = result else { return lastFile }
+
+        // Системный захват промолчал: разрешение могло быть выдано уже после
+        // запуска программы. Отдавать пустую дорожку в обработку нельзя —
+        // основной становится микрофонная, она записала хотя бы вашу часть.
+        if let sys = systemURL, systemFrames < 16000 {
             failure = "Звук компьютера не записался: система не отдала ни одного кадра. "
                     + "Если разрешение выдано только что, перезапустите Славатор — "
                     + "macOS применяет его к уже запущенной программе не сразу. "
                     + "Сохранена запись с микрофона."
-            if let systemURL { try? FileManager.default.removeItem(at: systemURL) }
-            self.systemURL = nil
-            lastFile = micURL
+            try? FileManager.default.removeItem(at: sys)
+            systemURL = nil
+            promote(micURL, to: target)
+            return lastFile
+        }
+
+        if let sys = systemURL, let mic = micURL {
+            do {
+                try Mixdown.combine(system: sys, microphone: mic, into: target)
+                try? FileManager.default.removeItem(at: sys)
+                try? FileManager.default.removeItem(at: mic)
+                systemURL = nil
+                micURL = nil
+                lastFile = target
+            } catch {
+                // Сведение не вышло — лучше отдать в обработку звук
+                // компьютера, чем не отдать ничего: в нём собеседники.
+                failure = "Не удалось свести дорожки: \(error). Сохранён звук компьютера."
+                promote(sys, to: target)
+                if let mic = micURL { try? FileManager.default.removeItem(at: mic) }
+                micURL = nil
+                systemURL = nil
+            }
         }
         return lastFile
     }
 
-    /// Дорожка микрофона — она же основной файл, если системного звука нет.
-    var microphoneTrack: URL? { micURL }
-    /// Дорожка системного звука. Пусто в режиме «только микрофон».
-    var systemTrack: URL? { systemURL }
+    /// Перенести черновик на место готовой записи.
+    private func promote(_ draft: URL?, to target: URL) {
+        guard let draft else { lastFile = nil; return }
+        try? FileManager.default.removeItem(at: target)
+        do {
+            try FileManager.default.moveItem(at: draft, to: target)
+            lastFile = target
+        } catch {
+            // Перенести не вышло (другой том, права) — отдаём как есть.
+            lastFile = draft
+        }
+        if draft == micURL { micURL = nil }
+        if draft == systemURL { systemURL = nil }
+    }
+
+    /// Готовая запись встречи — одна дорожка, уже сведённая.
+    var recording: URL? { lastFile }
 }

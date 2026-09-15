@@ -65,6 +65,59 @@ final class Enrollment {
     }
 }
 
+/// Разделение одного голоса на несколько человек.
+///
+/// Обратная сторона объединения: диаризация склеивает людей так же охотно,
+/// как дробит одного. Автоматически склеенных уже не разделить — порог,
+/// который делит их, на той же записи разваливает и одного человека. Зато
+/// это знает тот, кто был на встрече: он слышит, что говорили двое, и знает,
+/// сколько их было. Число он и называет.
+@Observable
+final class VoiceSplit {
+    private(set) var isRunning = false
+    private(set) var failure: String?
+
+    func split(voice: UnknownVoice, into: Int, library: Library, done: @escaping () -> Void) {
+        guard !isRunning else { return }
+        isRunning = true
+        failure = nil
+
+        let process = Process()
+        process.executableURL = Paths.venvPython
+        process.arguments = ["-B", Paths.core.path,
+                             "--split-voice", voice.record.path,
+                             "--voice", voice.label,
+                             "--into", String(into)]
+        process.currentDirectoryURL = Paths.core.deletingLastPathComponent()
+        process.environment = AppConfiguration.environment(settings: library.settings)
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            try process.run()
+            var lines: [String] = []
+            ProcessOutput.read(pipe, process: process, onLine: { line in
+                guard !line.hasPrefix("@@PROGRESS@@") else { return }
+                lines.append(line)
+                if lines.count > 100 { lines.removeFirst(lines.count - 100) }
+            }, onExit: { status in
+                self.isRunning = false
+                if status == 0 {
+                    library.reload()
+                    done()
+                } else {
+                    self.failure = lines.last(where: { $0.contains("ОШИБКА") })
+                        ?? lines.suffix(3).joined(separator: "\n")
+                }
+            })
+        } catch {
+            isRunning = false
+            failure = error.localizedDescription
+        }
+    }
+}
+
 /// Окно привязки: либо к уже заведённому человеку, либо к новому.
 struct EnrollSheet: View {
     @Environment(\.palette) private var p
@@ -72,6 +125,10 @@ struct EnrollSheet: View {
 
     var library: Library
     let samples: [URL]
+    /// Имя, определённое по разговору. Окно открывается уже заполненным:
+    /// если такой человек есть в списке — выбран он, если нет — поля нового
+    /// заполнены. nil — окно пустое, человек выбирает сам.
+    var suggestion: String? = nil
     var onDone: () -> Void
 
     @State private var enrollment = Enrollment()
@@ -138,7 +195,40 @@ struct EnrollSheet: View {
         .background(p.surface)
         .interactiveDismissDisabled(enrollment.isRunning)
         .environment(\.palette, library.palette)
-        .onAppear { existing = library.speakers.first?.name ?? "" }
+        .onAppear { preset() }
+    }
+
+    /// Заполнить окно по подсказке.
+    ///
+    /// Раньше «Это Мигалин Сергей» открывал такое же пустое окно, как
+    /// «Выбрать человека…»: подсказку показывали, но в привязку не
+    /// передавали, и имя приходилось искать или набирать заново.
+    private func preset() {
+        existing = library.speakers.first?.name ?? ""
+        guard let suggestion, !suggestion.isEmpty else { return }
+        // Ядро пишет догадку как «Имя Фамилия, организация».
+        let parts = suggestion.split(separator: ",", maxSplits: 1)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        let person = parts.first ?? suggestion
+        if let known = library.speakers.first(where: { Self.sameName($0.name, person) }) {
+            mode = "old"
+            existing = known.name
+        } else {
+            mode = "new"
+            name = person
+            if parts.count > 1 { company = parts[1] }
+        }
+    }
+
+    /// Одно ли это имя. Порядок в разговоре произвольный — «Мигалин Сергей»
+    /// и «Сергей Мигалин» один человек; ё и е тоже не различаем.
+    static func sameName(_ a: String, _ b: String) -> Bool {
+        func words(_ text: String) -> Set<String> {
+            Set(text.lowercased().replacingOccurrences(of: "ё", with: "е")
+                .split(whereSeparator: { !$0.isLetter }).map(String.init))
+        }
+        let left = words(a)
+        return !left.isEmpty && left == words(b)
     }
 
     private var canSave: Bool {

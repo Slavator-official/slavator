@@ -19,6 +19,7 @@ glossary.txt
 # --- Тяжёлое. В git такому не место --------------------------------------
 *.tar.gz
 *.dmg
+packaging/dist.noindex/
 packaging/dist/
 packaging/payload/
 *.app/

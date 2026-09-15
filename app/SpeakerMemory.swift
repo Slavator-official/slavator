@@ -7,7 +7,17 @@ struct MemoryPerson: Decodable, Identifiable {
     let quotes: Int
     let last_seen: String
     let identity: String
+    /// Встреча, в которой голос звучал. У человека с карточкой встреч много,
+    /// и название здесь — просто последняя из них.
+    let title: String?
+    /// Голос связан с карточкой человека. Всё остальное — голос, известный
+    /// внутри одной встречи: имя ему дала догадка по разговору или сама
+    /// диаризация, и за пределами этой встречи оно ничего не значит.
     var confirmed: Bool { id.hasPrefix("profile:") }
+    /// Чем подписать голос без карточки, чтобы строки не были одинаковыми.
+    var mark: String {
+        confirmed ? "" : " · голос без карточки" + (title.map { " · \($0)" } ?? "")
+    }
 }
 
 struct MemoryMeeting: Decodable, Identifiable {
@@ -51,11 +61,13 @@ struct MemoryQuote: Codable, Identifiable, Equatable {
     let start: Double
     let end: Double
     let text: String
+    /// Откуда взялось имя над репликой. «Не подтверждена» ничего не
+    /// объясняло: человек не знает, что он должен был подтвердить и где.
     var attribution: String {
         switch identity {
         case "manual": return "Голос назван вами"
-        case "voice": return "Совпадение голосового профиля"
-        default: return "Личность не подтверждена"
+        case "voice": return "Узнан по голосовому профилю"
+        default: return "Имя не сохранено: голос известен только в этой встрече"
         }
     }
     var record: Record {

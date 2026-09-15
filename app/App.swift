@@ -33,6 +33,7 @@ struct SlavatorApp: App {
                 .onChange(of: library.settings.menubar_enabled) { _, _ in delegate.apply(settings: library.settings) }
                 .onChange(of: library.settings.meeting_watch_enabled) { _, _ in delegate.apply(settings: library.settings) }
                 .onChange(of: library.settings.widget_enabled) { _, _ in delegate.apply(settings: library.settings) }
+                .onChange(of: library.settings.widget_size) { _, _ in delegate.apply(settings: library.settings) }
                 // Возвращение в программу — момент, когда стоит перечитать
                 // разрешения: их выдают в Системных настройках, снаружи.
                 .onReceive(NotificationCenter.default.publisher(
@@ -47,7 +48,7 @@ struct SlavatorApp: App {
 }
 
 enum Screen: Hashable {
-    case main, records, speakers, newVoices, settings, chat, privacy
+    case main, memory, records, speakers, newVoices, settings, chat, privacy
     case person(String)
 }
 
@@ -63,6 +64,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private weak var library: Library?
     private weak var pipeline: Pipeline?
     private var widget: DeskWidget?
+    /// Каким размером виджет собран сейчас: панель задаёт его при создании,
+    /// поэтому смена размера — это пересборка окна, а не правка на лету.
+    private var widgetSize = ""
     private let watch = MeetingWatch()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -90,7 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     func apply(settings: Settings) {
         if settings.menubar_enabled { addItem() } else { removeItem() }
         if settings.meeting_watch_enabled { watch.start() } else { watch.stop() }
-        if settings.widget_enabled { addWidget() } else { removeWidget() }
+        if settings.widget_enabled { addWidget(size: settings.widget_size) } else { removeWidget() }
     }
 
     // MARK: значок
@@ -159,7 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private func startListening() {
         guard let capture, let library, let pipeline, !capture.isRecording, !pipeline.isRunning else { return }
         capture.start(source: .meeting,
-                      folder: URL(fileURLWithPath: library.settings.results_dir))
+                      folder: URL(fileURLWithPath: library.settings.recordingsFolder))
         openApp()
     }
 
@@ -171,8 +175,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     // MARK: виджет
 
-    private func addWidget() {
-        guard widget == nil, let capture, let pipeline, let library else { return }
+    private func addWidget(size: String) {
+        if widget != nil, size == widgetSize { return }
+        removeWidget()
+        guard let capture, let pipeline, let library else { return }
+        widgetSize = size
         widget = DeskWidget(library: library, capture: capture, pipeline: pipeline)
         widget?.show()
     }
@@ -314,12 +321,15 @@ struct Shell: View {
                                                     screen: $screen)
                         case .records:   RecordsScreen(library: library, player: player,
                                                       pipeline: pipeline, memory: memory, screen: $screen)
-                        case .speakers:  SpeakersScreen(library: library, player: player, memory: memory, screen: $screen)
+                        case .memory:    MemoryScreen(library: library, player: player, memory: memory)
+                        case .speakers:  SpeakerProfilesScreen(library: library, player: player,
+                                                               screen: $screen)
                         case .newVoices: NewVoicesScreen(library: library, player: player)
                         // Чат нарисован выше, вне прокрутки. Ветка нужна
                         // только чтобы перечисление было исчерпано.
                         case .chat, .privacy: EmptyView()
-                        case .settings:  SettingsScreen(library: library, dictation: dictation)
+                        case .settings:  SettingsScreen(library: library, dictation: dictation,
+                                                        pipeline: pipeline)
                         case .person(let key): PersonScreen(library: library, player: player,
                                                             key: key, screen: $screen, memory: memory)
                         }
@@ -375,6 +385,9 @@ struct Shell: View {
                         Text(pipeline.detail).font(Kind.body(12)).foregroundStyle(palette.muted).lineLimit(1)
                     }
                     Spacer()
+                    if let left = pipeline.remainingText, !pipeline.isSuspended {
+                        Text(left).font(Kind.body(12)).foregroundStyle(palette.muted)
+                    }
                     Text("\(Int(pipeline.percent))% ").font(Kind.mono())
                     Button(pipeline.isCancelling ? "Останавливаю…" : "Прервать") { pipeline.cancel() }
                         .buttonStyle(QuietButton()).disabled(pipeline.isCancelling)
@@ -396,6 +409,7 @@ struct Sidebar: View {
 
     private var items: [(Screen, String, String)] {
         [(.main, "Главная", "house"),
+         (.memory, "Память встреч", "brain"),
          (.records, "Записи", "clock"),
          (.speakers, "Спикеры", "person"),
          (.settings, "Настройки", "gearshape")]

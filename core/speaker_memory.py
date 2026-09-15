@@ -163,7 +163,12 @@ class Memory:
                 if old and old[0] == stamp:
                     continue
                 data = read(transcript, {})
-                utterances = data.get("utterances")
+                # Стенограмма прежних версий — просто массив реплик, без
+                # обёртки с источником и датой. Такие встречи лежат у людей на
+                # диске годами, и память обязана их читать: без этого одна
+                # старая папка роняла разбор всех остальных.
+                meta = data if isinstance(data, dict) else {}
+                utterances = meta.get("utterances") if meta else data
                 if not isinstance(utterances, list):
                     raise ValueError("нет массива utterances")
                 names = read(paths[1], {})
@@ -178,9 +183,9 @@ class Memory:
                     if aid.startswith(folder.name + ":"):
                         voice = Path(aid.split(":", 1)[1]).stem.split(" — ", 1)[0]
                         links.setdefault(voice, key)
-                title = Path(str(data.get("source") or folder.name.removesuffix("_result"))).stem
-                date = str(data.get("created_at") or datetime.fromtimestamp(transcript.stat().st_mtime).isoformat())
-                source = str(data.get("source_path") or "")
+                title = Path(str(meta.get("source") or folder.name.removesuffix("_result"))).stem
+                date = str(meta.get("created_at") or datetime.fromtimestamp(transcript.stat().st_mtime).isoformat())
+                source = str(meta.get("source_path") or "")
                 rows = []
                 for seq, item in enumerate(utterances):
                     if not isinstance(item, dict) or not isinstance(item.get("text"), str):
@@ -199,7 +204,8 @@ class Memory:
                     else:
                         # A name inferred by an LLM is NOT a global identity.
                         person = "local:" + digest(mid + "\0" + voice)
-                        name = str(names.get(voice) or item.get("speaker_name") or voice)
+                        name = str(names.get(voice) or item.get("speaker_name")
+                                   or item.get("speaker") or voice)
                         identity = "unconfirmed"
                     # Split large utterances at whitespace, without dropping text.
                     parts = re.findall(r".{1,900}(?:\s+|$)|\S{1,900}", text, re.DOTALL)
@@ -226,7 +232,7 @@ class Memory:
                         cur = self.db.execute("INSERT INTO quotes VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (*row, searchable))
                         if searchable:
                             self.db.execute("INSERT INTO words(rowid,text) VALUES(?,?)", (cur.lastrowid, normalize(row[9])))
-            except (ValueError, TypeError, KeyError, OSError) as error:
+            except (ValueError, TypeError, KeyError, OSError, AttributeError) as error:
                 # Preserve the last complete version while a writer is saving.
                 warnings.append(f"{folder.name}: {error}")
             progress(f"Читаю встречи: {i + 1}/{len(folders)}")
@@ -255,9 +261,12 @@ class Memory:
         return model
 
     def overview(self, build_graph=True):
+        # Название встречи нужно неподтверждённым голосам: они живут внутри
+        # одной встречи, и без него список превращается в десяток одинаковых
+        # строк «UNKNOWN», между которыми нельзя выбрать.
         people = [dict(r) for r in self.db.execute("""SELECT person id, name,
             COUNT(DISTINCT meeting) meetings, COUNT(*) quotes, MAX(m.date) last_seen,
-            MIN(identity) identity FROM quotes q JOIN meetings m ON m.id=q.meeting
+            MIN(identity) identity, MIN(m.title) title FROM quotes q JOIN meetings m ON m.id=q.meeting
             WHERE q.searchable=1 AND (q.voice NOT LIKE 'UNASSIGNED_%' OR q.identity='manual')
             GROUP BY person ORDER BY (person LIKE 'profile:%') DESC,meetings DESC,name,person""")]
         meetings = [dict(r) for r in self.db.execute("SELECT id,title,date FROM meetings ORDER BY date DESC,id")]

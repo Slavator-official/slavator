@@ -7,7 +7,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 PROJECT="$(cd "$ROOT/.." && pwd)"
-DIST="$ROOT/dist"
+DIST="$ROOT/dist.noindex"
 APP="$DIST/Славатор.app"
 STAGE="$DIST/dmg"
 

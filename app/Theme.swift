@@ -167,6 +167,9 @@ struct Segmented<T: Hashable>: View {
     @Environment(\.palette) private var p
     let options: [(T, String)]
     @Binding var selection: T
+    /// Ужатые поля по бокам — для виджета, где ширина считана по пикселям и
+    /// обычные отступы съедают подпись до многоточия.
+    var compact = false
 
     var body: some View {
         HStack(spacing: 2) {
@@ -178,7 +181,7 @@ struct Segmented<T: Hashable>: View {
                         .font(.system(size: 12.5, weight: .semibold))
                         .lineLimit(1).layoutPriority(1)
                         .foregroundStyle(selection == value ? .white : p.muted)
-                        .padding(.horizontal, 9).padding(.vertical, 5)
+                        .padding(.horizontal, compact ? 7 : 9).padding(.vertical, 5)
                         .frame(maxWidth: .infinity)
                         .background(RoundedRectangle(cornerRadius: 6)
                             .fill(selection == value ? p.accent : .clear))

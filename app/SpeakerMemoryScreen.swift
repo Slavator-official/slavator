@@ -1,10 +1,15 @@
 import SwiftUI
 
-struct SpeakersScreen: View {
+/// Память встреч: поиск по сохранённым расшифровкам и граф участников.
+///
+/// Отдельный экран, а не вкладка у спикеров. Спикеры — это люди и их голоса,
+/// список, который правят руками. Память — то, что программа насчитала по
+/// расшифровкам. Общего у них только слово «голос», и сведённые в один экран
+/// они мешали друг другу: за списком людей нужно было идти через поиск.
+struct MemoryScreen: View {
     @Bindable var library: Library
     var player: Player
     @Bindable var memory: SpeakerMemory
-    @Binding var screen: Screen
     @Environment(\.palette) private var p
     @State private var detail: MemoryQuote?
 
@@ -12,7 +17,7 @@ struct SpeakersScreen: View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Спикеры и память встреч").font(Kind.title(24))
+                    Text("Память встреч").font(Kind.title(24))
                     Text("Кто, что и когда говорил — с опорой на сохранённые расшифровки.")
                         .font(Kind.body(13)).foregroundStyle(p.muted)
                 }
@@ -28,7 +33,9 @@ struct SpeakersScreen: View {
                 Label("Хранится на этом устройстве", systemImage: "lock.shield")
                     .font(Kind.body(12)).foregroundStyle(p.muted)
             }
-            Segmented(options: [("search", "Поиск и история"), ("graph", "Граф встреч"), ("profiles", "Голосовые профили")], selection: $memory.tab)
+            Segmented(options: [("search", "Поиск и история"), ("graph", "Граф встреч")],
+                      selection: $memory.tab)
+                .frame(width: 380)
             if memory.busy {
                 HStack(spacing: 10) {
                     ProgressView().controlSize(.small)
@@ -48,9 +55,7 @@ struct SpeakersScreen: View {
                     Text(memory.warnings.joined(separator: "\n")).font(Kind.body(12)).textSelection(.enabled)
                 }.font(Kind.body(12)).foregroundStyle(p.warn)
             }
-            if memory.tab == "profiles" {
-                SpeakerProfilesScreen(library: library, player: player, screen: $screen)
-            } else if memory.tab == "graph" {
+            if memory.tab == "graph" {
                 Toggle("Строить граф встреч", isOn: Binding(
                     get: { library.settings.memory_graph_enabled },
                     set: { library.settings.memory_graph_enabled = $0; library.settings.save()
@@ -110,7 +115,7 @@ struct SpeakersScreen: View {
                 Menu {
                     Button("Все голоса") { filter(person: "") }
                     ForEach(memory.overview.people) { person in
-                        Button(person.name + (person.confirmed ? "" : " · не подтверждён") + " · \(person.meetings) встр.") { filter(person: person.id) }
+                        Button(person.name + person.mark + " · \(person.meetings) встр.") { filter(person: person.id) }
                     }
                 } label: {
                     Label(memory.overview.people.first(where: { $0.id == memory.person })?.name ?? "Все голоса", systemImage: "person")
@@ -326,12 +331,12 @@ struct MemoryGraph: View {
                 }
             }
             HStack {
-                Toggle("Показать неопознанные голоса (\(unconfirmed.count))", isOn: $showUnconfirmed)
+                Toggle("Показать голоса без карточек (\(unconfirmed.count))", isOn: $showUnconfirmed)
                     .toggleStyle(.checkbox).font(Kind.body(12))
                 Spacer()
                 Menu("Выбрать участника") {
                     ForEach(memory.overview.people) { person in
-                        Button(person.name + (person.confirmed ? "" : " · не подтверждён")) {
+                        Button(person.name + person.mark) {
                             memory.person = person.id; edge = nil
                         }
                     }
@@ -362,7 +367,7 @@ struct MemoryGraph: View {
                                 VStack(spacing: 4) {
                                     Text(person.name).font(Kind.strong(12)).lineLimit(2).multilineTextAlignment(.center)
                                     Text("\(person.meetings) встр. · \(person.quotes) фр.").font(Kind.body(10)).foregroundStyle(p.muted)
-                                    if !person.confirmed { Text("не подтверждён").font(Kind.body(9)).foregroundStyle(p.muted) }
+                                    if !person.confirmed { Text("без карточки").font(Kind.body(9)).foregroundStyle(p.muted) }
                                 }.padding(10).frame(width: 142)
                                     .background(RoundedRectangle(cornerRadius: 12).fill(p.surface))
                                     .overlay(RoundedRectangle(cornerRadius: 12).stroke(person.id == memory.person ? p.accent2 : p.line2, lineWidth: 1.5))
@@ -406,14 +411,14 @@ struct MemoryGraph: View {
             }
             if !unconfirmed.isEmpty {
                 Divider().overlay(p.line2).padding(.vertical, 12)
-                DisclosureGroup("Неопознанные голоса: \(unconfirmed.count) — уточнить имена") {
+                DisclosureGroup("Голосов без карточки: \(unconfirmed.count) — это голоса, известные только внутри своей встречи") {
                     Text("Для этих голосов нет сохранённой привязки к человеку. Даже если короткого образца нет в «Новых голосах», откройте реплики и выберите «Уточнить, кто говорит…» в контексте.")
                         .font(Kind.body(12)).foregroundStyle(p.muted).padding(.vertical, 8)
                     ForEach(unconfirmed) { person in
                         HStack(spacing: 12) {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(person.name).font(Kind.strong(12))
-                                Text("\(person.quotes) фр. · личность не подтверждена")
+                                Text("\(person.quotes) фр." + (person.title.map { " · \($0)" } ?? ""))
                                     .font(Kind.body(11)).foregroundStyle(p.muted)
                             }
                             Spacer()
