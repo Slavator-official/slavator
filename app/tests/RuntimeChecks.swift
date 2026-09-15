@@ -20,6 +20,16 @@ struct RuntimeChecks {
         precondition((stored["future"] as? [String: Int])?["value"] == 42)
         print("PASS: старые настройки, повреждённое поле, сохранение неизвестных полей")
 
+        let shared = root.appendingPathComponent("profiles-755")
+        try fm.createDirectory(at: shared, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
+        let fresh = root.appendingPathComponent("nested/support")
+        AppConfiguration.protect([shared, fresh])
+        for folder in [shared, fresh] {
+            let mode = try fm.attributesOfItem(atPath: folder.path)[.posixPermissions] as? Int
+            precondition(mode == 0o700, "\(folder.lastPathComponent): \(String(mode ?? 0, radix: 8))")
+        }
+        print("PASS: папки с личными данными закрыты от других пользователей")
+
         // Ступени памяти: 8 ГБ — слабая машина, 16 — середина, 18 и выше —
         // полная модель. Раньше это был подстрочник, и делить свою память на
         // гигабайты человек должен был сам.

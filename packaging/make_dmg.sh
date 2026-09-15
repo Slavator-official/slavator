@@ -63,6 +63,24 @@ if [[ $FULL -eq 1 ]]; then
     fi
 fi
 
+if [[ $FULL -eq 1 ]]; then
+    # Опись комплекта вшивается в приложение, а приложение переподписывается:
+    # установщик верит папке «ресурсы» только если она совпала с описью, а
+    # опись лежит там, где её не подменить, не сломав подпись. Сама папка на
+    # томе ничем не защищена — такую же может принести любая флешка.
+    say "Составляю опись комплекта"
+    STAGED_APP="$STAGE/$(basename "$APP")"
+    (cd "$PAYLOAD" && find . -type f ! -name '.DS_Store' | LC_ALL=C sort | tr '\n' '\0' \
+        | xargs -0 shasum -a 256) > "$STAGED_APP/Contents/Resources/payload.sha256"
+    IDENTITY="Slavator Local Signing"
+    if security find-certificate -c "$IDENTITY" >/dev/null 2>&1; then
+        codesign --force --deep --sign "$IDENTITY" "$STAGED_APP" 2>/dev/null \
+            || fail "не удалось переподписать приложение с описью"
+    else
+        codesign --force --deep --sign - "$STAGED_APP" 2>/dev/null || true
+    fi
+fi
+
 say "Создаю образ"
 hdiutil create \
     -volname "$VOLNAME" \

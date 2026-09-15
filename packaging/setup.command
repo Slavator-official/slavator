@@ -64,6 +64,8 @@ read -r -p "Продолжить? [Enter — да, n — выход] " answer
 [[ "$answer" == "n" || "$answer" == "N" ]] && { printf '\nОтменено.\n\n'; exit 0; }
 
 mkdir -p "$SUPPORT" || die "нет доступа к $SUPPORT"
+# Здесь переписки с моделью, настройки и записи — только владельцу.
+chmod 700 "$SUPPORT"
 
 # --------------------------------------------------------------------------
 step "Движок распознавания речи"
@@ -125,13 +127,30 @@ step "Шаг 4 из 4: Ollama"
 # Комплект ищем сами на смонтированном образе: раньше путь передавал
 # «Установить.command», но его с образа убрали - в macOS 15 и новее система
 # не даёт открыть файл .command, скачанный из интернета.
-PAYLOAD="${MEETING_TRANSCRIBER_PAYLOAD:-}"
-if [[ -z "$PAYLOAD" ]]; then
-    for candidate in /Volumes/*/ресурсы; do
-        [[ -d "$candidate" ]] && { PAYLOAD="$candidate"; break; }
-    done
-fi
-[[ -n "$PAYLOAD" ]] && ok "найден комплект: $PAYLOAD"
+#
+# Папку «ресурсы» может положить на флешку или в образ кто угодно, а из неё
+# ставится Ollama и копируются модели. Поэтому комплект принимаем, только
+# если каждый его файл совпал с описью, которую make_dmg.sh вшивает в
+# подписанное приложение: лишний, недостающий или изменённый файл — и
+# комплект не используется, всё скачивается как для лёгкого образа.
+verify_payload() {
+    local dir="$1" manifest="$RESOURCES/payload.sha256" listed actual
+    [[ -d "$dir" && -f "$manifest" ]] || return 1
+    listed=$(sed -E 's/^[0-9a-f]{64}  //' "$manifest" | LC_ALL=C sort)
+    actual=$(cd "$dir" && find . -type f ! -name '.DS_Store' | LC_ALL=C sort)
+    [[ -n "$listed" && "$listed" == "$actual" ]] || return 1
+    (cd "$dir" && shasum -a 256 --check --status "$manifest")
+}
+
+PAYLOAD=""
+for candidate in ${MEETING_TRANSCRIBER_PAYLOAD:+"$MEETING_TRANSCRIBER_PAYLOAD"} /Volumes/*/ресурсы; do
+    [[ -d "$candidate" ]] || continue
+    printf '    Проверяю комплект %s...\n' "$candidate"
+    if verify_payload "$candidate"; then
+        PAYLOAD="$candidate"; ok "комплект проверен: $PAYLOAD"; break
+    fi
+    warn "комплект $candidate не совпал с описью приложения — не используется"
+done
 
 # Образ Ollama берём из комплекта, а если его нет - качаем с сайта. Лёгкий
 # образ весит два мегабайта именно потому, что всё тяжёлое приезжает здесь.
@@ -149,6 +168,20 @@ find_ollama() {
     done
     command -v ollama 2>/dev/null && return 0
     return 1
+}
+
+# Ставим только настоящую Ollama: целая подпись Developer ID, одобрение
+# Gatekeeper (нотаризация; тикет Ollama вшит в приложение, так что проверка
+# проходит и без сети) и идентификатор их приложения. Раньше образ ставился
+# как есть, а карантин с него снимался — подменённый образ Gatekeeper уже
+# не увидел бы.
+verify_ollama_app() {
+    local app="$1" info
+    codesign --verify --deep "$app" 2>/dev/null || return 1
+    spctl --assess --type execute "$app" 2>/dev/null || return 1
+    info=$(codesign -dvv "$app" 2>&1) || return 1
+    grep -qx 'Identifier=com.electron.ollama' <<<"$info" || return 1
+    grep -q '^Authority=Developer ID Application: ' <<<"$info"
 }
 
 OLLAMA_BIN="$(find_ollama || true)"
@@ -185,7 +218,10 @@ fi
 
 if [[ -n "$OLLAMA_DMG" ]]; then
     MOUNT=$(hdiutil attach -nobrowse -quiet "$OLLAMA_DMG" | awk -F'\t' 'END{print $NF}')
-    if [[ -d "$MOUNT/Ollama.app" ]]; then
+    if [[ -d "$MOUNT/Ollama.app" ]] && ! verify_ollama_app "$MOUNT/Ollama.app"; then
+        warn "образ Ollama не прошёл проверку подписи — не устанавливаю"
+        printf '      Поставьте Ollama вручную с https://ollama.com/download/mac\n'
+    elif [[ -d "$MOUNT/Ollama.app" ]]; then
         cp -R "$MOUNT/Ollama.app" /Applications/ && ok "Ollama установлена"
         xattr -cr /Applications/Ollama.app 2>/dev/null
     else
@@ -311,6 +347,7 @@ CJM
 ретро
 стейкхолдер
 GLOSS
+    chmod 600 "$GLOSSARY"   # внутренние названия проектов и фамилии
     ok "создан словарь терминов: $GLOSSARY"
 fi
 

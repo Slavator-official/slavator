@@ -70,6 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private let watch = MeetingWatch()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AppConfiguration.protectPrivateFolders()
         // Делегата ставят до первого уведомления, иначе нажатие кнопки в нём
         // некому обработать.
         guard Bundle.main.bundleIdentifier != nil else { return }

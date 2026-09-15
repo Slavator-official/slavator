@@ -38,6 +38,28 @@ enum DesktopContract {
 }
 
 enum AppConfiguration {
+    /// Закрыть папки с личными данными от других пользователей Mac.
+    ///
+    /// Голосовые отпечатки — биометрия, в переписках с моделью цитаты встреч.
+    /// Папки создавались с правами по умолчанию (755), и на общем Mac их мог
+    /// прочитать любой из группы staff. Права на саму папку закрывают всё
+    /// содержимое разом, в том числе файлы, которые ядро пишет по-своему.
+    static func protectPrivateFolders() {
+        let profiles = (environment()["MEETING_TRANSCRIBER_PROFILES"] ?? "") as NSString
+        var folders = [support]
+        if profiles.length > 0 { folders.append(URL(fileURLWithPath: profiles.expandingTildeInPath)) }
+        protect(folders)
+    }
+
+    static func protect(_ folders: [URL]) {
+        let fm = FileManager.default
+        for folder in folders {
+            try? fm.createDirectory(at: folder, withIntermediateDirectories: true,
+                                    attributes: [.posixPermissions: 0o700])
+            try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
+        }
+    }
+
     static var support: URL {
         let path = ProcessInfo.processInfo.environment["MEETING_TRANSCRIBER_APP_SUPPORT"] ?? ""
         if !path.trimmingCharacters(in: .whitespaces).isEmpty {

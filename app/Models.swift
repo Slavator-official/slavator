@@ -32,12 +32,16 @@ enum Paths {
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
 
         guard let resources = Bundle.main.resourceURL else { return }
+        // Опись комплекта едет вместе со скриптом: по ней установщик решает,
+        // верить ли папке «ресурсы» на томе. Старую копию убираем и тогда,
+        // когда в этой сборке описи нет, — иначе прошлая опись приняла бы
+        // чужой комплект.
         for name in ["setup.command", "requirements.txt",
-                     "requirements-faster-whisper.txt", "requirements-gigaam.txt"] {
+                     "requirements-faster-whisper.txt", "requirements-gigaam.txt", "payload.sha256"] {
             let source = resources.appending(path: name)
-            guard fm.fileExists(atPath: source.path) else { continue }
             let target = dir.appending(path: name)
             try? fm.removeItem(at: target)
+            guard fm.fileExists(atPath: source.path) else { continue }
             try? fm.copyItem(at: source, to: target)
         }
 
