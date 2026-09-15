@@ -18,6 +18,9 @@ final class Chat {
         var text: String
         var sources: [MemoryQuote]? = nil
         var fromMemory: Bool? = nil
+        var fromDocument: Bool? = nil
+        var documentSources: [DocumentCitation]? = nil
+        var documentName: String? = nil
     }
 
     struct Conversation: Identifiable, Codable, Equatable {
@@ -48,6 +51,18 @@ final class Chat {
     private var process: Process?
     private var requestID = UUID()
     private(set) var progress = ""
+    let documents = DocumentWorkspace()
+    private let documentJob = DocumentJob()
+    private(set) var attachedDocument: LocalDocument?
+    var containsDocumentData: Bool { messages.contains { $0.fromDocument == true || $0.documentSources != nil } }
+
+    func attachDocument(_ document: LocalDocument) {
+        guard !isAnswering else { return }
+        if currentID == nil { startNew() }
+        attachedDocument = document
+    }
+
+    func detachDocument() { guard !isAnswering else { return }; attachedDocument = nil; documents.reset() }
 
     var current: Conversation? {
         guard let currentID else { return nil }
@@ -62,6 +77,8 @@ final class Chat {
 
     func startNew() {
         stop()
+        documents.reset()
+        attachedDocument = nil
         failure = nil
         // Пустой черновик не плодим: если текущая переписка ещё без единого
         // сообщения, «новый чат» — это она и есть.
@@ -75,12 +92,14 @@ final class Chat {
     func open(_ id: UUID) {
         guard id != currentID else { return }
         stop()
+        documents.reset()
+        attachedDocument = nil
         failure = nil
         currentID = id
     }
 
     func delete(_ id: UUID) {
-        if id == currentID { stop() }
+        if id == currentID { stop(); attachedDocument = nil }
         conversations.removeAll { $0.id == id }
         if currentID == id { currentID = conversations.first?.id }
         if conversations.isEmpty { startNew() } else { save() }
@@ -101,12 +120,31 @@ final class Chat {
         if conversations[index].messages.isEmpty {
             conversations[index].title = Conversation.name(from: prompt)
         }
-        conversations[index].messages.append(Message(role: .user, text: prompt, fromMemory: settings.chat_memory_enabled))
-        conversations[index].messages.append(Message(role: .model, text: "", fromMemory: settings.chat_memory_enabled))
+        let readingDocument = attachedDocument != nil
+        let fromMemory = settings.chat_memory_enabled && !readingDocument
+        conversations[index].messages.append(Message(role: .user, text: prompt, fromMemory: fromMemory,
+                                                     fromDocument: readingDocument, documentName: attachedDocument?.title))
+        conversations[index].messages.append(Message(role: .model, text: "", fromMemory: fromMemory,
+                                                     fromDocument: readingDocument, documentName: attachedDocument?.title))
         conversations[index].updated = Date()
         isAnswering = true
         save()
 
+        if let document = attachedDocument {
+            askDocument(["action": "answer", "document": document.payload, "question": prompt], settings: settings,
+                        token: token, conversationID: conversationID)
+            return
+        }
+        // Once private document content is in a conversation, its later turns
+        // also use the verified-local worker even after removing the attachment.
+        if containsDocumentData {
+            let history = conversations[index].messages.dropLast().map {
+                ["role": $0.role == .user ? "user" : "assistant", "content": $0.text]
+            }
+            askDocument(["action": "conversation", "history": history], settings: settings,
+                        token: token, conversationID: conversationID)
+            return
+        }
         if settings.chat_memory_enabled {
             recall(prompt, settings: settings, token: token, conversationID: conversationID)
             return
@@ -120,6 +158,7 @@ final class Chat {
 
     func stop() {
         requestID = UUID()
+        documentJob.cancel(); documents.job.cancel()
         if let process, process.isRunning { process.terminate() }
         process = nil
         progress = ""
@@ -128,15 +167,38 @@ final class Chat {
         isAnswering = false
         if let index = conversations.firstIndex(where: { $0.id == currentID }),
            let last = conversations[index].messages.indices.last,
-           conversations[index].messages[last].text == "Найдены возможные совпадения. Готовлю ответ…" {
+           ["Найдены возможные совпадения. Готовлю ответ…", "Фрагменты документа найдены. Готовлю ответ…"].contains(conversations[index].messages[last].text) {
             conversations[index].messages[last].text = "Ответ остановлен. Найденные цитаты сохранены."
         }
         if let index = conversations.firstIndex(where: { $0.id == currentID }),
            let last = conversations[index].messages.last, last.role == .model,
-           last.text.isEmpty && (last.sources ?? []).isEmpty {
+           last.text.isEmpty && (last.sources ?? []).isEmpty && (last.documentSources ?? []).isEmpty {
             conversations[index].messages.removeLast()
         }
         save()
+    }
+
+    private func askDocument(_ payload: [String: Any], settings: Settings, token: UUID, conversationID: UUID) {
+        progress = "Читаю документ локально…"
+        documentJob.run(payload, settings: settings, onEvent: { [weak self] reply in
+            guard let self, self.requestID == token else { return }
+            if reply.event == "progress" { self.progress = reply.message ?? "" }
+            if reply.event == "sources", let index = self.conversations.firstIndex(where: { $0.id == conversationID }),
+               let last = self.conversations[index].messages.indices.last {
+                self.conversations[index].messages[last].documentSources = reply.citations
+                self.conversations[index].messages[last].text = "Фрагменты документа найдены. Готовлю ответ…"
+                self.save()
+            }
+        }, completion: { [weak self] reply, error in
+            guard let self, self.requestID == token else { return }
+            if let reply, let index = self.conversations.firstIndex(where: { $0.id == conversationID }),
+               let last = self.conversations[index].messages.indices.last {
+                self.conversations[index].messages[last].text = (reply.text ?? "")
+                    + ((reply.notice ?? "").isEmpty ? "" : "\n\n" + (reply.notice ?? ""))
+                self.conversations[index].messages[last].documentSources = reply.citations
+            }
+            Task { @MainActor in self.finish(error: error, token: token, conversationID: conversationID) }
+        })
     }
 
     // MARK: обмен с Ollama
@@ -321,6 +383,7 @@ struct ChatScreen: View {
     @Environment(\.palette) private var p
     @State private var draft = ""
     @State private var search = ""
+    @State private var showDocuments = false
     @FocusState private var writing: Bool
 
     var body: some View {
@@ -339,6 +402,11 @@ struct ChatScreen: View {
         .sheet(item: $detail) { quote in
             QuoteContext(quote: quote, memory: memory, library: library, player: player)
         }
+        .sheet(isPresented: $showDocuments) {
+            ChatAttachmentSheet(workspace: chat.documents, settings: library.settings) { document in
+                chat.attachDocument(document)
+            }
+        }
         // Чат занимает всю высоту окна: переписка сверху, поле ввода внизу.
         // Внутри общей прокрутки высота не задавалась вовсе, и экран
         // обрывался на середине, оставляя полокна пустыми.
@@ -352,8 +420,8 @@ struct ChatScreen: View {
             Spacer(minLength: 0)
             Image(systemName: "bubble.left.and.bubble.right")
                 .font(.system(size: 26)).foregroundStyle(p.faint)
-            Text(library.settings.chat_memory_enabled ? "Что вспомнить из встреч?" : "Спросите что угодно").font(Kind.strong(14.5))
-            Text(library.settings.chat_memory_enabled ? "Например: «Когда я говорил про перенос сроков?»" : (AppConfiguration.usesLocalModel ? "Ответит локальная модель" : "Используется настроенный адрес модели"))
+            Text(chat.attachedDocument != nil ? "Что узнать из документа?" : (library.settings.chat_memory_enabled ? "Что вспомнить из встреч?" : "Спросите что угодно")).font(Kind.strong(14.5))
+            Text(chat.attachedDocument != nil ? "Например: «Какие сроки и обязательства указаны?»" : (library.settings.chat_memory_enabled ? "Например: «Когда я говорил про перенос сроков?»" : (AppConfiguration.usesLocalModel ? "Ответит локальная модель" : "Используется настроенный адрес модели")))
                 .font(Kind.body(12.5)).foregroundStyle(p.muted)
             Spacer(minLength: 0)
         }
@@ -391,6 +459,19 @@ struct ChatScreen: View {
             Text(Self.rendered(message.text))
                 .font(Kind.body(14)).textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            if let name = message.documentName {
+                Text("Документ: " + name + " · локально").font(Kind.body(11)).foregroundStyle(p.muted)
+            }
+            if let sources = message.documentSources {
+                ForEach(sources) { source in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("[\(source.id)] \(source.locator) · фрагмент \(source.block)")
+                            .font(Kind.strong(12))
+                        Text(source.text + (source.shortened ? "\n[Показана часть фрагмента]" : ""))
+                            .font(Kind.body(12)).textSelection(.enabled)
+                    }.padding(10).background(RoundedRectangle(cornerRadius: 8).fill(p.surface))
+                }
+            }
             if let sources = message.sources {
                 ForEach(Array(sources.enumerated()), id: \.element.id) { number, quote in
                     VStack(alignment: .leading, spacing: 6) {
@@ -432,30 +513,60 @@ struct ChatScreen: View {
 
     private var composer: some View {
         Card {
+            if let document = chat.attachedDocument {
+                HStack(spacing: 8) {
+                    Image(systemName: "doc.text").foregroundStyle(p.accent2)
+                    Text(document.title).font(Kind.body(12)).lineLimit(1).truncationMode(.middle)
+                        .help(document.title)
+                    Spacer(minLength: 8)
+                    Button { chat.detachDocument() } label: { Image(systemName: "xmark") }
+                        .buttonStyle(.plain).disabled(chat.isAnswering)
+                        .accessibilityLabel("Убрать прикреплённые файлы").help("Убрать файлы из контекста")
+                }.padding(9).background(RoundedRectangle(cornerRadius: 8).fill(p.raised))
+                    .padding(.bottom, 8)
+            }
+            if chat.attachedDocument != nil || chat.containsDocumentData {
+                HStack(spacing: 6) {
+                    Label(chat.attachedDocument != nil ? "Контекст: прикреплённые файлы" : "Контекст: история и цитаты", systemImage: "lock")
+                    Spacer()
+                    Image(systemName: "info.circle")
+                        .help("Обработка локальная. В истории остаются вопросы, ответы и цитаты, не весь исходник. Для поиска по встречам начните новую переписку; для чтения всего файла прикрепите его снова.")
+                }.font(Kind.body(11)).foregroundStyle(p.muted).padding(.bottom, 8)
+            }
+            if chat.attachedDocument == nil && !chat.containsDocumentData {
             HStack {
-                Toggle("Искать в памяти встреч", isOn: Binding(
+                Toggle("Искать во встречах", isOn: Binding(
                     get: { library.settings.chat_memory_enabled },
                     set: { library.settings.chat_memory_enabled = $0; library.settings.save() }))
-                    .toggleStyle(.switch).disabled(chat.isAnswering)
-                Spacer()
+                    .toggleStyle(.switch).controlSize(.small).font(Kind.body(12)).disabled(chat.isAnswering)
+                Spacer(minLength: 12)
                 if library.settings.chat_memory_enabled {
                     Menu("Ваш голос: " + (library.speakers.first(where: { $0.key == library.settings.my_profile_key })?.name ?? "не выбран")) {
                         Button("Не указывать свой голос") { library.settings.my_profile_key = ""; library.settings.save() }
                         ForEach(library.speakers) { person in
                             Button(person.name) { library.settings.my_profile_key = person.key; library.settings.save() }
                         }
-                    }.frame(width: 250).disabled(chat.isAnswering)
+                    }.frame(maxWidth: 220).controlSize(.small).font(Kind.body(12)).disabled(chat.isAnswering)
                         .help("Выберите себя среди участников, чтобы искать свои реплики по вопросу «когда я говорил».")
+                } else {
+                    Toggle("Обдумать ответ", isOn: Bindable(chat).thinking)
+                        .toggleStyle(.checkbox).font(Kind.body(12)).foregroundStyle(p.muted)
+                        .disabled(chat.isAnswering).help("Ответ может быть медленнее, но подробнее обдуман.")
                 }
-            }.padding(.bottom, 10)
-            if library.settings.chat_memory_enabled {
-                Text(needsOwnProfile
-                     ? "Кого считать вами? Выберите свой голос выше, чтобы найти именно ваши слова."
-                     : "Для вопросов «я говорил» выберите свой голос. В остальных вопросах поиск идёт по всем участникам.")
-                    .font(Kind.body(12)).foregroundStyle(needsOwnProfile ? p.warn : p.muted)
+            }.padding(.bottom, 9)
+            if needsOwnProfile {
+                Text("Чтобы найти ваши слова, выберите себя в меню «Ваш голос».")
+                    .font(Kind.body(12)).foregroundStyle(p.warn)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.bottom, 10)
             }
+            }
             HStack(alignment: .bottom, spacing: 10) {
+                Button { showDocuments = true } label: {
+                    Image(systemName: "paperclip").font(.system(size: 18, weight: .medium))
+                        .frame(width: 38, height: 38)
+                        .background(RoundedRectangle(cornerRadius: 9).fill(p.raised))
+                }.buttonStyle(.plain).foregroundStyle(p.muted).disabled(chat.isAnswering)
+                    .accessibilityLabel("Прикрепить файлы").help("Прикрепить PDF, Word или текстовые файлы")
                 // Полю нужны собственные отступы и подложка: без них оно
                 // прилипало к верху, а кнопка со своими отступами оказывалась
                 // выше — строка выглядела разъехавшейся.
@@ -471,28 +582,25 @@ struct ChatScreen: View {
                     .overlay(RoundedRectangle(cornerRadius: 9)
                         .stroke(writing ? p.accent2 : p.line, lineWidth: 1))
                 if chat.isAnswering {
-                    Button("Остановить") { chat.stop() }.buttonStyle(QuietButton())
+                    Button { chat.stop() } label: {
+                        Image(systemName: "stop.fill").frame(width: 38, height: 38)
+                            .background(RoundedRectangle(cornerRadius: 9).fill(p.raised))
+                    }.buttonStyle(.plain).accessibilityLabel("Остановить ответ").help("Остановить ответ")
                 } else {
-                    Button("Отправить", action: send)
-                        .buttonStyle(PrimaryButton())
+                    Button(action: send) {
+                        Image(systemName: "arrow.up").font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(Color.white).frame(width: 38, height: 38)
+                            .background(RoundedRectangle(cornerRadius: 9).fill(p.accent))
+                    }.buttonStyle(.plain).accessibilityLabel("Отправить сообщение").help("Отправить сообщение")
                         .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || needsOwnProfile)
+                        .opacity(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || needsOwnProfile ? 0.4 : 1)
                 }
-            }
-            if !library.settings.chat_memory_enabled {
-            HStack(spacing: 8) {
-                Toggle("Размышлять перед ответом", isOn: Bindable(chat).thinking)
-                    .toggleStyle(.checkbox)
-                    .font(Kind.body(12)).foregroundStyle(p.muted)
-                Text("медленнее, но обдуманнее").font(Kind.body(12)).foregroundStyle(p.faint)
-                Spacer(minLength: 0)
-            }
-            .padding(.top, 9)
             }
         }
     }
 
     private var needsOwnProfile: Bool {
-        library.settings.chat_memory_enabled &&
+        chat.attachedDocument == nil && !chat.containsDocumentData && library.settings.chat_memory_enabled &&
         !library.speakers.contains(where: { $0.key == library.settings.my_profile_key }) &&
         draft.range(of: #"\b(я|мне|мной|мною|мои|моих|мою|мой|моя|моё|мое)\b"#,
                     options: [.regularExpression, .caseInsensitive]) != nil
@@ -512,6 +620,8 @@ struct ChatScreen: View {
 /// обычной навигации: «Главная» и «Записи» там всё равно не нужны.
 struct ChatHistory: View {
     var chat: Chat
+    var showsSelection = true
+    var onOpen: () -> Void = {}
     @Environment(\.palette) private var p
     @State private var search = ""
 
@@ -529,7 +639,7 @@ struct ChatHistory: View {
             HStack(spacing: 8) {
                 Text("Переписки").font(Kind.eyebrow()).tracking(0.8).foregroundStyle(p.faint)
                 Spacer()
-                Button { chat.startNew() } label: {
+                Button { chat.startNew(); onOpen() } label: {
                     Image(systemName: "square.and.pencil").font(.system(size: 13))
                         .foregroundStyle(p.accent2)
                 }
@@ -555,8 +665,8 @@ struct ChatHistory: View {
     }
 
     private func row(_ item: Chat.Conversation) -> some View {
-        let active = item.id == chat.currentID
-        return Button { chat.open(item.id) } label: {
+        let active = showsSelection && item.id == chat.currentID
+        return Button { chat.open(item.id); onOpen() } label: {
             HStack(spacing: 7) {
                 Circle()
                     .fill(active ? p.accent2 : p.faint.opacity(0.5))

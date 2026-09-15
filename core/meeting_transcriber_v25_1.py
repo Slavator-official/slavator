@@ -600,7 +600,7 @@ def whisper_model():
             ) from exc
         log(f"    модель {WHISPER_MODEL} ({WHISPER_DEVICE}/{WHISPER_COMPUTE})")
         _whisper_model = WhisperModel(
-            WHISPER_MODEL, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE,
+            cached_whisper_path() or WHISPER_MODEL, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE,
             cpu_threads=WHISPER_THREADS, num_workers=1,
         )
     return _whisper_model
@@ -1453,7 +1453,16 @@ def _http_json(url: str, payload: Optional[dict] = None, timeout: int = 30) -> d
         headers={"Content-Type": "application/json"},
         method="POST" if data else "GET",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    # Local model traffic must not depend on a VPN/system proxy after reboot.
+    if urllib.parse.urlparse(url).hostname in {"localhost", "127.0.0.1", "::1"}:
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        response_context = opener.open(request, timeout=timeout)
+    else:
+        response_context = urllib.request.urlopen(request, timeout=timeout)
+    with response_context as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -2639,23 +2648,25 @@ LLM_SIZE_MB = 5200
 WHISPER_SIZE_MB = 1500
 
 
-def whisper_cached() -> bool:
-    """Модель распознавания речи уже лежит в кэше huggingface."""
-    if ASR_ENGINE.startswith("giga"):
-        return True            # у GigaAM свои модели, они в списке onnx ниже
+def cached_whisper_path():
+    """Resolve installed weights offline; reuse this exact path when loading."""
     local = Path(WHISPER_MODEL).expanduser()
     if local.is_dir():
-        return all((local / name).is_file() and (local / name).stat().st_size > 0
-                   for name in ("model.bin", "config.json", "tokenizer.json"))
+        return str(local) if all((local / name).is_file() and (local / name).stat().st_size > 0
+                   for name in ("model.bin", "config.json", "tokenizer.json")) else None
     try:
         # Resolves the installed faster-whisper model mapping and cache refs;
         # local_files_only forbids downloads, unlike mere folder existence.
         from faster_whisper.utils import download_model
         cached = Path(download_model(WHISPER_MODEL, local_files_only=True))
-        return all((cached / name).is_file() and (cached / name).stat().st_size > 0
-                   for name in ("model.bin", "config.json", "tokenizer.json"))
+        return str(cached) if all((cached / name).is_file() and (cached / name).stat().st_size > 0
+                   for name in ("model.bin", "config.json", "tokenizer.json")) else None
     except Exception:
-        return False
+        return None
+
+
+def whisper_cached() -> bool:
+    return ASR_ENGINE.startswith("giga") or cached_whisper_path() is not None
 
 
 def _speech_models():
@@ -2669,6 +2680,19 @@ def _speech_models():
         return names, absent, sum(engine.MODELS[n]["size_mb"] for n in absent)
     except Exception:  # noqa: BLE001 - без библиотек модуль может не подняться
         return [], ["не удалось проверить модели"], 0
+
+
+def document_packages_missing() -> list:
+    from importlib.metadata import version, PackageNotFoundError
+    missing = []
+    for package, minimum in [("pypdf", (6, 18)), ("python-docx", (1, 1))]:
+        try:
+            installed = tuple(int(part) for part in version(package).split(".")[:2])
+            if installed < minimum:
+                missing.append(package)
+        except (PackageNotFoundError, ValueError):
+            missing.append(package)
+    return missing
 
 
 def readiness() -> dict:
@@ -2687,6 +2711,13 @@ def readiness() -> dict:
         "fixable": False,
     })
 
+    document_packages = document_packages_missing()
+    items.append({
+        "key": "documents", "title": "Чтение PDF и Word",
+        "state": "missing" if document_packages else "ok",
+        "detail": ", ".join(document_packages), "size_mb": 0, "fixable": False,
+    })
+
     _, absent, size = ([], ["сначала восстановите библиотеки"], 0) if packages else _speech_models()
     items.append({
         "key": "speech",
@@ -2701,9 +2732,9 @@ def readiness() -> dict:
     items.append({
         "key": "asr",
         "title": f"Модель распознавания речи ({WHISPER_MODEL})",
-        "state": "ok" if asr_ready else "missing",
-        "detail": "",
-        "size_mb": 0 if asr_ready else WHISPER_SIZE_MB,
+        "state": "ok" if asr_ready else ("unknown" if packages else "missing"),
+        "detail": "сначала восстановите библиотеки для проверки" if packages else "",
+        "size_mb": WHISPER_SIZE_MB if not asr_ready and not packages else 0,
         "fixable": True,
     })
 
@@ -2732,7 +2763,7 @@ def readiness() -> dict:
         "title": f"Языковая модель {OLLAMA_MODEL}",
         "state": model_state,
         "detail": "" if model_state != "unknown" else "неизвестно, пока Ollama не запущена",
-        "size_mb": 0 if model_state == "ok" else LLM_SIZE_MB,
+        "size_mb": LLM_SIZE_MB if model_state == "missing" else 0,
         "fixable": binary is not None,
     })
 
@@ -2842,6 +2873,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--summarize", type=Path, default=None, metavar="КАТАЛОГ",
                         help="собрать резюме по готовой стенограмме в каталоге _result")
     parser.add_argument("--check", action="store_true", help="только проверить окружение")
+    parser.add_argument("--start-services", action="store_true", help="запустить установленную локальную Ollama без загрузок")
     parser.add_argument("--json", action="store_true",
                         help="с --check: выдать отчёт о готовности машинно")
     parser.add_argument("--allow-download", action="store_true", help="явно разрешить загрузки при --repair")
@@ -2867,6 +2899,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # Машинный отчёт печатается один и без спутников: интерфейсу иначе
     # пришлось бы выковыривать JSON из человеческого текста.
     if args.check and args.json:
+        if args.start_services:
+            ollama_serve(wait_seconds=15)
         print(json.dumps(readiness(), ensure_ascii=False))
         return 0
 

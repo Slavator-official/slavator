@@ -47,7 +47,7 @@ struct SlavatorApp: App {
 }
 
 enum Screen: Hashable {
-    case main, records, speakers, newVoices, settings, chat
+    case main, records, speakers, newVoices, settings, chat, privacy
     case person(String)
 }
 
@@ -234,15 +234,16 @@ struct ModeSwitch: View {
     @Binding var back: Screen
     @Environment(\.palette) private var p
 
-    private var inChat: Bool { screen == .chat }
+    private var inChat: Bool { screen == .chat || screen == .privacy }
 
     var body: some View {
         HStack(spacing: 3) {
             button(symbol: "waveform", active: !inChat, hint: "Славатор") {
-                if inChat { screen = back }
+                if inChat { screen = (back == .chat || back == .privacy) ? .main : back }
             }
             button(symbol: "bubble.left.and.bubble.right", active: inChat, hint: "Чат с моделью") {
-                if !inChat { back = screen; screen = .chat }
+                if !inChat { back = screen }
+                screen = .chat
             }
         }
         .padding(3)
@@ -281,6 +282,7 @@ struct Shell: View {
     /// Куда вернуться из чата.
     @State private var lastAppScreen: Screen = .main
     @State private var picked: URL?
+    @State private var privacyWorkspace = DocumentWorkspace()
     @Environment(\.colorScheme) private var systemScheme
 
     private var palette: Palette {
@@ -300,6 +302,8 @@ struct Shell: View {
                     ChatScreen(library: library, chat: chat, memory: memory, player: player)
                         .padding(.horizontal, 28)
                         .padding(.vertical, 22)
+                } else if screen == .privacy {
+                    DocumentSheet(workspace: privacyWorkspace, settings: library.settings, attach: { _ in }, standalone: true)
                 } else {
                 ScrollView {
                     Group {
@@ -314,7 +318,7 @@ struct Shell: View {
                         case .newVoices: NewVoicesScreen(library: library, player: player)
                         // Чат нарисован выше, вне прокрутки. Ветка нужна
                         // только чтобы перечисление было исчерпано.
-                        case .chat:      EmptyView()
+                        case .chat, .privacy: EmptyView()
                         case .settings:  SettingsScreen(library: library, dictation: dictation)
                         case .person(let key): PersonScreen(library: library, player: player,
                                                             key: key, screen: $screen, memory: memory)
@@ -416,10 +420,13 @@ struct Sidebar: View {
             ModeSwitch(screen: $screen, back: $lastAppScreen)
                 .padding(.horizontal, 10).padding(.bottom, 18)
 
-            if screen == .chat {
+            if screen == .chat || screen == .privacy {
+                NavButton(title: "Обезличивание", symbol: "lock.shield",
+                          active: screen == .privacy, badge: nil) { screen = .privacy }
+                    .padding(.bottom, 18)
                 // В режиме чата «Главная» и «Записи» не нужны, а список
                 // переписок нужен постоянно — он и занимает их место.
-                ChatHistory(chat: chat)
+                ChatHistory(chat: chat, showsSelection: screen == .chat, onOpen: { screen = .chat })
             } else {
             VStack(spacing: 2) {
                 ForEach(items, id: \.1) { item in

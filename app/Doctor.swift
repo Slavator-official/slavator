@@ -27,6 +27,7 @@ struct Readiness: Decodable {
     let size_mb: Int
 
     var missing: [Item] { items.filter { !$0.ok } }
+    var needsDownload: Bool { missing.contains { $0.state == "missing" && $0.size_mb > 0 } }
 
     /// Чего не хватает — одной строкой под заголовком карточки.
     var listing: String {
@@ -75,7 +76,7 @@ final class Doctor {
 
         let process = Process()
         process.executableURL = Paths.venvPython
-        process.arguments = ["-B", Paths.core.path, "--check", "--json"]
+        process.arguments = ["-B", Paths.core.path, "--check", "--json", "--start-services"]
         process.currentDirectoryURL = Paths.core.deletingLastPathComponent()
         process.environment = AppConfiguration.environment()
 

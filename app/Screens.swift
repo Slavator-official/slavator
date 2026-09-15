@@ -115,7 +115,7 @@ struct MainScreen: View {
             HStack(spacing: 10) {
                 Image(systemName: "arrow.down.circle.dotted")
                     .font(.system(size: 19)).foregroundStyle(p.warn).frame(width: 26)
-                Text("Требуется дозагрузка").font(Kind.strong(14.5))
+                Text(report.needs_setup ? "Нужно восстановить окружение" : (report.needsDownload ? "Не хватает моделей" : "Локальные службы ещё не готовы")).font(Kind.strong(14.5))
                 Spacer()
                 if let weight = report.weight {
                     Pill(text: weight, fg: p.warn, bg: p.warnBg)
@@ -140,6 +140,11 @@ struct MainScreen: View {
                 .buttonStyle(PrimaryButton(wide: true))
                 .disabled(setupStarted)
                 .padding(.top, 10)
+            } else if !report.needsDownload {
+                Text("Повторное скачивание не требуется. Запустим установленную Ollama и проверим модели на компьютере.")
+                    .font(Kind.body(12)).foregroundStyle(p.muted)
+                Button(doctor.busy ? "Запускаю и проверяю…" : "Запустить и проверить") { doctor.refresh() }
+                    .buttonStyle(PrimaryButton(wide: true)).disabled(doctor.busy)
             } else {
                 Button(pipeline.isRunning ? "Идёт дозагрузка" : "Дозагрузить") {
                     let alert = NSAlert()

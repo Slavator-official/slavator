@@ -53,5 +53,121 @@ struct Record {
         let message = try JSONDecoder().decode(Chat.Message.self, from: old)
         precondition(message.sources == nil && message.fromMemory == nil)
         print("PASS: чат — источники, сохранение, старый формат, отмена и изоляция переписок")
+
+        let documentWorker = """
+        import json,sys,time
+        time.sleep(.1)
+        r=json.loads(sys.stdin.readline())
+        print(json.dumps({'event':'progress','message':'ready'}),flush=True)
+        if r.get('question')=='slow': time.sleep(.5)
+        action=r['action']
+        if action=='read':
+            result={'document':dict(title='source.docx',format='DOCX',blocks=[dict(id='1',locator='Текст',text='Иван и бюджет 500')],warnings=[],characters=18)}
+        elif action=='detect':
+            result=dict(text='[Человек 1] и бюджет 500',entities=[dict(id='1',kind='PERSON',variants=['Иван'],replacement='[Человек 1]',enabled=True,origin='Модель')],count=1,checked=1,total=1,model_complete=True)
+        elif action=='apply': result={'text':r['entities'][0]['replacement']+' и бюджет 500','count':1}
+        elif action=='answer':
+            citations=[dict(id='1',locator='Страница 1',text='Точная цитата из файла',block='1',shortened=False)]
+            print(json.dumps(dict(event='sources',citations=citations)),flush=True)
+            result=dict(text=r['question'],citations=citations)
+        elif action=='conversation': result=dict(text='Локальное продолжение')
+        elif action=='export_docx': result={'data':'Y2xlYW4='}
+        print(json.dumps(dict(event='result',**result)),flush=True)
+        """
+        try documentWorker.write(to: dir.appendingPathComponent("document_tools.py"), atomically: true, encoding: .utf8)
+        let source = dir.appendingPathComponent("source.docx")
+        try Data("original".utf8).write(to: source)
+        let documents = chat.documents
+        documents.read(source, settings: settings)
+        spin { !documents.job.busy }
+        precondition(documents.document?.title == "source.docx")
+        documents.detect(settings: settings)
+        spin { !documents.job.busy }
+        precondition(documents.hasResult && !documents.canExport && !documents.replacementsChanged)
+        documents.reviewed = true
+        precondition(documents.canExport)
+        documents.output += " Правка"
+        precondition(!documents.reviewed && !documents.canExport)
+        documents.reviewed = true
+        documents.entities[0].replacement = "[Покупатель]"
+        precondition(!documents.reviewed && documents.replacementsChanged && !documents.canExport)
+        documents.apply(settings: settings)
+        spin { !documents.job.busy }
+        documents.reviewed = true
+        precondition(documents.canExport)
+        documents.export(to: source, word: false, settings: settings)
+        precondition(documents.error != nil && (try! String(contentsOf: source)) == "original")
+        let alias = dir.appendingPathComponent("alias.docx")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: source)
+        documents.export(to: alias, word: true, settings: settings)
+        precondition(documents.error != nil && !documents.job.busy)
+        let exported = dir.appendingPathComponent("reviewed.txt")
+        documents.export(to: exported, word: false, settings: settings)
+        precondition((try! String(contentsOf: exported)) == "[Покупатель] и бюджет 500")
+        let copy = LocalDocument.reviewedCopy(String(repeating: "смысл и условие ", count: 400))
+        precondition(copy.text == String(repeating: "смысл и условие ", count: 400))
+
+        var doc = documents.document!
+        var secondDoc = doc
+        secondDoc.title = "second.pdf"
+        let combined = try LocalDocument.combining([doc, secondDoc])
+        precondition(combined.blocks.count == 2 && Set(combined.blocks.map(\.id)).count == 2)
+        precondition(combined.blocks[1].locator.contains("second.pdf"))
+        precondition(combined.text == doc.text + "\n\n" + secondDoc.text)
+        secondDoc.characters = 2_000_001
+        precondition((try? LocalDocument.combining([doc, secondDoc])) == nil)
+        documents.output = String(repeating: "я", count: 10000) + "ХВОСТ"
+        documents.showOriginal = false; documents.previewPage = 1
+        precondition(documents.previewPages == 2 && documents.previewText == "ХВОСТ")
+        documents.reviewed = true
+        documents.previewText = "НОВЫЙ ХВОСТ"
+        precondition(documents.output == String(repeating: "я", count: 10000) + "НОВЫЙ ХВОСТ")
+        precondition(!documents.reviewed)
+        chat.startNew()
+        precondition(documents.document == nil && documents.output.isEmpty && documents.entities.isEmpty)
+        precondition(!documents.hasResult && !documents.canExport && documents.originalURL == nil)
+        doc.blocks[0].text = "RAW_DOCUMENT_NOT_IN_HISTORY"
+        chat.attachDocument(doc)
+        chat.send("По файлу", settings: settings)
+        spin { !chat.isAnswering }
+        precondition(chat.messages.last?.text == "По файлу" && chat.messages.last?.fromDocument == true)
+        precondition(chat.messages.last?.documentSources?.first?.locator == "Страница 1")
+        precondition(!(try! String(contentsOf: dir.appendingPathComponent("chats.json"))).contains("RAW_DOCUMENT_NOT_IN_HISTORY"))
+        chat.detachDocument()
+        precondition(chat.containsDocumentData)
+        chat.send("Продолжи", settings: settings) // Memory preference must not reroute this conversation.
+        spin { !chat.isAnswering }
+        precondition(chat.messages.last?.text == "Локальное продолжение")
+        precondition(Chat().conversations.contains { $0.messages.contains { $0.documentSources?.first?.id == "1" } })
+        chat.attachDocument(doc)
+        chat.send("slow", settings: settings)
+        spin { chat.progress == "ready" }
+        chat.open(firstID)
+        precondition(chat.attachedDocument == nil)
+        chat.send("after document", settings: settings)
+        spin { !chat.isAnswering }
+        precondition(chat.messages.last?.text == "after document")
+        precondition(message.fromDocument == nil && message.documentSources == nil)
+
+        // A cancelled, back-pressured stdin writer must not crash the app or
+        // deliver its late result into the next request.
+        let job = DocumentJob()
+        var gotCancelledReply = false
+        job.run(["action":"answer", "question":String(repeating:"x", count:800_000)], settings:settings) { _, _ in gotCancelledReply = true }
+        job.cancel()
+        var gotNewReply = false
+        job.run(["action":"answer", "question":"new"], settings:settings) { reply, error in
+            precondition(error == nil && reply?.text == "new"); gotNewReply = true
+        }
+        spin { gotNewReply }
+        precondition(!gotCancelledReply)
+        let attachments = DocumentWorkspace()
+        attachments.read([source, source], settings: settings)
+        spin { !attachments.job.busy }
+        precondition(attachments.error == nil && attachments.document?.blocks.count == 2)
+        precondition(attachments.document?.characters == 36)
+        attachments.reset()
+        precondition(attachments.document == nil)
+        print("PASS: документы — согласие на экспорт, изменение копии, защита оригинала, большие запросы и отмена, локальная переписка и цитаты")
     }
 }

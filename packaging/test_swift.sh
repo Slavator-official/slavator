@@ -18,7 +18,7 @@ swiftc -parse-as-library -target "$CHECK_ARCH-apple-macos14.2" -Xlinker -dead_st
     app/Configuration.swift app/Theme.swift app/Models.swift app/tests/LibraryChecks.swift -o "$CHECK_DIR/library-checks"
 "$CHECK_DIR/library-checks"
 swiftc -D CHAT_TESTING -parse-as-library -target "$CHECK_ARCH-apple-macos14.2" -Xlinker -dead_strip_dylibs \
-    app/Configuration.swift app/ProcessOutput.swift app/SpeakerMemory.swift app/Chat.swift app/tests/ChatChecks.swift -o "$CHECK_DIR/chat-checks"
+    app/Configuration.swift app/ProcessOutput.swift app/Documents.swift app/SpeakerMemory.swift app/Chat.swift app/tests/ChatChecks.swift -o "$CHECK_DIR/chat-checks"
 "$CHECK_DIR/chat-checks"
 swiftc -D PLAYER_TESTING -parse-as-library -target "$CHECK_ARCH-apple-macos14.2" -Xlinker -dead_strip_dylibs \
     app/Configuration.swift app/ProcessOutput.swift app/Player.swift app/tests/PlayerChecks.swift -o "$CHECK_DIR/player-checks"

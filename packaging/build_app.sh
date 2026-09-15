@@ -20,7 +20,7 @@ fail() { printf '\033[31mОШИБКА:\033[0m %s\n' "$1" >&2; exit 1; }
 
 command -v swiftc >/dev/null || fail "нет swiftc — поставьте Command Line Tools"
 
-SOURCES=(Configuration.swift ProcessOutput.swift Theme.swift Models.swift SpeakerMemory.swift SpeakerMemoryScreen.swift Ribbon.swift Player.swift Pipeline.swift
+SOURCES=(Configuration.swift ProcessOutput.swift Theme.swift Models.swift Documents.swift SpeakerMemory.swift SpeakerMemoryScreen.swift Ribbon.swift Player.swift Pipeline.swift
          SystemAudio.swift LiveCapture.swift Dictation.swift Chat.swift Enroll.swift Screens.swift Doctor.swift DeskWidget.swift MeetingWatch.swift App.swift)
 for f in "${SOURCES[@]}"; do
     [[ -f "$SWIFT/$f" ]] || fail "нет исходника: $SWIFT/$f"
@@ -86,7 +86,7 @@ rm -rf "$ICONSET"
 cp "$CORE/app_icon.png" "$RESOURCES/app_icon.png"
 
 say "Копирую ядро обработки"
-for module in meeting_transcriber_v25_1.py onnx_engine.py glossary_fix.py dictation_worker.py app_config.py speaker_memory.py speaker_links.py meeting_store.py meeting_chat.py speech_alignment.py audio_preview.py desktop_contract.json; do
+for module in meeting_transcriber_v25_1.py onnx_engine.py glossary_fix.py dictation_worker.py app_config.py speaker_memory.py speaker_links.py meeting_store.py meeting_chat.py document_tools.py speech_alignment.py audio_preview.py desktop_contract.json; do
     cp "$CORE/$module" "$RESOURCES/core/"
 done
 cp -R "$CORE/speaker_service" "$RESOURCES/core/speaker_service"
