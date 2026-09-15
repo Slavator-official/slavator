@@ -195,7 +195,8 @@ MIN_EMBED_SECONDS = 0.8
 # Длина WAV-образца для неопознанного голоса, который увидит пользователь в GUI.
 SNIPPET_SECONDS = 10.0
 
-OLLAMA_HOST = os.environ.get("MEETING_TRANSCRIBER_OLLAMA_HOST", "http://127.0.0.1:11434")
+OLLAMA_HOST = (os.environ.get("MEETING_TRANSCRIBER_OLLAMA_HOST")
+               or os.environ.get("MEETING_TRANSCRIBER_OLLAMA") or "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_MODEL = os.environ.get("MEETING_TRANSCRIBER_LLM", "qwen3:8b")
 OLLAMA_NUM_CTX = int(os.environ.get("MEETING_TRANSCRIBER_NUM_CTX", "8192"))
 OLLAMA_TIMEOUT = int(os.environ.get("MEETING_TRANSCRIBER_LLM_TIMEOUT", "600"))
@@ -2019,15 +2020,8 @@ def export_unknown_voices(
 
 
 def _http_json(url: str, payload: Optional[dict] = None, timeout: int = 30) -> dict:
-    data = json.dumps(payload).encode("utf-8") if payload is not None else None
-    request = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST" if data else "GET",
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"))
+    # Мимо прокси и без перенаправлений: в запросах уходят стенограммы.
+    return _local("app_config").model_json(url, payload, timeout)
 
 
 def ollama_health() -> tuple[bool, str]:
@@ -2176,7 +2170,7 @@ def ollama_pull(model: str = "", base: float = 45.0, scale: float = 0.5) -> bool
     log(f"    Загружаю языковую модель {name}; точный объём покажет Ollama")
     shown = -5
     try:
-        with urllib.request.urlopen(request, timeout=OLLAMA_TIMEOUT) as response:
+        with _local("app_config").open_model(request, OLLAMA_TIMEOUT) as response:
             for raw in response:
                 line = raw.decode("utf-8", "replace").strip()
                 if not line:

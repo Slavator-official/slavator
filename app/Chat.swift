@@ -165,9 +165,7 @@ final class Chat {
         ])
 
         do {
-            let config = URLSessionConfiguration.ephemeral
-            config.connectionProxyDictionary = [:]
-            let session = URLSession(configuration: config, delegate: LocalChatTransport(), delegateQueue: nil)
+            let session = ModelTransport.session()
             defer { session.invalidateAndCancel() }
             let (bytes, response) = try await session.bytes(for: request)
             if let http = response as? HTTPURLResponse, http.statusCode != 200 {
@@ -300,14 +298,6 @@ final class Chat {
         try? FileManager.default.createDirectory(at: Paths.support, withIntermediateDirectories: true)
         guard let data = try? JSONEncoder().encode(conversations) else { return }
         try? data.write(to: file, options: .atomic)
-    }
-}
-
-/// A local reply must never redirect private conversation history elsewhere.
-private final class LocalChatTransport: NSObject, URLSessionTaskDelegate {
-    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
-                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
-        completionHandler(nil)
     }
 }
 

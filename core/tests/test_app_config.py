@@ -105,3 +105,61 @@ def test_both_desktop_palettes_read_the_same_tokens():
     for name in ("light", "dark"):
         assert ui_theme.palette(name)["BG"] == "#" + app_config.CONTRACT["themes"][name]["bg"]
         assert len(ui_theme.speaker_palette(name)) == 10
+
+
+@pytest.fixture
+def model_server():
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/moved":
+                self.send_response(302)
+                self.send_header("Location", "http://example.invalid/api/tags")
+                self.end_headers()
+                return
+            body = b'{"models": []}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_port}"
+    server.shutdown()
+
+
+def test_model_requests_ignore_environment_proxy(model_server, monkeypatch):
+    import urllib.request
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    # Для 127.0.0.1 urllib и сам обходит прокси; удалённая Ollama — нет.
+    monkeypatch.setattr(urllib.request, "proxy_bypass", lambda host: False)
+    with pytest.raises(OSError):
+        urllib.request.urlopen(model_server + "/api/tags", timeout=5)
+    assert app_config.model_json(model_server + "/api/tags", timeout=5) == {"models": []}
+
+
+def test_model_requests_refuse_redirects(model_server):
+    import urllib.error
+    with pytest.raises(urllib.error.URLError, match="перенаправление"):
+        app_config.model_json(model_server + "/moved", timeout=5)
+
+
+def test_both_host_variables_are_read(monkeypatch):
+    monkeypatch.delenv("MEETING_TRANSCRIBER_OLLAMA_HOST", raising=False)
+    monkeypatch.setenv("MEETING_TRANSCRIBER_OLLAMA", "http://10.0.0.5:11434/")
+    assert app_config.ollama_host() == "http://10.0.0.5:11434"
+    monkeypatch.delenv("MEETING_TRANSCRIBER_OLLAMA")
+    assert app_config.ollama_host() == app_config.LOCAL_OLLAMA
+
+
+def test_model_clients_do_not_bypass_the_guarded_opener():
+    core = Path(__file__).resolve().parents[1]
+    for name in ("dictation_worker.py", "meeting_transcriber_v25_1.py", "speaker_memory.py", "meeting_chat.py"):
+        assert "urlopen(" not in (core / name).read_text(encoding="utf-8"), name

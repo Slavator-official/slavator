@@ -1,5 +1,25 @@
 import Foundation
 
+/// Единственный способ достучаться до языковой модели из интерфейса.
+///
+/// В запросах уходят переписка и цитаты встреч. Поэтому мимо системного
+/// прокси и без перенаправлений: ответ на чужой адрес — это утечка, а не
+/// «сервер переехал».
+enum ModelTransport {
+    static func session() -> URLSession {
+        let config = URLSessionConfiguration.ephemeral
+        config.connectionProxyDictionary = [:]
+        return URLSession(configuration: config, delegate: RefuseRedirects(), delegateQueue: nil)
+    }
+
+    private final class RefuseRedirects: NSObject, URLSessionTaskDelegate {
+        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+            completionHandler(nil)
+        }
+    }
+}
+
 /// Тот же контракт настроек и цветов, который читает Windows-интерфейс.
 enum DesktopContract {
     static let raw: [String: Any] = {
@@ -229,9 +249,7 @@ enum ModelCatalog {
         guard let url = URL(string: "\(host)/api/tags") else { return nil }
         var request = URLRequest(url: url)
         request.timeoutInterval = 3
-        let config = URLSessionConfiguration.ephemeral
-        config.connectionProxyDictionary = [:]   // локальная Ollama мимо прокси
-        let session = URLSession(configuration: config)
+        let session = ModelTransport.session()
         defer { session.invalidateAndCancel() }
         guard let (data, response) = try? await session.data(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200,

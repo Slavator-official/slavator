@@ -20,7 +20,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-from app_config import support_dir
+from app_config import open_model, support_dir
 from speaker_links import EXTRA, link_voice
 from meeting_store import active_results, list_deleted, trash_meeting, restore_meeting
 
@@ -58,19 +58,13 @@ def read(path, default):
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        raise ValueError("Перенаправление локальной модели запрещено")
-
-
 class Embedder:
     def request(self, endpoint, body=None, timeout=60):
         request = urllib.request.Request(HOST + endpoint,
             data=json.dumps(body).encode() if body is not None else None,
             headers={"Content-Type": "application/json"})
-        # No environment proxy may receive the contents of private meetings.
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-        with opener.open(request, timeout=timeout) as response:
+        # No environment proxy or redirect may receive the contents of private meetings.
+        with open_model(request, timeout) as response:
             return json.load(response)
 
     def version(self):

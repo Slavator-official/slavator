@@ -5,9 +5,12 @@ import json
 import os
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 APP_NAME = "Славатор"
+LOCAL_OLLAMA = "http://127.0.0.1:11434"
 CONTRACT = json.loads(Path(__file__).with_name("desktop_contract.json").read_text(encoding="utf-8"))
 
 
@@ -130,3 +133,35 @@ def environment(settings: dict | None = None) -> dict[str, str]:
         env["MEETING_TRANSCRIBER_OLLAMA"] = host.rstrip("/")
     env.update(PYTHONUNBUFFERED="1", PYTHONDONTWRITEBYTECODE="1", PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     return env
+
+
+def ollama_host() -> str:
+    """Адрес языковой модели. Два имени переменной живут исторически — читаем оба,
+    чтобы диктовка и ядро не разошлись, если процесс запущен мимо environment()."""
+    host = os.environ.get("MEETING_TRANSCRIBER_OLLAMA_HOST") or os.environ.get("MEETING_TRANSCRIBER_OLLAMA")
+    return (host or LOCAL_OLLAMA).rstrip("/")
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        # URLError, а не ValueError: все вызывающие уже ловят OSError.
+        raise urllib.error.URLError("перенаправление запроса к языковой модели запрещено")
+
+
+def open_model(request: urllib.request.Request, timeout: float):
+    """Открыть запрос к Ollama мимо прокси и без перенаправлений.
+
+    В запросах уходят стенограммы и надиктованный текст. Обычный urlopen берёт
+    HTTP_PROXY из окружения и идёт за редиректом — так приватный текст может
+    оказаться не там, куда его отправляли.
+    """
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+    return opener.open(request, timeout=timeout)
+
+
+def model_json(url: str, payload: dict | None = None, timeout: float = 30) -> dict:
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"},
+                                     method="POST" if data else "GET")
+    with open_model(request, timeout) as response:
+        return json.loads(response.read().decode("utf-8"))

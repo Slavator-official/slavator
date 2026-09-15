@@ -24,13 +24,15 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from app_config import ollama_host, open_model
+
 MODEL = os.environ.get("SLAVATOR_DICTATION_MODEL", "small")
 LANGUAGE = os.environ.get("SLAVATOR_DICTATION_LANGUAGE", "ru")
 GLOSSARY = Path(os.environ.get(
     "MEETING_TRANSCRIBER_GLOSSARY",
     str(Path.home() / "whisper-work" / "glossary.txt"),
 ))
-OLLAMA = os.environ.get("MEETING_TRANSCRIBER_OLLAMA", "http://127.0.0.1:11434")
+OLLAMA = ollama_host()
 OLLAMA_MODEL = os.environ.get("MEETING_TRANSCRIBER_LLM", "qwen3:8b")
 # Обработка идёт после того, как человек отпустил клавишу, и он ждёт.
 # Лучше отдать сырой текст, чем заставить смотреть в пустое поле.
@@ -201,7 +203,7 @@ def warm() -> None:
         headers={"Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=TIDY_TIMEOUT):
+        with open_model(request, TIDY_TIMEOUT):
             pass
     except (urllib.error.URLError, OSError, ValueError, TimeoutError):
         pass          # нет Ollama — узнаем об этом в свой срок, при правке
@@ -230,7 +232,7 @@ def tidy(text: str, level: str) -> tuple:
         headers={"Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=TIDY_TIMEOUT) as response:
+        with open_model(request, TIDY_TIMEOUT) as response:
             answer = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, ValueError, TimeoutError):
         return text, False
