@@ -18,6 +18,11 @@ final class SystemAudioTap {
     private var aggregateID = AudioDeviceID(0)
     private var ioProcID: AudioDeviceIOProcID?
     private let ioQueue = DispatchQueue(label: "ru.slavator.tap", qos: .userInitiated)
+    /// Следит, не сменился ли формат, в котором приходят кадры.
+    private var formatListener: AudioObjectPropertyListenerBlock?
+
+    /// Частота, на которой работает запись, — своя, а не частота наушников.
+    private static let rate: Float64 = 48000
 
     private(set) var format: AVAudioFormat?
     private(set) var framesSeen = 0
@@ -28,7 +33,6 @@ final class SystemAudioTap {
     private var onAudio: ((AVAudioPCMBuffer, UInt64) -> Void)?
 
     enum TapError: LocalizedError {
-        case noOutputDevice
         case tapFailed(OSStatus)
         case aggregateFailed(OSStatus)
         case formatUnavailable
@@ -36,8 +40,6 @@ final class SystemAudioTap {
 
         var errorDescription: String? {
             switch self {
-            case .noOutputDevice:
-                return "Не найдено устройство вывода звука."
             case .tapFailed(let code):
                 return code == 1852797029   // 'nope' — отказ по правам
                     ? "Нет доступа к системному звуку. Системные настройки → Конфиденциальность и безопасность → Запись экрана и системного звука → «Только запись системного звука» → включите «Славатор»."
@@ -58,8 +60,6 @@ final class SystemAudioTap {
         self.onAudio = onAudio
         framesSeen = 0
 
-        let outputUID = try defaultOutputUID()
-
         // Слушаем всё, что звучит, кроме нас самих: иначе в запись попадёт
         // прослушивание образцов голоса из самого приложения.
         let description = CATapDescription(
@@ -74,22 +74,30 @@ final class SystemAudioTap {
             throw TapError.tapFailed(status)
         }
 
-        // Формат читаем у самого отвода: он повторяет формат вывода и меняется
-        // от машины к машине — 44.1 или 48 кГц, моно или стерео.
-        guard let tapFormat = try? streamFormat(of: tapID) else {
-            cleanup(); throw TapError.formatUnavailable
-        }
-        format = tapFormat
-
-        // Агрегатное устройство — способ читать отвод как обычный вход.
+        // Агрегатное устройство — способ читать отвод как обычный вход. В нём
+        // только сам отвод, без устройства вывода.
+        //
+        // Раньше устройство вывода входило в агрегат подустройством, и это
+        // ломало запись в Bluetooth-наушниках дважды. Во-первых, агрегат жил
+        // на частоте наушников, а те, стоит кому-то взять их микрофон,
+        // переходят в режим гарнитуры и опускаются с 48 до 16 кГц. Формат же
+        // читался один раз на старте: кадры на 16 кГц разбирались как 48,
+        // каждый кусок звучал втрое быстрее, а оставшиеся две трети времени
+        // выравнивание добивало тишиной. В записи 15.09 это видно по
+        // отсчётам: 13,3 мс звука, 26,7 мс нулей, ровно по кругу. Во-вторых,
+        // у гарнитуры есть свой вход, и в агрегате он вставал первым
+        // потоком, впереди отвода — а запись брала первый.
+        //
+        // Агрегат из одного отвода живёт на своих часах и своей частоте, а
+        // отвод подгоняется к нему компенсацией дрейфа. Замерено: кадры идут
+        // и на простаивающем выводе, частота по меткам времени — ровно та,
+        // что задана.
         let uid = "ru.slavator.tap.\(description.uuid.uuidString)"
         let settings: [String: Any] = [
             kAudioAggregateDeviceNameKey: "Славатор",
             kAudioAggregateDeviceUIDKey: uid,
-            kAudioAggregateDeviceMainSubDeviceKey: outputUID,
             kAudioAggregateDeviceIsPrivateKey: true,
             kAudioAggregateDeviceTapAutoStartKey: true,
-            kAudioAggregateDeviceSubDeviceListKey: [[kAudioSubDeviceUIDKey: outputUID]],
             kAudioAggregateDeviceTapListKey: [[
                 kAudioSubTapUIDKey: description.uuid.uuidString,
                 kAudioSubTapDriftCompensationKey: true,
@@ -99,6 +107,17 @@ final class SystemAudioTap {
         guard status == noErr, aggregateID != 0 else {
             cleanup(); throw TapError.aggregateFailed(status)
         }
+        // Своя частота — не ждём, какую выберет система. Не вышло — не беда:
+        // ниже формат всё равно читается с того, что устройство отдаёт.
+        setNominalRate(Self.rate)
+
+        // Формат берём у входного потока агрегата — в нём кадры и приходят.
+        // Формат отвода совпадает с ним только пока частоты равны.
+        guard let delivered = deliveredFormat() ?? (try? streamFormat(of: tapID)) else {
+            cleanup(); throw TapError.formatUnavailable
+        }
+        format = delivered
+        watchFormat()
 
         status = AudioDeviceCreateIOProcIDWithBlock(&ioProcID, aggregateID, ioQueue) {
             [weak self] _, input, inputTime, _, _ in
@@ -124,6 +143,11 @@ final class SystemAudioTap {
     }
 
     private func cleanup() {
+        if aggregateID != 0, let formatListener {
+            var address = Self.nominalRateAddress
+            AudioObjectRemovePropertyListenerBlock(aggregateID, &address, ioQueue, formatListener)
+        }
+        formatListener = nil
         if aggregateID != 0 { AudioHardwareDestroyAggregateDevice(aggregateID) }
         if tapID != AudioObjectID(kAudioObjectUnknown) { AudioHardwareDestroyProcessTap(tapID) }
         aggregateID = 0
@@ -161,30 +185,62 @@ final class SystemAudioTap {
 
     // MARK: свойства Core Audio
 
-    private func defaultOutputUID() throws -> String {
+    private static var nominalRateAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyNominalSampleRate,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+
+    private func setNominalRate(_ rate: Float64) {
+        var address = Self.nominalRateAddress
+        var value = rate
+        AudioObjectSetPropertyData(aggregateID, &address, 0, nil,
+                                   UInt32(MemoryLayout<Float64>.size), &value)
+    }
+
+    /// Формат, в котором агрегат отдаёт кадры: виртуальный формат его
+    /// первого входного потока. Поток в агрегате один — сам отвод.
+    private func deliveredFormat() -> AVAudioFormat? {
         var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mSelector: kAudioDevicePropertyStreams,
+            mScope: kAudioObjectPropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(aggregateID, &address, 0, nil, &size) == noErr,
+              size >= UInt32(MemoryLayout<AudioStreamID>.size)
+        else { return nil }
+        var streams = [AudioStreamID](repeating: 0,
+                                      count: Int(size) / MemoryLayout<AudioStreamID>.size)
+        guard AudioObjectGetPropertyData(aggregateID, &address, 0, nil, &size, &streams) == noErr,
+              let stream = streams.first
+        else { return nil }
+
+        address = AudioObjectPropertyAddress(
+            mSelector: kAudioStreamPropertyVirtualFormat,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
-        var device = AudioDeviceID(0)
-        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),
-                                         &address, 0, nil, &size, &device) == noErr,
-              device != 0
-        else { throw TapError.noOutputDevice }
+        var asbd = AudioStreamBasicDescription()
+        var asbdSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        guard AudioObjectGetPropertyData(stream, &address, 0, nil, &asbdSize, &asbd) == noErr
+        else { return nil }
+        return AVAudioFormat(streamDescription: &asbd)
+    }
 
-        address.mSelector = kAudioDevicePropertyDeviceUID
-        // Core Audio кладёт сюда ссылку на строку, а не саму строку. Переменная
-        // типа CFString заставляла Swift отдавать адрес готового объекта под
-        // запись — компилятор об этом предупреждал, а поведение оставалось
-        // неопределённым. Unmanaged описывает ровно то, что происходит на деле,
-        // и takeRetainedValue снимает владение, которое Core Audio передаёт нам.
-        var uid: Unmanaged<CFString>?
-        var uidSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-        guard AudioObjectGetPropertyData(device, &address, 0, nil, &uidSize, &uid) == noErr,
-              let value = uid?.takeRetainedValue()
-        else { throw TapError.noOutputDevice }
-        return value as String
+    /// Перечитывать формат, если частота агрегата всё же сменилась.
+    ///
+    /// Частоту мы ставим сами, и меняться ей не с чего. Но формат,
+    /// прочитанный один раз на старте, уже подвёл однажды — и ошибка эта
+    /// тихая: запись идёт, а в файле ускоренный звук вперемешку с тишиной.
+    /// Слушатель срабатывает на той же очереди, что и приём кадров, так
+    /// что формат не меняется посреди разбора буфера.
+    private func watchFormat() {
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self, let fresh = self.deliveredFormat() else { return }
+            self.format = fresh
+        }
+        var address = Self.nominalRateAddress
+        if AudioObjectAddPropertyListenerBlock(aggregateID, &address, ioQueue, listener) == noErr {
+            formatListener = listener
+        }
     }
 
     private func streamFormat(of object: AudioObjectID) throws -> AVAudioFormat {
