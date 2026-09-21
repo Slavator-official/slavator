@@ -73,7 +73,7 @@ final class Dictation {
 
     func refresh(settings: Settings) {
         self.settings = settings
-        guard settings.dictation_enabled else { stopEverything(); state = .off; return }
+        guard settings.dictation_enabled, !Edition.yielding else { stopEverything(); state = .off; return }
         // Разрешение могли выдать только что, в Системных настройках. Верить
         // прошлой проверке нельзя: карточка так и висела «нужен доступ»,
         // хотя доступ уже был.

@@ -157,13 +157,34 @@ SwiftUI — `app/Configuration.swift`. Старые поля настроек с
 ## Сборка
 
 ```bash
-packaging/build_app.sh          # собрать Славатор.app
-packaging/make_dmg.sh           # лёгкий образ (~2–3 МБ), всё качается при установке
-packaging/make_dmg.sh --full    # полный (~5,5 ГБ): Ollama и языковая модель внутри
+packaging/build_app.sh           # тестовая «Славатор Dev» — синяя иконка
+packaging/build_app.sh --stable  # основная «Славатор» — ей пользуются каждый день
+packaging/make_dmg.sh            # лёгкий образ (~2–3 МБ) из основной, всё качается при установке
+packaging/make_dmg.sh --full     # полный (~5,5 ГБ): Ollama и языковая модель внутри
 ```
 
-Результат — в `packaging/dist.noindex/`. Нужны macOS 14.2+ на Apple Silicon
-и Command Line Tools, полный Xcode — нет.
+Сборка кладёт бандл в `packaging/dist.noindex/` и ставит его в
+«Программы», закрывая и поднимая заново только свою сборку. Нужны
+macOS 14.2+ на Apple Silicon и Command Line Tools, полный Xcode — нет.
+
+### Две сборки на одной машине
+
+| | Основная | Тестовая |
+|---|---|---|
+| Название | «Славатор» | «Славатор Dev» |
+| Иконка | исходная | синяя |
+| Идентификатор | `ru.slavator.app` | `ru.slavator.app.dev` |
+| Собирается | `build_app.sh --stable` | `build_app.sh` |
+
+Тестовая по умолчанию, чтобы пробная сборка не заменяла ту, которой
+работают. Пока основная запущена, тестовая выключает у себя диктовку,
+виджет, значок в меню и слежение за встречами; закрыли основную — всё
+включается по настройкам. Проверить диктовку или виджет тестовой можно,
+только закрыв основную.
+
+Встречи, голоса, настройки и Python-окружение у сборок общие. Разрешения
+macOS (микрофон, ввод, звук системы) тестовая просит отдельно: для системы
+это другое приложение.
 
 Проверки без загрузки моделей:
 
@@ -209,7 +230,7 @@ echo "0.14.0" > VERSION
 git commit -am "Версия 0.14.0"
 git tag -a v0.14.0 -m "Версия 0.14.0"
 git push && git push --tags
-packaging/build_app.sh && packaging/make_dmg.sh
+packaging/build_app.sh --stable && packaging/make_dmg.sh
 cp packaging/dist.noindex/Славатор.dmg Slavator-0.14.0-macOS-arm64.dmg
 shasum -a 256 Slavator-0.14.0-macOS-arm64.dmg   # вписать в описание выпуска
 gh release create v0.14.0 Slavator-0.14.0-macOS-arm64.dmg --title "Славатор 0.14.0 для macOS"
@@ -225,8 +246,8 @@ gh release create v0.14.0 Slavator-0.14.0-macOS-arm64.dmg --title "Слават�
 git clone git@github.com:Slavator-official/slavator.git slavator
 cd slavator
 git switch slava/mac                               # самое свежее; ios/macbook — после слияния
-packaging/build_app.sh                             # соберёт Славатор.app
-open packaging/dist.noindex/Славатор.app           # запустится, дальше кнопка «Установить»
+packaging/build_app.sh --stable                    # соберёт и поставит Славатор.app
+open /Applications/Славатор.app                    # дальше кнопка «Установить»
 ```
 
 Первый запуск предложит развернуть окружение: Python, модели распознавания,

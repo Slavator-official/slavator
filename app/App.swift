@@ -47,6 +47,25 @@ struct SlavatorApp: App {
     }
 }
 
+/// Две сборки на одной машине: основная — ей пользуются каждый день, и
+/// тестовая, «Славатор Dev», — её тюнят. Различаются идентификатором бандла,
+/// его ставит build_app.sh.
+enum Edition {
+    static let stableID = "ru.slavator.app"
+    static let devID = "ru.slavator.app.dev"
+    static let all: Set<String> = [stableID, devID]
+    static var isDev: Bool { Bundle.main.bundleIdentifier == devID }
+
+    /// Тестовая уступает основной: пока та запущена, у тестовой нет ни
+    /// диктовки, ни виджета, ни значка в меню, ни слежения за встречами.
+    /// Иначе одно нажатие ⌥ поднимало две плашки и печатало текст дважды,
+    /// а тестовая предлагала записать встречу, едва основная брала микрофон.
+    /// Значение задаётся при первом обращении и дальше меняется AppDelegate
+    /// по запуску и закрытию основной.
+    static var yielding = isDev
+        && !NSRunningApplication.runningApplications(withBundleIdentifier: stableID).isEmpty
+}
+
 enum Screen: Hashable {
     case main, memory, records, speakers, newVoices, settings, chat
     case person(String)
@@ -71,6 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppConfiguration.protectPrivateFolders()
+        if Edition.isDev { followStable() }
         // Делегата ставят до первого уведомления, иначе нажатие кнопки в нём
         // некому обработать.
         guard Bundle.main.bundleIdentifier != nil else { return }
@@ -93,9 +113,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     /// Что из быстрого доступа включено. Вызывается и при запуске, и на
     /// каждое переключение в настройках.
     func apply(settings: Settings) {
-        if settings.menubar_enabled { addItem() } else { removeItem() }
-        if settings.meeting_watch_enabled { watch.start() } else { watch.stop() }
-        if settings.widget_enabled { addWidget(size: settings.widget_size) } else { removeWidget() }
+        let own = !Edition.yielding
+        if own && settings.menubar_enabled { addItem() } else { removeItem() }
+        if own && settings.meeting_watch_enabled { watch.start() } else { watch.stop() }
+        if own && settings.widget_enabled { addWidget(size: settings.widget_size) } else { removeWidget() }
+    }
+
+    /// Тестовая сборка следит за основной: та запустилась — всё фоновое
+    /// выключается, закрылась — возвращается по настройкам.
+    private func followStable() {
+        let center = NSWorkspace.shared.notificationCenter
+        for (name, running) in [(NSWorkspace.didLaunchApplicationNotification, true),
+                                (NSWorkspace.didTerminateApplicationNotification, false)] {
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+                guard app?.bundleIdentifier == Edition.stableID else { return }
+                Edition.yielding = running
+                guard let self, let library = self.library else { return }
+                self.apply(settings: library.settings)
+                self.dictation?.refresh(settings: library.settings)
+            }
+        }
     }
 
     // MARK: значок

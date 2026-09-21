@@ -90,7 +90,9 @@ final class MeetingWatch {
                   // сами собой выпадают Siri, диктовка системы и прочие
                   // фоновые слушатели, которых пришлось бы перечислять руками.
                   app.activationPolicy == .regular,
-                  app.bundleIdentifier != Bundle.main.bundleIdentifier
+                  // Своя сборка — основная или тестовая — встречей не
+                  // считается: это диктовка или запись, а не звонок.
+                  !Edition.all.contains(app.bundleIdentifier ?? "")
             else { continue }
             return app
         }

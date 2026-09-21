@@ -1,10 +1,32 @@
 #!/usr/bin/env bash
-# Сборка Славатор.app.
+# Сборка Славатор.app и тестовой «Славатор Dev.app».
 #
 # Интерфейс нативный, на SwiftUI: компилируется swiftc из Command Line Tools,
 # полный Xcode не нужен. Обработка осталась на Python и лежит внутри бандла —
 # Swift запускает её подпроцессом и читает stdout.
 set -euo pipefail
+
+# Две сборки на одной машине.
+#
+#   build_app.sh            — «Славатор Dev», тестовая: синяя иконка, свой
+#                             идентификатор, ставится рядом с основной
+#   build_app.sh --stable   — «Славатор», основная: ей пользуются каждый
+#                             день, из неё же делается образ для выпуска
+#
+# Тестовая по умолчанию намеренно: раньше каждая пробная сборка заменяла
+# в «Программах» ту, которой человек работал, и недоделанное попадало
+# прямо в его день. Пока основная запущена, тестовая выключает у себя
+# диктовку, виджет, значок в меню и слежение за встречами (Edition в
+# app/App.swift) — иначе обе ловили бы одну и ту же клавишу.
+EDITION="dev"
+[[ "${1:-}" == "--stable" ]] && EDITION="stable"
+if [[ "$EDITION" == "stable" ]]; then
+    NAME="Славатор";     BUNDLE_ID="ru.slavator.app";     EXE="slavator"
+    LATIN="Slavator"
+else
+    NAME="Славатор Dev"; BUNDLE_ID="ru.slavator.app.dev"; EXE="slavator-dev"
+    LATIN="Slavator Dev"
+fi
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 PROJECT="$(cd "$ROOT/.." && pwd)"
@@ -16,7 +38,7 @@ CORE="$PROJECT/core"
 # не понять. Проверено: .metadata_never_index в обычной папке Spotlight
 # игнорирует, суффикс .noindex работает.
 DIST="$ROOT/dist.noindex"
-APP="$DIST/Славатор.app"
+APP="$DIST/$NAME.app"
 CONTENTS="$APP/Contents"
 RESOURCES="$CONTENTS/Resources"
 
@@ -74,10 +96,14 @@ cp "$ROOT/Info.plist" "$CONTENTS/Info.plist"
 # два независимых номера на одну программу — источник путаницы.
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$CONTENTS/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$CONTENTS/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" \
+    -c "Set :CFBundleExecutable $EXE" -c "Set :CFBundleName '$LATIN'" \
+    -c "Set :CFBundleDisplayName '$NAME'" "$CONTENTS/Info.plist"
+say "Сборка «$NAME» ($BUNDLE_ID)"
 cp "$PROJECT/VERSION" "$RESOURCES/VERSION"
 plutil -lint "$CONTENTS/Info.plist" >/dev/null || fail "Info.plist некорректен"
 printf 'APPL????' > "$CONTENTS/PkgInfo"
-install -m 755 "$DIST/.slavator-bin" "$CONTENTS/MacOS/slavator"
+install -m 755 "$DIST/.slavator-bin" "$CONTENTS/MacOS/$EXE"
 rm -f "$DIST/.slavator-bin"
 
 say "Собираю иконку"
@@ -85,23 +111,14 @@ ICONSET="$DIST/AppIcon.iconset"
 rm -rf "$ICONSET"; mkdir -p "$ICONSET"
 MASTER="$ROOT/icon_master.png"
 
-# Иконка сборки из рабочего дерева красится в свой цвет.
-#
-# Рабочих копий репозитория на машине несколько — по одной на ветку, — и
-# каждая складывает свой бандл. Раньше все они выглядели одинаково: в
-# Spotlight и Launchpad висело несколько «Славаторов», различить которые
-# можно было только по дате файла. Теперь цвет иконки — это ветка.
-#
-# Основная копия остаётся с исходной иконкой: она и есть настоящий
-# Славатор, каким его видит человек, поставивший программу.
-TINTS=("FF6FB5:0.45:розовый" "30D5C8:0.45:бирюзовый" "FFB020:0.40:янтарный"
-       "A06CFF:0.45:сиреневый" "C8CEDA:0.55:бледный")
-if [[ "$(git -C "$PROJECT" rev-parse --git-dir 2>/dev/null || true)" == */worktrees/* ]]; then
-    COPY="$(basename "$PROJECT")"
-    INDEX=$(( $(printf '%s' "$COPY" | cksum | cut -d' ' -f1) % ${#TINTS[@]} ))
-    SPEC="${TINTS[$INDEX]}"
-    say "Рабочая копия «$COPY» — иконка ${SPEC##*:}"
-    /usr/bin/python3 "$ROOT/make_icon.py" --tint "${SPEC%:*}" "$MASTER" "$DIST/icon_tinted.png"
+# Тестовая сборка — синяя: в Dock, Spotlight и переключателе программ её
+# видно сразу, и основную с ней не перепутать. Основная — с исходной
+# иконкой, какой её видит человек, поставивший программу. Оттенок
+# глубокий намеренно: исходная иконка сама голубая, и светлый синий
+# от неё в Dock не отличить.
+if [[ "$EDITION" == "dev" ]]; then
+    say "Иконка синяя — тестовая сборка"
+    /usr/bin/python3 "$ROOT/make_icon.py" --tint "1846E8:0.72" "$MASTER" "$DIST/icon_tinted.png"
     MASTER="$DIST/icon_tinted.png"
 fi
 for spec in "16:icon_16x16" "32:icon_16x16@2x" "32:icon_32x32" "64:icon_32x32@2x" \
@@ -111,7 +128,11 @@ for spec in "16:icon_16x16" "32:icon_16x16@2x" "32:icon_32x32" "64:icon_32x32@2x
 done
 iconutil -c icns "$ICONSET" -o "$RESOURCES/AppIcon.icns"
 rm -rf "$ICONSET" "$DIST/icon_tinted.png"
-cp "$CORE/app_icon.png" "$RESOURCES/app_icon.png"
+if [[ "$EDITION" == "dev" ]]; then
+    /usr/bin/python3 "$ROOT/make_icon.py" --tint "1846E8:0.72" "$CORE/app_icon.png" "$RESOURCES/app_icon.png" >/dev/null
+else
+    cp "$CORE/app_icon.png" "$RESOURCES/app_icon.png"
+fi
 
 say "Копирую ядро обработки"
 for module in meeting_transcriber_v25_1.py onnx_engine.py glossary_fix.py dictation_worker.py app_config.py speaker_memory.py speaker_links.py meeting_store.py meeting_chat.py speech_alignment.py audio_preview.py desktop_contract.json; do
@@ -164,16 +185,20 @@ else
     # Ищем по имени исполняемого файла, а не по пути: имя бандла — кириллица,
     # и pgrep -f по такому пути не находит ничего (проверено: процесс есть,
     # а поиск пуст), из-за чего замена шла под работающим приложением.
+    #
+    # Закрывается только своя сборка: у основной и тестовой разные имена
+    # исполняемого файла, и пересборка тестовой не трогает ту, которой
+    # человек сейчас работает.
     RUNNING=""
-    pgrep -x slavator >/dev/null && RUNNING="да"
+    pgrep -x "$EXE" >/dev/null && RUNNING="да"
     if [[ -n "$RUNNING" ]]; then
-        say "Закрываю работающий Славатор"
-        osascript -e 'quit app "Славатор"' 2>/dev/null || true
+        say "Закрываю работающий «$NAME»"
+        osascript -e "quit app id \"$BUNDLE_ID\"" 2>/dev/null || true
         for _ in 1 2 3 4 5 6 7 8 9 10; do
-            pgrep -x slavator >/dev/null || break
+            pgrep -x "$EXE" >/dev/null || break
             sleep 0.5
         done
-        pkill -x slavator 2>/dev/null || true
+        pkill -x "$EXE" 2>/dev/null || true
         sleep 0.5
     fi
     say "Ставлю в /Applications"
