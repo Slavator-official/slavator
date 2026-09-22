@@ -114,7 +114,7 @@ rm -rf "$ICONSET" "$DIST/icon_tinted.png"
 cp "$CORE/app_icon.png" "$RESOURCES/app_icon.png"
 
 say "Копирую ядро обработки"
-for module in meeting_transcriber_v25_1.py onnx_engine.py glossary_fix.py dictation_worker.py app_config.py speaker_memory.py speaker_links.py meeting_store.py meeting_chat.py document_tools.py speech_alignment.py audio_preview.py desktop_contract.json; do
+for module in meeting_transcriber_v25_1.py onnx_engine.py glossary_fix.py dictation_worker.py app_config.py speaker_memory.py speaker_links.py meeting_store.py meeting_chat.py document_tools.py privacy_files.py speech_alignment.py audio_preview.py desktop_contract.json; do
     cp "$CORE/$module" "$RESOURCES/core/"
 done
 cp -R "$CORE/speaker_service" "$RESOURCES/core/speaker_service"

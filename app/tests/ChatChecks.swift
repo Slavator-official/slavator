@@ -67,9 +67,9 @@ struct Record {
         print(json.dumps({'event':'progress','message':'ready'}),flush=True)
         if r.get('question')=='slow': time.sleep(.5)
         action=r['action']
-        if action=='read':
-            result={'document':dict(title='source.docx',format='DOCX',blocks=[dict(id='1',locator='Текст',text='Иван и бюджет 500')],warnings=[],characters=18)}
-        elif action=='detect':
+        if action in ('read','privacy_read'):
+            result={'document':dict(title='source.docx',format='DOCX',blocks=[dict(id='1',locator='Текст',text='Иван и бюджет 500')],warnings=[],characters=18,sourceHash='a'*64)}
+        elif action in ('detect','privacy_detect'):
             result=dict(text='[Человек 1] и бюджет 500',entities=[dict(id='1',kind='PERSON',variants=['Иван'],replacement='[Человек 1]',enabled=True,origin='Модель')],count=1,checked=1,total=1,model_complete=True)
         elif action=='apply': result={'text':r['entities'][0]['replacement']+' и бюджет 500','count':1}
         elif action=='answer':
@@ -78,6 +78,9 @@ struct Record {
             result=dict(text=r['question'],citations=citations,notice='Выбрана часть документа')
         elif action=='conversation': result=dict(text='Локальное продолжение')
         elif action=='export_docx': result={'data':'Y2xlYW4='}
+        elif action=='privacy_export':
+            assert r['source_hash']=='a'*64 and r['path'].endswith('source.docx')
+            result={'data':'d2hvbGVfZmlsZQ=='}
         print(json.dumps(dict(event='result',**result)),flush=True)
         """
         try documentWorker.write(to: dir.appendingPathComponent("document_tools.py"), atomically: true, encoding: .utf8)
@@ -157,6 +160,23 @@ struct Record {
         spin { !chat.isAnswering }
         precondition(chat.messages.last?.text == "after document")
         precondition(message.fromDocument == nil && message.documentSources == nil)
+
+        let native = DocumentWorkspace(); native.preserveFormat = true
+        native.read(source, settings: settings)
+        spin { !native.job.busy }
+        precondition(native.document?.sourceHash == String(repeating: "a", count: 64))
+        native.detect(settings: settings)
+        spin { !native.job.busy }
+        native.reviewed = true
+        let nativeCopy = dir.appendingPathComponent("native-copy.docx")
+        native.export(to: nativeCopy, word: false, settings: settings)
+        spin { !native.job.busy }
+        precondition((try! String(contentsOf: nativeCopy)) == "whole_file")
+        native.export(to: source, word: false, settings: settings)
+        precondition(native.error != nil && (try! String(contentsOf: source)) == "original")
+        native.export(to: dir.appendingPathComponent("wrong.txt"), word: false, settings: settings)
+        precondition(native.error != nil && !native.job.busy)
+        print("PASS: исходный формат — хеш, полный экспорт вместо предпросмотра, защита оригинала и расширения")
 
         // A cancelled, back-pressured stdin writer must not crash the app or
         // deliver its late result into the next request.

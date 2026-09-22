@@ -26,7 +26,7 @@ MAX_FILE = 100 * 1024 * 1024
 MAX_TEXT = 2_000_000
 MAX_BLOCKS = 5000
 MAX_PAGES = 2000
-MAX_REQUEST = 32 * 1024 * 1024
+MAX_REQUEST = 128 * 1024 * 1024
 CHUNK = 3200
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 KINDS = {"PERSON": "Человек", "ORG": "Компания", "ADDRESS": "Адрес",
@@ -587,7 +587,10 @@ def main():
         request = json.loads(raw)
         progress = lambda message: emit("progress", message=message)
         action = request.get("action")
-        if action == "read":
+        if isinstance(action, str) and action.startswith("privacy_"):
+            from privacy_files import handle
+            result = handle(request, progress)
+        elif action == "read":
             result = {"document": read_document(request["path"], progress)}
         elif action == "detect":
             result = detect(request["document"], request.get("use_model", True), progress)

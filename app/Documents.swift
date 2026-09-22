@@ -15,6 +15,7 @@ struct LocalDocument: Codable, Equatable {
     var blocks: [Block]
     var warnings: [String]
     var characters: Int
+    var sourceHash: String? = nil
     var text: String { blocks.enumerated().map { index, block in
         (index == 0 ? "" : (block.separator ?? "\n\n")) + block.text
     }.joined() }
@@ -120,7 +121,7 @@ final class DocumentJob {
         var reportedError: String?
         do {
             let payload = try JSONSerialization.data(withJSONObject: request) + Data([10])
-            guard payload.count <= 32 * 1024 * 1024 else {
+            guard payload.count <= 128 * 1024 * 1024 else {
                 completion(nil, "Документ слишком большой для обработки."); return
             }
             // Cancelling a process while its large stdin is being written must
@@ -150,7 +151,7 @@ final class DocumentJob {
                 catch { /* Exit handler reports an incomplete request. */ }
             }
             let action = request["action"] as? String
-            let seconds: Double = action == "detect" ? 86_400 : (action == "read" ? 600 : 180)
+            let seconds: Double = (action == "detect" || action?.hasPrefix("privacy_") == true) ? 86_400 : (action == "read" ? 600 : 180)
             let limit = DispatchWorkItem { [weak self] in
                 guard let self, self.token == ownedToken else { return }
                 self.cancel()
@@ -189,13 +190,15 @@ final class DocumentWorkspace {
     var manualText = ""
     var manualReplacement = "[Данные пользователя]"
     var previewPage = 0
+    var preserveFormat = false
+    var entityPage = 0
 
     func reset() {
         job.cancel()
         document = nil; originalURL = nil; entities = []; output = ""
         warnings = []; error = nil; notice = ""; reviewed = false
         hasResult = false; replacementsChanged = false; showOriginal = false
-        manualText = ""; manualReplacement = "[Данные пользователя]"; previewPage = 0
+        manualText = ""; manualReplacement = "[Данные пользователя]"; previewPage = 0; entityPage = 0
     }
 
     // Bound editor layout cost without truncating the stored/exported document.
@@ -219,7 +222,7 @@ final class DocumentWorkspace {
     func read(_ url: URL, settings: Settings) {
         guard !job.busy else { return }
         reset()
-        job.run(["action": "read", "path": url.path], settings: settings) { [weak self] reply, error in
+        job.run(["action": preserveFormat ? "privacy_read" : "read", "path": url.path], settings: settings) { [weak self] reply, error in
             guard let self else { return }
             self.error = error
             guard let document = reply?.document, error == nil else { return }
@@ -257,15 +260,22 @@ final class DocumentWorkspace {
     func detect(settings: Settings) {
         guard let document, !job.busy else { return }
         error = nil; reviewed = false; hasResult = false; notice = ""
-        job.run(["action": "detect", "document": document.payload, "use_model": useModel], settings: settings) { [weak self] reply, error in
+        var request: [String: Any] = ["action": "detect", "document": document.payload, "use_model": useModel]
+        if preserveFormat {
+            request = ["action": "privacy_detect", "path": originalURL?.path ?? "", "source_hash": document.sourceHash ?? "", "use_model": useModel]
+        }
+        job.run(request, settings: settings) { [weak self] reply, error in
             guard let self else { return }
             self.error = error
             guard let reply, error == nil, let text = reply.text else { return }
             self.entities = reply.entities ?? []; self.output = text
             self.hasResult = true; self.showOriginal = false; self.replacementsChanged = false
             self.previewPage = 0
-            self.warnings = document.warnings + (reply.warnings ?? [])
-            self.notice = "Заменено вхождений: \(reply.count ?? 0). Проверено моделью: \(reply.checked ?? 0) из \(reply.total ?? 0) фрагментов."
+            self.warnings = self.preserveFormat ? (reply.warnings ?? document.warnings) : document.warnings + (reply.warnings ?? [])
+            self.entityPage = 0
+            self.notice = self.preserveFormat
+                ? "Найдено вхождений во всём файле: \(reply.count ?? 0). Предпросмотр — только начало; экспортируется весь файл."
+                : "Заменено вхождений: \(reply.count ?? 0). Проверено моделью: \(reply.checked ?? 0) из \(reply.total ?? 0) фрагментов."
         }
     }
 
@@ -274,7 +284,11 @@ final class DocumentWorkspace {
               let data = try? JSONEncoder().encode(entities),
               let raw = try? JSONSerialization.jsonObject(with: data) else { return }
         error = nil; reviewed = false
-        job.run(["action": "apply", "document": document.payload, "entities": raw], settings: settings) { [weak self] reply, error in
+        var request: [String: Any] = ["action": "apply", "document": document.payload, "entities": raw]
+        if preserveFormat {
+            request = ["action": "privacy_apply", "path": originalURL?.path ?? "", "source_hash": document.sourceHash ?? "", "entities": raw]
+        }
+        job.run(request, settings: settings) { [weak self] reply, error in
             guard let self else { return }
             self.error = error
             guard let text = reply?.text, error == nil else { return }
@@ -286,7 +300,7 @@ final class DocumentWorkspace {
 
     func addManual() {
         let text = manualText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard text.count >= 2, text.count <= 200, document?.text.range(of: text, options: .caseInsensitive) != nil else {
+        guard text.count >= 2, text.count <= 200, preserveFormat || document?.text.range(of: text, options: .caseInsensitive) != nil else {
             error = "Укажите точную фразу из исходника: от 2 до 200 символов."; return
         }
         entities.append(PrivacyEntity(id: UUID().uuidString, kind: "OTHER", variants: [text],
@@ -302,7 +316,20 @@ final class DocumentWorkspace {
             error = "Исходник нельзя перезаписывать. Выберите другое имя файла."; return
         }
         error = nil
-        if word {
+        if preserveFormat {
+            guard let document, let originalURL,
+                  url.pathExtension.lowercased() == originalURL.pathExtension.lowercased(),
+                  let data = try? JSONEncoder().encode(entities),
+                  let raw = try? JSONSerialization.jsonObject(with: data) else {
+                error = "Сохраните копию с тем же расширением, что исходник."; return
+            }
+            job.run(["action": "privacy_export", "path": originalURL.path, "source_hash": document.sourceHash ?? "", "entities": raw], settings: settings) { [weak self] reply, failure in
+                guard let self else { return }
+                self.error = failure
+                guard failure == nil, let encoded = reply?.data, let data = Data(base64Encoded: encoded) else { return }
+                self.write(data, to: url)
+            }
+        } else if word {
             job.run(["action": "export_docx", "text": output], settings: settings) { [weak self] reply, error in
                 guard let self else { return }
                 self.error = error
@@ -315,7 +342,7 @@ final class DocumentWorkspace {
     private func write(_ data: Data, to url: URL) {
         do {
             try data.write(to: url, options: .atomic)
-            notice = "Сохранена текстовая копия: \(url.lastPathComponent). Исходник не изменён."
+            notice = "Сохранена копия: \(url.lastPathComponent). Исходник не изменён."
         } catch { self.error = "Не удалось сохранить копию: " + error.localizedDescription }
     }
 }
@@ -341,7 +368,7 @@ struct DocumentSheet: View {
                 if !standalone { Button("Закрыть") { dismiss() }.buttonStyle(QuietButton()) }
             }
             HStack {
-                Button(workspace.document == nil ? "Открыть PDF / Word…" : "Другой файл…", action: choose)
+                Button(workspace.document == nil ? "Открыть файл…" : "Другой файл…", action: choose)
                     .buttonStyle(PrimaryButton()).disabled(workspace.job.busy)
                 if let document = workspace.document {
                     Text(document.title).font(Kind.strong(13)).lineLimit(1)
@@ -358,7 +385,7 @@ struct DocumentSheet: View {
                 HStack {
                     Button("Найти персональные данные") { workspace.detect(settings: settings) }
                         .buttonStyle(PrimaryButton()).disabled(workspace.job.busy)
-                    Toggle("Имена и адреса — локальной моделью", isOn: $workspace.useModel)
+                    Toggle(standalone ? "Дополнительно искать имена локальной NER" : "Имена и адреса — локальной моделью", isOn: $workspace.useModel)
                         .toggleStyle(.checkbox).font(Kind.body(12)).disabled(workspace.job.busy)
                     Spacer()
                 }
@@ -370,17 +397,23 @@ struct DocumentSheet: View {
                             Button("Копия для проверки") { workspace.showOriginal = false; workspace.previewPage = 0 }.buttonStyle(QuietButton())
                                 .disabled(!workspace.hasResult)
                             Spacer()
-                            Text(workspace.showOriginal ? "Исходник · только чтение" : "Копия · можно исправить")
+                            Text(workspace.showOriginal ? "Исходник · только чтение" : (standalone ? "Копия · предпросмотр" : "Копия · можно исправить"))
                                 .font(Kind.body(11)).foregroundStyle(p.muted)
                         }
                         if workspace.showOriginal {
                             ScrollView { Text(workspace.previewText).font(Kind.body(13)).textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading).padding(10) }
                                 .background(p.raised)
-                        } else if workspace.hasResult {
+                        } else if workspace.hasResult && !standalone {
                             TextEditor(text: $workspace.previewText).font(Kind.body(13))
                                 .scrollContentBackground(.hidden).padding(8).background(p.raised)
                                 .disabled(workspace.job.busy)
+                        } else if workspace.hasResult {
+                            ScrollView { Text(workspace.previewText).font(Kind.body(13)).textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading).padding(10) }
+                                .background(p.raised)
+                            Text("Начало файла. Изменяйте замены слева: они применяются ко всему оригиналу при экспорте.")
+                                .font(Kind.body(11)).foregroundStyle(p.muted)
                         } else {
                             Text("Сначала запустите поиск данных или добавьте свои замены.")
                                 .font(Kind.body(13)).foregroundStyle(p.muted).frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -401,7 +434,7 @@ struct DocumentSheet: View {
                     ForEach(Array(workspace.warnings.enumerated()), id: \.offset) { _, warning in
                         Text(warning).font(Kind.body(11)).foregroundStyle(p.warn)
                     }
-                    Text("Экспорт — новый текстовый TXT или Word: без картинок, вложений, авторов и скрытого содержимого исходника. Это не сохранение исходной вёрстки.")
+                    Text(standalone ? "Экспорт — копия того же формата. Строки и таблицы сохраняются; служебные данные и вложения удаляются. PDF — только текстовый, без изображений; найденный текст удаляется. Проверьте весь результат перед передачей." : "Экспорт — новый текстовый TXT или Word: без картинок, вложений, авторов и скрытого содержимого исходника. Это не сохранение исходной вёрстки.")
                         .font(Kind.body(11)).foregroundStyle(p.muted)
                 }.frame(maxWidth: .infinity, alignment: .leading)
                 }.frame(height: 85)
@@ -409,8 +442,8 @@ struct DocumentSheet: View {
                     .toggleStyle(.checkbox).font(Kind.body(12))
                     .disabled(!workspace.hasResult || workspace.replacementsChanged || workspace.job.busy)
                 HStack {
-                    Button("Сохранить TXT…") { save(word: false) }.buttonStyle(PrimaryButton()).disabled(!workspace.canExport)
-                    Button("Сохранить Word…") { save(word: true) }.buttonStyle(QuietButton()).disabled(!workspace.canExport)
+                    Button(standalone ? "Сохранить копию в исходном формате…" : "Сохранить TXT…") { save(word: false) }.buttonStyle(PrimaryButton()).disabled(!workspace.canExport)
+                    if !standalone { Button("Сохранить Word…") { save(word: true) }.buttonStyle(QuietButton()).disabled(!workspace.canExport) }
                     if !standalone { Button("Копию в локальный чат") { attach(.reviewedCopy(workspace.output)); dismiss() }
                         .buttonStyle(QuietButton()).disabled(!workspace.canExport)
                     }
@@ -419,8 +452,8 @@ struct DocumentSheet: View {
             } else {
                 VStack(spacing: 12) {
                     Image(systemName: "doc.text.magnifyingglass").font(.system(size: 38)).foregroundStyle(p.accent2)
-                    Text("PDF с текстовым слоем · DOCX · DOC · TXT").font(Kind.strong(15))
-                    Text("До 100 МБ, 2000 страниц PDF и 2 000 000 символов.\nБольшой документ проверяется по частям; это может занять длительное время.\nСканы без распознанного текста требуют OCR. Файл не отправляется во внешнюю модель.")
+                    Text("Excel XLSX · CSV / TSV · Word DOCX · текстовый PDF · TXT").font(Kind.strong(15))
+                    Text("До 100 МБ и 25 млн символов, до 250 000 разных замен.\nПодходит для таблиц на 15 000+ строк. Проверяется весь файл, не только предпросмотр.\nИнтернет и Ollama для обезличивания не нужны. Сканы и PDF с изображениями не поддерживаются.")
                         .font(Kind.body(13)).foregroundStyle(p.muted).multilineTextAlignment(.center)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -433,6 +466,7 @@ struct DocumentSheet: View {
         }
         .padding(22).frame(width: standalone ? nil : 1030, height: standalone ? nil : 735)
         .frame(maxWidth: .infinity, maxHeight: .infinity).background(p.surface)
+        .onAppear { workspace.preserveFormat = standalone }
         .onDisappear { workspace.reset() }
     }
 
@@ -443,14 +477,22 @@ struct DocumentSheet: View {
                 .font(Kind.body(11)).foregroundStyle(p.muted)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
-                    ForEach($workspace.entities) { $entity in
+                    ForEach(Array(workspace.entities.indices.dropFirst(workspace.entityPage * 100).prefix(100)), id: \.self) { index in
+                        let entity = workspace.entities[index]
                         VStack(alignment: .leading, spacing: 5) {
-                            Toggle(entity.variants.joined(separator: " / "), isOn: $entity.enabled)
+                            Toggle(entity.variants.joined(separator: " / "), isOn: $workspace.entities[index].enabled)
                                 .toggleStyle(.checkbox).font(Kind.body(12)).textSelection(.enabled)
-                            TextField("Заменить на", text: $entity.replacement).textFieldStyle(.roundedBorder)
+                            TextField("Заменить на", text: $workspace.entities[index].replacement).textFieldStyle(.roundedBorder)
                                 .font(Kind.body(12))
                         }.padding(8).background(RoundedRectangle(cornerRadius: 7).fill(p.raised))
                     }
+                }
+            }
+            if workspace.entities.count > 100 {
+                HStack {
+                    Button("Назад") { workspace.entityPage -= 1 }.disabled(workspace.entityPage == 0)
+                    Text("\(workspace.entityPage + 1) / \((workspace.entities.count + 99) / 100)").font(Kind.body(11))
+                    Button("Далее") { workspace.entityPage += 1 }.disabled((workspace.entityPage + 1) * 100 >= workspace.entities.count)
                 }
             }
             TextField("Добавить точную фразу из исходника", text: $workspace.manualText).textFieldStyle(.roundedBorder)
@@ -470,7 +512,7 @@ struct DocumentSheet: View {
         let panel = NSOpenPanel()
         // AppKit may reuse panel state after another screen chose a folder.
         panel.canChooseFiles = true; panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = ["pdf", "docx", "doc", "txt", "md"].compactMap { UTType(filenameExtension: $0) }
+        panel.allowedContentTypes = (standalone ? ["xlsx", "csv", "tsv", "pdf", "docx", "txt", "md"] : ["pdf", "docx", "doc", "txt", "md"]).compactMap { UTType(filenameExtension: $0) }
         panel.message = "Документ будет прочитан на этом компьютере. Исходник не изменяется."
         guard panel.runModal() == .OK, let url = panel.url else { return }
         workspace.read(url, settings: settings)
@@ -478,9 +520,10 @@ struct DocumentSheet: View {
 
     private func save(word: Bool) {
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [UTType(filenameExtension: word ? "docx" : "txt")!]
-        panel.nameFieldStringValue = "Обезличенная копия." + (word ? "docx" : "txt")
-        panel.message = "Сохраняется только проверенный текст, без оригинала и таблицы соответствий."
+        let ext = standalone ? (workspace.originalURL?.pathExtension ?? "txt") : (word ? "docx" : "txt")
+        panel.allowedContentTypes = [UTType(filenameExtension: ext)!]
+        panel.nameFieldStringValue = "Обезличенная копия." + ext
+        panel.message = standalone ? "Сохраняется весь файл с заменами, а не только предпросмотр. Исходник не изменяется." : "Сохраняется только проверенный текст, без оригинала и таблицы соответствий."
         guard panel.runModal() == .OK, let url = panel.url else { return }
         workspace.export(to: url, word: word, settings: settings)
     }

@@ -3377,7 +3377,8 @@ def _speech_models():
 def document_packages_missing() -> list:
     from importlib.metadata import version, PackageNotFoundError
     missing = []
-    for package, minimum in [("pypdf", (6, 18)), ("python-docx", (1, 1))]:
+    for package, minimum in [("pypdf", (6, 18)), ("python-docx", (1, 1)), ("openpyxl", (3, 1)),
+                             ("PyMuPDF", (1, 26)), ("pyahocorasick", (2, 1)), ("natasha", (1, 6))]:
         try:
             installed = tuple(int(part) for part in version(package).split(".")[:2])
             if installed < minimum:

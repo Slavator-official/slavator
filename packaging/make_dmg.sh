@@ -33,6 +33,7 @@ mkdir -p "$STAGE"
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 cp "$ROOT/ПРОЧТИ_МЕНЯ.txt" "$STAGE/ПРОЧТИ МЕНЯ.txt"
+cp "$ROOT/ОБЕЗЛИЧИВАНИЕ.txt" "$STAGE/Обезличивание — инструкция.txt"
 
 if [[ $FULL -eq 1 ]]; then
     PAYLOAD="$STAGE/ресурсы"

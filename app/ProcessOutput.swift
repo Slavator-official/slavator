@@ -3,19 +3,23 @@ import Foundation
 /// Pipe режет поток в любом байте, в том числе посреди UTF-8 и JSON.
 struct LineBuffer {
     private var pending = Data()
+    private var scanned = 0
 
     mutating func append(_ data: Data, endOfFile: Bool = false) -> [String] {
         pending.append(data)
         var lines: [String] = []
-        while let newline = pending.firstIndex(of: 0x0A) {
+        while let newline = pending.dropFirst(scanned).firstIndex(of: 0x0A) {
             let line = String(decoding: pending[..<newline], as: UTF8.self)
                 .trimmingCharacters(in: .newlines)
             if !line.isEmpty { lines.append(line) }
             pending.removeSubrange(...newline)
+            scanned = 0
         }
+        scanned = pending.count
         if endOfFile, !pending.isEmpty {
             lines.append(String(decoding: pending, as: UTF8.self))
             pending.removeAll()
+            scanned = 0
         }
         return lines
     }
