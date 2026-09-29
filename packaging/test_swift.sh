@@ -5,6 +5,10 @@ CHECK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/slavator-checks.XXXXXX")"
 trap 'rm -f "$CHECK_DIR/runtime-checks" "$CHECK_DIR/pipeline-checks" "$CHECK_DIR/memory-checks" "$CHECK_DIR/library-checks" "$CHECK_DIR/chat-checks" "$CHECK_DIR/player-checks"; rmdir "$CHECK_DIR"' EXIT
 cd "$PROJECT"
 CHECK_ARCH="$(uname -m)"
+# SDK под свой компилятор — почему, см. build_app.sh.
+if [[ -z "${SDKROOT:-}" && -d "$(xcode-select -p)/SDKs/MacOSX.sdk" ]]; then
+    export SDKROOT="$(xcode-select -p)/SDKs/MacOSX.sdk"
+fi
 swiftc -parse-as-library -target "$CHECK_ARCH-apple-macos14.2" app/Configuration.swift app/ProcessOutput.swift \
     app/tests/RuntimeChecks.swift -o "$CHECK_DIR/runtime-checks"
 "$CHECK_DIR/runtime-checks"

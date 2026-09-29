@@ -3,6 +3,7 @@
 
     python3 make_icon.py <исходник.png> [результат.png]
     python3 make_icon.py --tint РРGGBB[:сила] <иконка.png> <результат.png>
+    python3 make_icon.py --dev <иконка.png> <результат.png>
 
 Что делает: вырезает квадрат вокруг лица, масштабирует его методом ближайшего
 соседа (пиксель-арт нельзя размывать интерполяцией), вписывает в squircle -
@@ -220,9 +221,67 @@ def tint(src: Path, dst: Path, colour: tuple, strength: float) -> None:
     print(f"покрашено: {dst} ({dst.stat().st_size // 1024} КБ, {width}×{height})")
 
 
+# Буквы DEV пиксельным шрифтом 5×7 — в стиле самого портрета.
+GLYPHS = {
+    "D": ["11110", "10001", "10001", "10001", "10001", "10001", "11110"],
+    "E": ["11111", "10000", "10000", "11110", "10000", "10000", "11111"],
+    "V": ["10001", "10001", "10001", "10001", "01010", "01010", "00100"],
+}
+
+
+def dev(src: Path, dst: Path) -> None:
+    """Иконка тестовой сборки: ярко-синий фон и плашка DEV внизу.
+
+    Сплошная тонировка не годилась: исходный фон сам голубой, и синяя
+    копия читалась как та же иконка, только темнее, — а лицо становилось
+    фиолетовым. Поэтому перекрашивается только фон, лицо остаётся своим,
+    а надпись отличает сборку даже там, где цвета не разглядеть.
+    """
+    width, height, pixels = read_png(src)
+    deep, light = (16, 72, 224), (64, 132, 255)
+    rows = [y for y in range(height) if any(pixels[(y * width + x) * 4 + 3]
+                                           for x in range(0, width, 8))]
+    top, bottom = rows[0], rows[-1]
+    for i in range(0, len(pixels), 4):
+        r, g, b, a = pixels[i:i + 4]
+        # Фон портрета — светлый голубой: синий заметно больше красного.
+        # Кожа и волосы тёплые, рубашка тёмная — их условие не задевает.
+        if a == 0 or r < 130 or b < 200 or b - r < 25:
+            continue
+        t = min(1.0, max(0.0, ((r + g + b) / 765 - 0.72) / 0.2))
+        for k in range(3):
+            pixels[i + k] = int(deep[k] + (light[k] - deep[k]) * t)
+
+    # Плашка — нижняя пятая часть квадрата, буквы белые по тёмно-синему.
+    band_top = bottom - (bottom - top) // 5
+    cell = max(1, (bottom - top) // 44)
+    text = "DEV"
+    text_w = (len(text) * 6 - 1) * cell
+    left = (width - text_w) // 2
+    text_top = band_top + ((bottom - band_top) - 7 * cell) // 2
+    for y in range(band_top, bottom + 1):
+        for x in range(width):
+            i = (y * width + x) * 4
+            if pixels[i + 3] == 0:
+                continue
+            colour = (10, 40, 140)
+            gy, gx = (y - text_top) // cell, (x - left) // cell
+            if 0 <= gy < 7 and 0 <= gx < len(text) * 6 and y >= text_top and x >= left:
+                glyph, col = divmod(gx, 6)
+                if col < 5 and GLYPHS[text[glyph]][gy][col] == "1":
+                    colour = (255, 255, 255)
+            pixels[i:i + 3] = bytes(colour)
+    write_png(dst, width, height, bytes(pixels))
+    print(f"тестовая: {dst} ({dst.stat().st_size // 1024} КБ, {width}×{height})")
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
-    if args and args[0] == "--tint":
+    if args and args[0] == "--dev":
+        if len(args) < 3:
+            raise SystemExit("--dev <иконка.png> <результат.png>")
+        dev(Path(args[1]).expanduser(), Path(args[2]).expanduser())
+    elif args and args[0] == "--tint":
         if len(args) < 4:
             raise SystemExit("--tint RRGGBB[:сила] <иконка.png> <результат.png>")
         spec, rest = args[1], args[2:]

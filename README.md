@@ -157,8 +157,8 @@ SwiftUI — `app/Configuration.swift`. Старые поля настроек с
 ## Сборка
 
 ```bash
-packaging/build_app.sh           # тестовая «Славатор Dev» — синяя иконка
-packaging/build_app.sh --stable  # основная «Славатор» — ей пользуются каждый день
+packaging/build_app.sh           # тестовая «Славатор Dev» — из папки как есть
+packaging/build_stable.sh        # основная «Славатор» — из коммита (HEAD или тег)
 packaging/make_dmg.sh            # лёгкий образ (~2–3 МБ) из основной, всё качается при установке
 packaging/make_dmg.sh --full     # полный (~5,5 ГБ): Ollama и языковая модель внутри
 ```
@@ -172,12 +172,13 @@ macOS 14.2+ на Apple Silicon и Command Line Tools, полный Xcode — н�
 | | Основная | Тестовая |
 |---|---|---|
 | Название | «Славатор» | «Славатор Dev» |
-| Иконка | исходная | синяя |
+| Иконка | исходная | синяя с плашкой DEV |
 | Идентификатор | `ru.slavator.app` | `ru.slavator.app.dev` |
-| Собирается | `build_app.sh --stable` | `build_app.sh` |
+| Собирается | `build_stable.sh` — из коммита | `build_app.sh` — из папки как есть |
 
 Тестовая по умолчанию, чтобы пробная сборка не заменяла ту, которой
-работают. Пока основная запущена, тестовая выключает у себя диктовку,
+работают. Основная собирается только из коммита: в папке лежит
+недоделанное, и ему место в тестовой. Пока основная запущена, тестовая выключает у себя диктовку,
 виджет, значок в меню и слежение за встречами; закрыли основную — всё
 включается по настройкам. Проверить диктовку или виджет тестовой можно,
 только закрыв основную.
@@ -230,7 +231,7 @@ echo "0.14.0" > VERSION
 git commit -am "Версия 0.14.0"
 git tag -a v0.14.0 -m "Версия 0.14.0"
 git push && git push --tags
-packaging/build_app.sh --stable && packaging/make_dmg.sh
+packaging/build_stable.sh && packaging/make_dmg.sh
 cp packaging/dist.noindex/Славатор.dmg Slavator-0.14.0-macOS-arm64.dmg
 shasum -a 256 Slavator-0.14.0-macOS-arm64.dmg   # вписать в описание выпуска
 gh release create v0.14.0 Slavator-0.14.0-macOS-arm64.dmg --title "Славатор 0.14.0 для macOS"
@@ -246,7 +247,7 @@ gh release create v0.14.0 Slavator-0.14.0-macOS-arm64.dmg --title "Слават�
 git clone git@github.com:Slavator-official/slavator.git slavator
 cd slavator
 git switch slava/mac                               # самое свежее; ios/macbook — после слияния
-packaging/build_app.sh --stable                    # соберёт и поставит Славатор.app
+packaging/build_stable.sh                          # соберёт и поставит Славатор.app
 open /Applications/Славатор.app                    # дальше кнопка «Установить»
 ```
 

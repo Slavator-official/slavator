@@ -25,7 +25,7 @@ fi
 say()  { printf '\033[1m==>\033[0m %s\n' "$1"; }
 fail() { printf '\033[31mОШИБКА:\033[0m %s\n' "$1" >&2; exit 1; }
 
-[[ -d "$APP" ]] || fail "сначала соберите основную сборку: $ROOT/build_app.sh --stable"
+[[ -d "$APP" ]] || fail "сначала соберите основную сборку: $ROOT/build_stable.sh"
 
 say "Готовлю содержимое образа"
 rm -rf "$STAGE" "$DMG"

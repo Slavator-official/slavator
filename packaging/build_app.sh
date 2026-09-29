@@ -8,10 +8,13 @@ set -euo pipefail
 
 # Две сборки на одной машине.
 #
-#   build_app.sh            — «Славатор Dev», тестовая: синяя иконка, свой
-#                             идентификатор, ставится рядом с основной
+#   build_app.sh            — «Славатор Dev», тестовая: синяя иконка с
+#                             плашкой DEV, свой идентификатор, ставится
+#                             рядом с основной; собирается из папки как есть
 #   build_app.sh --stable   — «Славатор», основная: ей пользуются каждый
-#                             день, из неё же делается образ для выпуска
+#                             день, из неё же делается образ для выпуска.
+#                             Руками не вызывать: build_stable.sh собирает
+#                             её из коммита, без недоделанного из папки
 #
 # Тестовая по умолчанию намеренно: раньше каждая пробная сборка заменяла
 # в «Программах» ту, которой человек работал, и недоделанное попадало
@@ -47,6 +50,14 @@ fail() { printf '\033[31mОШИБКА:\033[0m %s\n' "$1" >&2; exit 1; }
 
 command -v swiftc >/dev/null || fail "нет swiftc — поставьте Command Line Tools"
 
+# SDK под свой компилятор. После обновления Command Line Tools рядом может
+# остаться SDK от другой версии Swift, и xcrun берёт самый новый — тогда
+# swiftc не собирает ничего («this SDK is not supported by the compiler»).
+# MacOSX.sdk — ссылка, которую установщик ставит на SDK своего компилятора.
+if [[ -z "${SDKROOT:-}" && -d "$(xcode-select -p)/SDKs/MacOSX.sdk" ]]; then
+    export SDKROOT="$(xcode-select -p)/SDKs/MacOSX.sdk"
+fi
+
 SOURCES=(Configuration.swift ProcessOutput.swift OutputVolume.swift Theme.swift Models.swift
          SpeakerMemory.swift SpeakerMemoryScreen.swift Ribbon.swift Player.swift
          Pipeline.swift SystemAudio.swift LiveCapture.swift Mixdown.swift
@@ -75,13 +86,18 @@ cd "$SWIFT"
 # -dead_strip_dylibs убирает зависимости, из которых ничего не используется.
 # Без него линковщик прописывал SwiftUICore - фреймворк из macOS 15, которого
 # на Sonoma не существует, и приложение там падало при запуске.
+#
+# Имя промежуточного файла — без точки в начале. С Command Line Tools 26.6
+# бинарник с именем «.slavator-bin» при тех же исходниках и флагах получал
+# зависимость от SwiftUICore, а с именем без точки — нет (проверено
+# несколько раз подряд, 29.09.2026).
 swiftc -O -parse-as-library -target arm64-apple-macos14.2 \
     -Xlinker -dead_strip_dylibs \
-    -o "$DIST/.slavator-bin" "${SOURCES[@]}" || fail "не собирается интерфейс"
+    -o "$DIST/slavator-bin" "${SOURCES[@]}" || fail "не собирается интерфейс"
 
 # A view modifier added in a future edit can pull SwiftUICore back in even
 # with dead stripping. Fail before replacing the last runnable bundle.
-if otool -L "$DIST/.slavator-bin" | grep -q '/SwiftUICore.framework/'; then
+if otool -L "$DIST/slavator-bin" | grep -q '/SwiftUICore.framework/'; then
     fail "бинарник зависит от SwiftUICore (macOS 15), но поддерживается macOS 14.2"
 fi
 
@@ -103,22 +119,22 @@ say "Сборка «$NAME» ($BUNDLE_ID)"
 cp "$PROJECT/VERSION" "$RESOURCES/VERSION"
 plutil -lint "$CONTENTS/Info.plist" >/dev/null || fail "Info.plist некорректен"
 printf 'APPL????' > "$CONTENTS/PkgInfo"
-install -m 755 "$DIST/.slavator-bin" "$CONTENTS/MacOS/$EXE"
-rm -f "$DIST/.slavator-bin"
+install -m 755 "$DIST/slavator-bin" "$CONTENTS/MacOS/$EXE"
+rm -f "$DIST/slavator-bin"
 
 say "Собираю иконку"
 ICONSET="$DIST/AppIcon.iconset"
 rm -rf "$ICONSET"; mkdir -p "$ICONSET"
 MASTER="$ROOT/icon_master.png"
 
-# Тестовая сборка — синяя: в Dock, Spotlight и переключателе программ её
-# видно сразу, и основную с ней не перепутать. Основная — с исходной
-# иконкой, какой её видит человек, поставивший программу. Оттенок
-# глубокий намеренно: исходная иконка сама голубая, и светлый синий
-# от неё в Dock не отличить.
+# Тестовая сборка — ярко-синий фон и плашка DEV: в Dock, Spotlight и
+# переключателе программ её видно сразу. Сплошная синяя тонировка не
+# годилась: исходный фон сам голубой, и две иконки читались как одна.
+# Основная — с исходной иконкой, какой её видит человек, поставивший
+# программу.
 if [[ "$EDITION" == "dev" ]]; then
-    say "Иконка синяя — тестовая сборка"
-    /usr/bin/python3 "$ROOT/make_icon.py" --tint "1846E8:0.72" "$MASTER" "$DIST/icon_tinted.png"
+    say "Иконка DEV — тестовая сборка"
+    /usr/bin/python3 "$ROOT/make_icon.py" --dev "$MASTER" "$DIST/icon_tinted.png" >/dev/null
     MASTER="$DIST/icon_tinted.png"
 fi
 for spec in "16:icon_16x16" "32:icon_16x16@2x" "32:icon_32x32" "64:icon_32x32@2x" \
@@ -129,7 +145,7 @@ done
 iconutil -c icns "$ICONSET" -o "$RESOURCES/AppIcon.icns"
 rm -rf "$ICONSET" "$DIST/icon_tinted.png"
 if [[ "$EDITION" == "dev" ]]; then
-    /usr/bin/python3 "$ROOT/make_icon.py" --tint "1846E8:0.72" "$CORE/app_icon.png" "$RESOURCES/app_icon.png" >/dev/null
+    /usr/bin/python3 "$ROOT/make_icon.py" --dev "$CORE/app_icon.png" "$RESOURCES/app_icon.png" >/dev/null
 else
     cp "$CORE/app_icon.png" "$RESOURCES/app_icon.png"
 fi
