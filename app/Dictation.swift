@@ -910,7 +910,18 @@ private final class FittingHost<Root: View>: NSHostingView<Root> {
     /// Плашку разрешено тащить.
     var movable = false
 
-    required init(rootView: Root) { super.init(rootView: rootView) }
+    required init(rootView: Root) {
+        super.init(rootView: rootView)
+        // Размер окна ведёт только fit(). По умолчанию NSHostingView ещё и
+        // сам ставит окну наименьший и наибольший размер и подгоняет окно под
+        // них — у одного размера два хозяина. 30.09.2026 они перетянули
+        // плашку на отпускании клавиши: «Дописываю…» ужимает её, SwiftUI и
+        // fit() меняли размер по очереди, и AppKit уронил программу на
+        // пересчёте раскладки — у окна из пары видов предел два прохода за
+        // кадр. Пустой набор не годится: без .intrinsicContentSize
+        // fittingSize — ноль, и плашка перестаёт подгоняться (проверено).
+        sizingOptions = [.intrinsicContentSize]
+    }
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("не используется") }
 
