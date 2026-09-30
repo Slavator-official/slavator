@@ -28,6 +28,12 @@ struct Readiness: Decodable {
 
     var missing: [Item] { items.filter { !$0.ok } }
 
+    /// Всё на месте, кроме запущенной Ollama: качать нечего, только поднять.
+    var onlyOllamaStopped: Bool {
+        !missing.isEmpty && size_mb == 0
+            && missing.allSatisfy { $0.key == "ollama" && $0.state == "stopped" }
+    }
+
     /// Чего не хватает — одной строкой под заголовком карточки.
     var listing: String {
         missing.map { item in
@@ -50,18 +56,29 @@ struct Readiness: Decodable {
 final class Doctor {
     private(set) var report: Readiness?
     private(set) var busy = false
+    private var again = false
 
     /// Перепроверить. По коду вызов дешёвый, по времени — нет: когда Ollama
     /// не отвечает, ядро ждёт её несколько секунд. Поэтому в фоне, а окно
     /// в это время живёт своей жизнью.
+    ///
+    /// Просьба, пришедшая во время проверки, не теряется, а выполняется
+    /// следом: при запуске программы первая проверка застаёт Ollama ещё
+    /// выключенной, и без повтора плашка «не запущена» висела бы над уже
+    /// работающей Ollama.
     func refresh() {
-        guard !busy, Paths.isReady else { return }
+        guard Paths.isReady else { return }
+        guard !busy else { again = true; return }
         busy = true
         Task.detached(priority: .utility) {
             let fresh = Doctor.ask()
             await MainActor.run {
                 self.report = fresh
                 self.busy = false
+                if self.again {
+                    self.again = false
+                    self.refresh()
+                }
             }
         }
     }

@@ -23,6 +23,7 @@ struct MainScreen: View {
     /// Сколько человек на встрече. 0 — пусть определит сама.
     @State private var speakers = 0
     @State private var setupStarted = false
+    @State private var startingOllama = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -71,6 +72,11 @@ struct MainScreen: View {
             doctor.refresh()
         }
         .onAppear { doctor.refresh() }
+        // Ollama поднялась после запуска программы — первая проверка могла
+        // застать её ещё выключенной.
+        .onReceive(NotificationCenter.default.publisher(for: OllamaServer.started)) { _ in
+            doctor.refresh()
+        }
         // Дозагрузка кончилась — спрашиваем ядро заново, а не верим на слово.
         .onChange(of: pipeline.isRunning) { _, running in
             if !running { doctor.refresh() }
@@ -111,6 +117,42 @@ struct MainScreen: View {
     // до того, как отдаст программе часовую запись и подождёт полчаса.
     @ViewBuilder
     private func updateCard(_ report: Readiness) -> some View {
+        if report.onlyOllamaStopped { ollamaCard } else { downloadCard(report) }
+    }
+
+    // модели на месте, не запущена только Ollama
+    //
+    // Раньше это была та же «Требуется дозагрузка» на 5 ГБ, хотя качать было
+    // нечего, — и человек решал, что модели пропали. Запуск не ходит в
+    // интернет, поэтому и разрешения на загрузку не спрашивает.
+    private var ollamaCard: some View {
+        Card {
+            HStack(spacing: 10) {
+                Image(systemName: "pause.circle")
+                    .font(.system(size: 19)).foregroundStyle(p.warn).frame(width: 26)
+                Text("Ollama не запущена").font(Kind.strong(14.5))
+                Spacer()
+            }
+            Text("Модели на месте, качать ничего не нужно. Без Ollama не будет резюме, имён участников и обработки диктовки.")
+                .font(Kind.body(12.5)).foregroundStyle(p.muted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 6)
+            Button(startingOllama ? "Запускаю…" : "Запустить Ollama") {
+                startingOllama = true
+                Task {
+                    _ = await OllamaServer.start()
+                    startingOllama = false
+                    doctor.refresh()
+                }
+            }
+            .buttonStyle(PrimaryButton(wide: true))
+            .disabled(startingOllama)
+            .padding(.top, 10)
+        }
+    }
+
+    @ViewBuilder
+    private func downloadCard(_ report: Readiness) -> some View {
         Card {
             HStack(spacing: 10) {
                 Image(systemName: "arrow.down.circle.dotted")
@@ -751,7 +793,7 @@ struct RecordsScreen: View {
         }
         for (_, folder) in done { retitle(folder, to: title) }
         library.reload()
-        memory.invalidate(settings: library.settings)
+        if Edition.hasMemory { memory.invalidate(settings: library.settings) }
     }
 
     /// Стенограмма хранит своё название отдельно от папки, и память берёт его
@@ -1399,6 +1441,7 @@ struct PersonScreen: View {
                     }
                     Spacer()
                 }
+                if Edition.hasMemory {
                 Card {
                     Text("Память о человеке").font(Kind.head(16)).padding(.bottom, 8)
                     if let info = memory.overview.people.first(where: { $0.id == "profile:" + key }) {
@@ -1413,6 +1456,7 @@ struct PersonScreen: View {
                         memory.tab = "search"; screen = .memory
                         memory.search(settings: library.settings)
                     }.buttonStyle(PrimaryButton()).disabled(memory.busy).padding(.top, 12)
+                }
                 }
                 Card {
                     Text("Образцы голоса").font(Kind.head(16)).padding(.bottom, 14)
@@ -1443,7 +1487,7 @@ struct PersonScreen: View {
         // Память живёт на своём экране, и раньше её считывал он же. Карточка
         // человека без этого встречала пустым «история появится»: посчитано
         // всё, но только для того, кто по дороге заглянул в «Память встреч».
-        .onAppear { memory.activate(settings: library.settings) }
+        .onAppear { if Edition.hasMemory { memory.activate(settings: library.settings) } }
     }
 
     private func sampleFiles(_ person: Speaker) -> [URL] {

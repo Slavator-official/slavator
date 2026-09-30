@@ -38,3 +38,35 @@ def test_partial_local_whisper_is_not_ready(tmp_path):
         for name in ("model.bin", "config.json", "tokenizer.json"):
             (tmp_path / name).write_text("fixture")
         assert core.whisper_cached() is True
+
+
+def test_model_on_disk_by_manifest(tmp_path, monkeypatch):
+    monkeypatch.setenv("OLLAMA_MODELS", str(tmp_path))
+    library = tmp_path / "manifests" / "registry.ollama.ai" / "library"
+    (library / "qwen3").mkdir(parents=True)
+    (library / "qwen3" / "8b").write_text("{}")
+    assert core.ollama_model_on_disk("qwen3:8b")
+    assert not core.ollama_model_on_disk("qwen3:4b")
+    assert not core.ollama_model_on_disk("qwen3")          # это qwen3:latest
+    (library / "qwen3" / "latest").write_text("{}")
+    assert core.ollama_model_on_disk("qwen3")
+    user = tmp_path / "manifests" / "hf.co" / "someone" / "model"
+    user.mkdir(parents=True)
+    (user / "q4").write_text("{}")
+    assert core.ollama_model_on_disk("hf.co/someone/model:q4")
+
+
+def test_stopped_ollama_with_model_on_disk_needs_no_download():
+    with patch.object(core, "OLLAMA_HOST", "http://127.0.0.1:11434"), \
+         patch.object(core, "packages_missing", return_value=[]), \
+         patch.object(core, "_speech_models", return_value=([], [], 0)), \
+         patch.object(core, "whisper_cached", return_value=True), \
+         patch.object(core, "ollama_running", return_value=False), \
+         patch.object(core, "ollama_binary", return_value=Path("/opt/homebrew/bin/ollama")), \
+         patch.object(core, "ollama_model_on_disk", return_value=True):
+        report = core.readiness()
+    states = {item["key"]: item["state"] for item in report["items"]}
+    assert states["ollama"] == "stopped"
+    assert states["llm"] == "ok"
+    assert report["size_mb"] == 0
+    assert report["missing"] == ["ollama"]

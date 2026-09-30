@@ -2153,6 +2153,31 @@ def ollama_has_model(names=None) -> bool:
     return OLLAMA_MODEL in known or (":" not in OLLAMA_MODEL and OLLAMA_MODEL + ":latest" in known)
 
 
+def ollama_model_on_disk(name: str = "") -> bool:
+    """Лежит ли модель в хранилище Ollama — не спрашивая саму Ollama.
+
+    Пока сервер не запущен, спросить его некого. Раньше это давало
+    «неизвестно», и главная просила дозагрузить пять гигабайт, которые уже
+    лежали на диске: после перезагрузки Ollama из Homebrew сама не
+    поднимается (30.09.2026). Хранилище раскладывает манифесты по имени и
+    тегу: qwen3:8b — manifests/registry.ollama.ai/library/qwen3/8b.
+    """
+    model, _, tag = (name or OLLAMA_MODEL).partition(":")
+    parts = [part for part in model.split("/") if part]
+    if not parts:
+        return False
+    registry = "registry.ollama.ai"
+    if len(parts) > 1 and "." in parts[0]:
+        registry, parts = parts[0], parts[1:]
+    if len(parts) == 1:
+        parts = ["library"] + parts
+    root = Path(os.environ.get("OLLAMA_MODELS") or Path.home() / ".ollama" / "models")
+    try:
+        return root.joinpath("manifests", registry, *parts, tag or "latest").is_file()
+    except OSError:
+        return False
+
+
 def ollama_pull(model: str = "", base: float = 45.0, scale: float = 0.5) -> bool:
     """Скачать языковую модель, показывая, сколько уже пришло.
 
@@ -3409,10 +3434,15 @@ def readiness() -> dict:
         "fixable": binary is not None,
     })
 
-    # Пока сервер молчит, о моделях спрашивать некого — это «неизвестно», а не
-    # «нет»: сказать «модели нет» и отправить человека качать пять гигабайт
-    # заново было бы враньём.
-    model_state = ("ok" if ollama_has_model() else "missing") if running else "unknown"
+    # Пока сервер молчит, спрашиваем хранилище на диске. Не нашли и там —
+    # это «неизвестно», а не «нет»: сказать «модели нет» и отправить
+    # человека качать пять гигабайт заново было бы враньём.
+    if running:
+        model_state = "ok" if ollama_has_model() else "missing"
+    elif local and ollama_model_on_disk():
+        model_state = "ok"
+    else:
+        model_state = "unknown"
     items.append({
         "key": "llm",
         "title": f"Языковая модель {OLLAMA_MODEL}",

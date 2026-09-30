@@ -47,15 +47,7 @@ struct SlavatorApp: App {
     }
 }
 
-/// Две сборки на одной машине: основная — ей пользуются каждый день, и
-/// тестовая, «Славатор Dev», — её тюнят. Различаются идентификатором бандла,
-/// его ставит build_app.sh.
-enum Edition {
-    static let stableID = "ru.slavator.app"
-    static let devID = "ru.slavator.app.dev"
-    static let all: Set<String> = [stableID, devID]
-    static var isDev: Bool { Bundle.main.bundleIdentifier == devID }
-
+extension Edition {
     /// Тестовая уступает основной: пока та запущена, у тестовой нет ни
     /// диктовки, ни виджета, ни значка в меню, ни слежения за встречами.
     /// Иначе одно нажатие ⌥ поднимало две плашки и печатало текст дважды,
@@ -91,6 +83,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppConfiguration.protectPrivateFolders()
         if Edition.isDev { followStable() }
+        Task {
+            if await OllamaServer.start() == .started {
+                NotificationCenter.default.post(name: OllamaServer.started, object: nil)
+            }
+        }
         // Делегата ставят до первого уведомления, иначе нажатие кнопки в нём
         // некому обработать.
         guard Bundle.main.bundleIdentifier != nil else { return }
@@ -448,6 +445,7 @@ struct Sidebar: View {
          (.records, "Записи", "clock"),
          (.speakers, "Спикеры", "person"),
          (.settings, "Настройки", "gearshape")]
+            .filter { $0.0 != .memory || Edition.hasMemory }
     }
 
     var body: some View {

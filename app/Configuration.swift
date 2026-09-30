@@ -20,6 +20,23 @@ enum ModelTransport {
     }
 }
 
+/// Две сборки на одной машине: боевая «Славатор» — ей пользуются каждый
+/// день, и тестовая «Славатор Dev» — её тюнят. Различаются идентификатором
+/// бандла, его ставит build_app.sh. Здесь, а не в App.swift: флаги читают
+/// экраны, которые проверки Swift собирают без App.swift.
+enum Edition {
+    static let stableID = "ru.slavator.app"
+    static let devID = "ru.slavator.app.dev"
+    static let all: Set<String> = [stableID, devID]
+    static var isDev: Bool { Bundle.main.bundleIdentifier == devID }
+
+    /// Память встреч — поиск, граф, чат по встречам, история человека —
+    /// пока не в боевой: её не докрутили (Слава, 30.09.2026). Условие «не
+    /// боевая», а не «тестовая»: проверки собираются без бандла и должны
+    /// видеть память. Докрутим — вернуть true.
+    static var hasMemory: Bool { Bundle.main.bundleIdentifier != stableID }
+}
+
 /// Тот же контракт настроек и цветов, который читает Windows-интерфейс.
 enum DesktopContract {
     static let raw: [String: Any] = {
@@ -437,6 +454,67 @@ extension Settings {
     /// Папка, куда ложится запись встречи.
     var recordingsFolder: String {
         recordings_dir.isEmpty ? results_dir : recordings_dir
+    }
+
+    /// Искать ли в памяти встреч. Настройки у сборок общие, поэтому боевая
+    /// свой выбор не переписывает, а просто не читает: памяти в ней нет.
+    var usesMeetingMemory: Bool { chat_memory_enabled && Edition.hasMemory }
+}
+
+/// Локальная Ollama поднимается вместе со Славатором.
+///
+/// Ollama из Homebrew после перезагрузки сама не стартует, и Славатор
+/// неделю жил без неё: резюме, имена и обработка диктовки не работали, а
+/// главная просила «дозагрузить 5 ГБ» уже скачанной модели (30.09.2026).
+/// Поднимается только сервер — модель ляжет в память при первом запросе, а
+/// не при запуске программы. Чужой адрес не трогаем: запускать там нечего.
+enum OllamaServer {
+    static let local = "http://127.0.0.1:11434"
+    static let started = Notification.Name("slavator.ollamaStarted")
+
+    enum Outcome { case running, started, unavailable }
+
+    /// Куда Ollama ставят — тот же список, что у ядра. PATH у программы из
+    /// Finder урезан, и Homebrew в нём нет.
+    static var binary: URL? {
+        ["/Applications/Ollama.app/Contents/Resources/ollama", "/opt/homebrew/bin/ollama",
+         "/usr/local/bin/ollama", "/usr/bin/ollama"]
+            .map { URL(fileURLWithPath: $0) }
+            .first { FileManager.default.isExecutableFile(atPath: $0.path) }
+    }
+
+    static func isRunning() async -> Bool {
+        guard let url = URL(string: local + "/api/version") else { return false }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 2
+        let session = ModelTransport.session()
+        defer { session.invalidateAndCancel() }
+        guard let (_, response) = try? await session.data(for: request) else { return false }
+        return (response as? HTTPURLResponse)?.statusCode == 200
+    }
+
+    /// Поднять, если не отвечает. Сервер переживает закрытие Славатора —
+    /// так же, как у ядра: его ждут и диктовка, и следующая встреча.
+    static func start() async -> Outcome {
+        let host = AppConfiguration.environment()["MEETING_TRANSCRIBER_OLLAMA_HOST"] ?? local
+        guard host == local else { return .unavailable }
+        if await isRunning() { return .running }
+        guard let binary else { return .unavailable }
+        let process = Process()
+        process.executableURL = binary
+        process.arguments = ["serve"]
+        var env = ProcessInfo.processInfo.environment
+        env["OLLAMA_HOST"] = "127.0.0.1:11434"
+        process.environment = env
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return .unavailable }
+        for _ in 0..<30 {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            if await isRunning() { return .started }
+        }
+        return .unavailable
     }
 }
 

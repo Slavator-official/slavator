@@ -101,13 +101,13 @@ final class Chat {
         if conversations[index].messages.isEmpty {
             conversations[index].title = Conversation.name(from: prompt)
         }
-        conversations[index].messages.append(Message(role: .user, text: prompt, fromMemory: settings.chat_memory_enabled))
-        conversations[index].messages.append(Message(role: .model, text: "", fromMemory: settings.chat_memory_enabled))
+        conversations[index].messages.append(Message(role: .user, text: prompt, fromMemory: settings.usesMeetingMemory))
+        conversations[index].messages.append(Message(role: .model, text: "", fromMemory: settings.usesMeetingMemory))
         conversations[index].updated = Date()
         isAnswering = true
         save()
 
-        if settings.chat_memory_enabled {
+        if settings.usesMeetingMemory {
             recall(prompt, settings: settings, token: token, conversationID: conversationID)
             return
         }
@@ -363,8 +363,8 @@ struct ChatScreen: View {
             Spacer(minLength: 0)
             Image(systemName: "bubble.left.and.bubble.right")
                 .font(.system(size: 26)).foregroundStyle(p.faint)
-            Text(library.settings.chat_memory_enabled ? "Что вспомнить из встреч?" : "Спросите что угодно").font(Kind.strong(14.5))
-            Text(library.settings.chat_memory_enabled ? "Например: «Когда я говорил про перенос сроков?»" : (AppConfiguration.usesLocalModel ? "Ответит локальная модель" : "Используется настроенный адрес модели"))
+            Text(library.settings.usesMeetingMemory ? "Что вспомнить из встреч?" : "Спросите что угодно").font(Kind.strong(14.5))
+            Text(library.settings.usesMeetingMemory ? "Например: «Когда я говорил про перенос сроков?»" : (AppConfiguration.usesLocalModel ? "Ответит локальная модель" : "Используется настроенный адрес модели"))
                 .font(Kind.body(12.5)).foregroundStyle(p.muted)
             Spacer(minLength: 0)
         }
@@ -444,12 +444,15 @@ struct ChatScreen: View {
     private var composer: some View {
         Card {
             HStack {
-                Toggle("Искать в памяти встреч", isOn: Binding(
-                    get: { library.settings.chat_memory_enabled },
-                    set: { library.settings.chat_memory_enabled = $0; library.settings.save() }))
-                    .toggleStyle(.switch).disabled(chat.isAnswering)
+                // В боевой памяти встреч пока нет — переключать нечего.
+                if Edition.hasMemory {
+                    Toggle("Искать в памяти встреч", isOn: Binding(
+                        get: { library.settings.chat_memory_enabled },
+                        set: { library.settings.chat_memory_enabled = $0; library.settings.save() }))
+                        .toggleStyle(.switch).disabled(chat.isAnswering)
+                }
                 Spacer()
-                if library.settings.chat_memory_enabled {
+                if library.settings.usesMeetingMemory {
                     Menu("Ваш голос: " + (library.speakers.first(where: { $0.key == library.settings.my_profile_key })?.name ?? "не выбран")) {
                         Button("Не указывать свой голос") {
                             library.settings.my_profile_key = Settings.noVoice; library.settings.save()
@@ -461,7 +464,7 @@ struct ChatScreen: View {
                         .help("Выберите себя среди участников, чтобы искать свои реплики по вопросу «когда я говорил».")
                 }
             }.padding(.bottom, 10)
-            if library.settings.chat_memory_enabled {
+            if library.settings.usesMeetingMemory {
                 Text(needsOwnProfile
                      ? "Кого считать вами? Выберите свой голос выше, чтобы найти именно ваши слова."
                      : "Для вопросов «я говорил» выберите свой голос. В остальных вопросах поиск идёт по всем участникам.")
@@ -491,7 +494,7 @@ struct ChatScreen: View {
                         .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || needsOwnProfile)
                 }
             }
-            if !library.settings.chat_memory_enabled {
+            if !library.settings.usesMeetingMemory {
             HStack(spacing: 8) {
                 Toggle("Размышлять перед ответом", isOn: Bindable(chat).thinking)
                     .toggleStyle(.checkbox)
@@ -505,7 +508,7 @@ struct ChatScreen: View {
     }
 
     private var needsOwnProfile: Bool {
-        library.settings.chat_memory_enabled &&
+        library.settings.usesMeetingMemory &&
         !library.speakers.contains(where: { $0.key == library.settings.my_profile_key }) &&
         draft.range(of: #"\b(я|мне|мной|мною|мои|моих|мою|мой|моя|моё|мое)\b"#,
                     options: [.regularExpression, .caseInsensitive]) != nil
