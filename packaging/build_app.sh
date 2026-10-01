@@ -60,13 +60,13 @@ fi
 
 SOURCES=(Configuration.swift ProcessOutput.swift OutputVolume.swift Theme.swift Models.swift
          SpeakerMemory.swift SpeakerMemoryScreen.swift Ribbon.swift Player.swift
-         Pipeline.swift SystemAudio.swift LiveCapture.swift Mixdown.swift
+         Pipeline.swift SystemAudio.swift LiveCapture.swift Mixdown.swift Recovery.swift
          Dictation.swift Chat.swift Enroll.swift Screens.swift Doctor.swift
          DeskWidget.swift MeetingWatch.swift App.swift)
 for f in "${SOURCES[@]}"; do
     [[ -f "$SWIFT/$f" ]] || fail "нет исходника: $SWIFT/$f"
 done
-for f in meeting_transcriber_v25_1.py onnx_engine.py glossary_fix.py dictation_worker.py app_config.py speaker_memory.py speaker_links.py meeting_store.py speech_alignment.py audio_preview.py desktop_contract.json app_icon.png; do
+for f in meeting_transcriber_v25_1.py onnx_engine.py glossary_fix.py repeats.py dictation_worker.py app_config.py speaker_memory.py speaker_links.py meeting_store.py speech_alignment.py audio_preview.py desktop_contract.json app_icon.png; do
     [[ -f "$CORE/$f" ]] || fail "нет файла ядра: $CORE/$f"
 done
 
@@ -151,7 +151,7 @@ else
 fi
 
 say "Копирую ядро обработки"
-for module in meeting_transcriber_v25_1.py onnx_engine.py glossary_fix.py dictation_worker.py app_config.py speaker_memory.py speaker_links.py meeting_store.py meeting_chat.py speech_alignment.py audio_preview.py desktop_contract.json; do
+for module in meeting_transcriber_v25_1.py onnx_engine.py glossary_fix.py repeats.py dictation_worker.py app_config.py speaker_memory.py speaker_links.py meeting_store.py meeting_chat.py speech_alignment.py audio_preview.py desktop_contract.json; do
     cp "$CORE/$module" "$RESOURCES/core/"
 done
 cp -R "$CORE/speaker_service" "$RESOURCES/core/speaker_service"

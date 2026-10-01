@@ -24,6 +24,9 @@ struct MainScreen: View {
     @State private var speakers = 0
     @State private var setupStarted = false
     @State private var startingOllama = false
+    /// Записи, оборванные падением. Ищутся при показе главной и при
+    /// возвращении в программу — как и готовность.
+    @State private var interrupted: [InterruptedRecording] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -42,6 +45,8 @@ struct MainScreen: View {
             } else if let report = doctor.report, !report.ok {
                 updateCard(report)
             }
+
+            if let lost = interrupted.first, !capture.isRecording { recoveryCard(lost) }
 
             // Обе карточки одной высоты: разъехавшиеся по высоте блоки
             // сразу читаются как небрежность.
@@ -70,8 +75,9 @@ struct MainScreen: View {
             for: NSApplication.didBecomeActiveNotification)) { _ in
             ready = Paths.isReady
             doctor.refresh()
+            findInterrupted()
         }
-        .onAppear { doctor.refresh() }
+        .onAppear { doctor.refresh(); findInterrupted() }
         // Ollama поднялась после запуска программы — первая проверка могла
         // застать её ещё выключенной.
         .onReceive(NotificationCenter.default.publisher(for: OllamaServer.started)) { _ in
@@ -118,6 +124,63 @@ struct MainScreen: View {
     @ViewBuilder
     private func updateCard(_ report: Readiness) -> some View {
         if report.onlyOllamaStopped { ollamaCard } else { downloadCard(report) }
+    }
+
+    // запись оборвалась
+    //
+    // Дорожки пишутся на диск по ходу записи, поэтому после падения звук цел,
+    // а в заголовке файла — нулевая длина. Восстановление чинит заголовок,
+    // сводит дорожки, как при обычной остановке, и отдаёт встречу в обработку.
+    private func findInterrupted() {
+        interrupted = Edition.hasRecovery ? Recovery.interrupted() : []
+    }
+
+    private func recoveryCard(_ lost: InterruptedRecording) -> some View {
+        Card {
+            HStack(spacing: 10) {
+                Image(systemName: "exclamationmark.arrow.circlepath")
+                    .font(.system(size: 19)).foregroundStyle(p.warn).frame(width: 26)
+                Text("Запись встречи прервалась").font(Kind.strong(14.5))
+                Spacer()
+                Pill(text: "\(Int(lost.seconds / 60)) мин \(Int(lost.seconds) % 60) с", fg: p.warn, bg: p.warnBg)
+            }
+            Text("«\(lost.base)»: Славатор закрылся посреди записи, но звук сохранился. Его можно восстановить и расшифровать.")
+                .font(Kind.body(12.5)).foregroundStyle(p.muted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 6)
+            HStack(spacing: 10) {
+                Button("Восстановить и расшифровать") { restore(lost) }
+                    .buttonStyle(PrimaryButton(wide: true))
+                Button("Удалить") {
+                    let alert = NSAlert()
+                    alert.messageText = "Удалить прерванную запись?"
+                    alert.informativeText = "«\(lost.base)» удалится без возможности вернуть."
+                    alert.addButton(withTitle: "Удалить")
+                    alert.addButton(withTitle: "Отмена")
+                    if alert.runModal() == .alertFirstButtonReturn {
+                        Recovery.discard(lost)
+                        findInterrupted()
+                    }
+                }
+                .buttonStyle(QuietButton())
+            }
+            .padding(.top, 10)
+        }
+    }
+
+    private func restore(_ lost: InterruptedRecording) {
+        do {
+            let url = try Recovery.restore(lost, into: URL(fileURLWithPath: library.settings.recordingsFolder))
+            findInterrupted()
+            if pipeline.isRunning {
+                showAlert("Запись восстановлена",
+                          "«\(url.lastPathComponent)» лежит в папке записей. Другая встреча ещё обрабатывается — запустите эту, когда она закончится.")
+            } else {
+                pipeline.run(input: url, library: library)
+            }
+        } catch {
+            showAlert("Не удалось восстановить запись", error.localizedDescription)
+        }
     }
 
     // модели на месте, не запущена только Ollama
@@ -1884,12 +1947,19 @@ extension SettingsScreen {
                     .labelsHidden().toggleStyle(.switch)
             }
             SettingRow(title: "Модель",
-                       subtitle: "«Быстро» пишет на ходу, «точно» вставляет целиком через 3 секунды") {
-                Segmented(options: [("small", "Быстро"), ("large-v3-turbo", "Точно")],
+                       subtitle: Edition.hasParakeet
+                           ? "«Быстро» пишет на ходу, «точно» вставляет целиком через 3 секунды. Parakeet быстрее обоих, но путает англицизмы"
+                           : "«Быстро» пишет на ходу, «точно» вставляет целиком через 3 секунды") {
+                Segmented(options: Edition.hasParakeet
+                            ? [("small", "Быстро"), ("large-v3-turbo", "Точно"), ("parakeet-v3", "Parakeet")]
+                            : [("small", "Быстро"), ("large-v3-turbo", "Точно")],
                           selection: Binding(
-                            get: { library.settings.dictation_model },
-                            set: { library.settings.dictation_model = $0; library.settings.save() }))
-                    .frame(width: 210)
+                            get: { library.settings.dictationModel },
+                            set: {
+                                library.settings.dictation_model = $0; library.settings.save()
+                                dictation.refresh(settings: library.settings)
+                            }))
+                    .frame(width: Edition.hasParakeet ? 310 : 210)
             }
             SettingRow(title: "Что делает обработка",
                        subtitle: library.settings.dictation_tidy_hotkey == library.settings.dictation_hotkey

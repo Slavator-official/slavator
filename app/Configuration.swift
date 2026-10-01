@@ -35,6 +35,14 @@ enum Edition {
     /// боевая», а не «тестовая»: проверки собираются без бандла и должны
     /// видеть память. Докрутим — вернуть true.
     static var hasMemory: Bool { Bundle.main.bundleIdentifier != stableID }
+
+    /// Parakeet в диктовке пробуем в тестовой (01.10.2026): быстрее Whisper
+    /// в разы, но слабее на англицизмах — см. dictation_worker.py.
+    static var hasParakeet: Bool { Bundle.main.bundleIdentifier != stableID }
+
+    /// Восстановление записи, оборванной падением, — тоже сначала в
+    /// тестовой (01.10.2026), см. Recovery.swift.
+    static var hasRecovery: Bool { Bundle.main.bundleIdentifier != stableID }
 }
 
 /// Тот же контракт настроек и цветов, который читает Windows-интерфейс.
@@ -459,6 +467,12 @@ extension Settings {
     /// Искать ли в памяти встреч. Настройки у сборок общие, поэтому боевая
     /// свой выбор не переписывает, а просто не читает: памяти в ней нет.
     var usesMeetingMemory: Bool { chat_memory_enabled && Edition.hasMemory }
+
+    /// Модель диктовки для этой сборки. Настройки у сборок общие: выбранный
+    /// в тестовой Parakeet боевая читает как «Быстро», пока его не перенесли.
+    var dictationModel: String {
+        dictation_model == "parakeet-v3" && !Edition.hasParakeet ? "small" : dictation_model
+    }
 }
 
 /// Локальная Ollama поднимается вместе со Славатором.

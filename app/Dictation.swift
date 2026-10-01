@@ -90,12 +90,20 @@ final class Dictation {
     }
 
     private var workerStarted = false
+    /// С какой моделью поднят процесс. Сменили в настройках — поднимаем
+    /// заново: раньше новая модель включалась только после перезапуска.
+    private var workerModel = ""
 
     private func startWorker() {
+        if workerStarted, workerModel != settings.dictationModel {
+            worker.stop()
+            workerStarted = false
+        }
         guard !workerStarted else { return }
         workerStarted = true
+        workerModel = settings.dictationModel
         state = .starting
-        worker.start(model: settings.dictation_model,
+        worker.start(model: settings.dictationModel,
                      onReady: { [weak self] in
                          DispatchQueue.main.async { self?.state = .idle }
                      },

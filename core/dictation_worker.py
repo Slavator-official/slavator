@@ -25,8 +25,18 @@ import urllib.request
 from pathlib import Path
 
 from app_config import ollama_host, open_model
+from repeats import collapse_text
 
 MODEL = os.environ.get("SLAVATOR_DICTATION_MODEL", "small")
+# Parakeet TDT v3 — многоязычная модель NVIDIA, на которой распознаёт Meetily
+# (parakeet_engine). Движок sherpa-onnx у нас уже стоит ради голосов, а на
+# процессоре фраза в 10 секунд считается за полсекунды против трёх у Whisper
+# small (замер 01.10.2026, M3). Слабее Whisper на англицизмах — «бэклок»,
+# «стик халдером», — и подсказку терминов sherpa-onnx ей не передаёт.
+PARAKEET = "parakeet-v3"
+PARAKEET_DIR = Path(os.environ.get(
+    "MEETING_TRANSCRIBER_MODELS", str(Path.home() / "whisper-work" / "models"),
+)) / "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
 LANGUAGE = os.environ.get("SLAVATOR_DICTATION_LANGUAGE", "ru")
 GLOSSARY = Path(os.environ.get(
     "MEETING_TRANSCRIBER_GLOSSARY",
@@ -253,6 +263,32 @@ def tidy(text: str, level: str) -> tuple:
 
 # --------------------------------------------------------------------------
 
+def parakeet_listener():
+    """Parakeet через sherpa-onnx: путь к записи на входе, текст на выходе."""
+    import sherpa_onnx
+    from faster_whisper.audio import decode_audio
+
+    recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
+        encoder=str(PARAKEET_DIR / "encoder.int8.onnx"),
+        decoder=str(PARAKEET_DIR / "decoder.int8.onnx"),
+        joiner=str(PARAKEET_DIR / "joiner.int8.onnx"),
+        tokens=str(PARAKEET_DIR / "tokens.txt"),
+        num_threads=4, model_type="nemo_transducer",
+        # modified_beam_search с этой моделью роняет процесс (sherpa-onnx
+        # 1.13.6), а без него подсказку терминов не передать.
+        decoding_method="greedy_search",
+    )
+
+    def listen(path: str) -> str:
+        stream = recognizer.create_stream()
+        stream.accept_waveform(16000, decode_audio(path, sampling_rate=16000))
+        recognizer.decode_stream(stream)
+        text = stream.result.text.strip()
+        return "" if is_junk(text) else text
+
+    return listen
+
+
 def main() -> int:
     try:
         from faster_whisper import WhisperModel
@@ -261,7 +297,10 @@ def main() -> int:
         return 1
 
     try:
-        model = WhisperModel(MODEL, device="cpu", compute_type="int8")
+        if MODEL == PARAKEET:
+            listen = parakeet_listener()
+        else:
+            model = WhisperModel(MODEL, device="cpu", compute_type="int8")
     except Exception as exc:  # noqa: BLE001 - Swift покажет текст как есть
         send({"error": f"не удалось загрузить модель {MODEL}: {exc}"})
         return 1
@@ -281,6 +320,29 @@ def main() -> int:
         + ", ".join(glossary[:48]) + "."
         if glossary else None
     )
+
+    if MODEL != PARAKEET:
+        def listen(path: str) -> str:
+            segments, _info = model.transcribe(
+                path,
+                language=None if LANGUAGE in ("", "auto") else LANGUAGE,
+                beam_size=1,                    # скорость важнее полутонов
+                condition_on_previous_text=False,
+                vad_filter=False,               # см. ядро: VAD терял речь
+                # Термины называем заранее. Без этого быстрая модель
+                # пишет заимствования латиницей - «Backlock» вместо
+                # «бэклог», - а починить это потом почти нечем:
+                # обратной транслитерации у заимствований нет.
+                hotwords=hotwords,
+                initial_prompt=prompt,
+            )
+            # Фильтруем ПОКУСОЧНО: выдумка приходит отдельным отрезком,
+            # и склеенную строку отсеять целиком уже нельзя, не потеряв
+            # настоящую речь рядом с ней.
+            return " ".join(
+                piece for piece in (s.text.strip() for s in segments)
+                if not is_junk(piece)
+            ).strip()
 
     # Прогрев в стороне: он не должен задерживать готовность диктовки.
     # Warm only when the user requests tidy mode; conserve RAM.
@@ -306,29 +368,12 @@ def main() -> int:
                 send({"id": command.get("id"), "text": ""})
                 continue
             try:
-                segments, _info = model.transcribe(
-                    path,
-                    language=None if LANGUAGE in ("", "auto") else LANGUAGE,
-                    beam_size=1,                    # скорость важнее полутонов
-                    condition_on_previous_text=False,
-                    vad_filter=False,               # см. ядро: VAD терял речь
-                    # Термины называем заранее. Без этого быстрая модель
-                    # пишет заимствования латиницей - «Backlock» вместо
-                    # «бэклог», - а починить это потом почти нечем:
-                    # обратной транслитерации у заимствований нет.
-                    hotwords=hotwords,
-                    initial_prompt=prompt,
-                )
-                # Фильтруем ПОКУСОЧНО: выдумка приходит отдельным отрезком,
-                # и склеенную строку отсеять целиком уже нельзя, не потеряв
-                # настоящую речь рядом с ней.
-                text = " ".join(
-                    piece for piece in (s.text.strip() for s in segments)
-                    if not is_junk(piece)
-                ).strip()
+                text = listen(path)
             except Exception as exc:  # noqa: BLE001
                 send({"id": command.get("id"), "text": "", "error": str(exc)[:200]})
                 continue
+            # Зацикливание внутри фразы — «ну ну ну ну» — см. repeats.py.
+            text = collapse_text(text)[0]
             send({"id": command.get("id"), "text": repair(text, glossary, fixer)})
             continue
 
