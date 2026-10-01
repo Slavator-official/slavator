@@ -912,14 +912,11 @@ private final class FittingHost<Root: View>: NSHostingView<Root> {
 
     required init(rootView: Root) {
         super.init(rootView: rootView)
-        // Размер окна ведёт только fit(). По умолчанию NSHostingView ещё и
-        // сам ставит окну наименьший и наибольший размер и подгоняет окно под
-        // них — у одного размера два хозяина. 30.09.2026 они перетянули
-        // плашку на отпускании клавиши: «Дописываю…» ужимает её, SwiftUI и
-        // fit() меняли размер по очереди, и AppKit уронил программу на
-        // пересчёте раскладки — у окна из пары видов предел два прохода за
-        // кадр. Пустой набор не годится: без .intrinsicContentSize
-        // fittingSize — ноль, и плашка перестаёт подгоняться (проверено).
+        // Наименьший и наибольший размер окна SwiftUI здесь не ставит:
+        // размер плашки ведёт fit(). Пустой набор не годится — без
+        // .intrinsicContentSize fittingSize ноль, и плашка не подгоняется.
+        // Одного этого мало: см. Indicator.show, почему хост вложен в
+        // контейнер.
         sizingOptions = [.intrinsicContentSize]
     }
     @available(*, unavailable)
@@ -970,7 +967,19 @@ private final class Indicator: NSObject, NSWindowDelegate {
                                  backing: .buffered, defer: false)
             let host = FittingHost(rootView: IndicatorView(dictation: dictation))
             host.onFit = { [weak self] size in self?.fit(size) }
-            window.contentView = host
+            // Хост вложен в пустой вид, а не стоит содержимым окна. Хосту-
+            // содержимому SwiftUI сам меняет размер окна (windowDidLayout →
+            // updateAnimatedWindowSize) — при любых sizingOptions, — и вместе
+            // с fit() у размера два хозяина. 30.09 и 01.10.2026 они перетянули
+            // плашку на «Дописываю…», и AppKit уронил программу на пересчёте
+            // раскладки: у окна из пары видов предел два прохода за кадр.
+            // Стенд с жизненным циклом SwiftUI App падал так за секунды;
+            // вложенный хост — ни разу за минуту, SwiftUI окно не трогал.
+            let box = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 46))
+            host.frame = box.bounds
+            host.autoresizingMask = [.width, .height]
+            box.addSubview(host)
+            window.contentView = box
             self.host = host
             window.isOpaque = false
             window.backgroundColor = .clear
