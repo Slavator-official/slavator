@@ -60,8 +60,31 @@ final class Dictation {
     /// Клавишу отпустили, пока предыдущий запрос не вернулся.
     private var finalPending = false
     private var watchdog: Timer?
-    /// Ждёт, не пора ли убрать плашку: печатать нечего, а обработка идёт.
+    /// Куда диктуют: приложение и окно, активные в момент нажатия клавиши.
+    ///
+    /// Печать идёт не в момент речи, а через секунды, когда вернётся
+    /// расшифровка, и синтезированные нажатия достаются тому, кто активен
+    /// в эту секунду. Переключился человек на другое окно, пока дописывается,
+    /// — и надиктованное уходило туда.
+    private var owner: NSRunningApplication?
+    private var ownerWindow: AXUIElement?
+    /// Текст, который ждёт возврата окна.
+    private var outbox = ""
+    /// Окно уже возвращаем — ждём, пока оно выйдет вперёд.
+    private var restoring = false
+    /// Окно вернуть не удалось: остаток этой диктовки идёт в буфер обмена,
+    /// а не в чужое окно.
+    private var missed = ""
+    /// Закончить диктовку, когда очередь на печать опустеет.
+    private var afterDelivery: (() -> Void)?
+    /// Надпись на плашке после диктовки вместо «Готово».
+    private(set) var notice: String?
+    /// Когда отпустили клавишу — для записи в лог, сколько шла дописка.
+    private var releasedAt = Date()
+    /// Сворачивает «Дописываю…» в одно колесико.
     private var plate: Timer?
+    /// Надпись на обработке уже прочитана — остаётся только колесико.
+    private(set) var compact = false
     private var ticker: Timer?
     private var clock: Timer?
     private var settings = Settings.load()
@@ -171,8 +194,11 @@ final class Dictation {
         // обработка выглядела сломанной.
         if mode == .tidy { worker.warm() }
         self.mode = mode
-        lastText = ""; typed = ""; spoken = ""; seconds = 0
+        lastText = ""; typed = ""; spoken = ""; seconds = 0; compact = false
         targetName = Dictation.frontmostName()
+        owner = NSWorkspace.shared.frontmostApplication
+        ownerWindow = owner.flatMap { Focus.window(of: $0) }
+        outbox = ""; missed = ""; restoring = false; afterDelivery = nil; notice = nil
         state = .listening
         onBusyChanged?(true)
 
@@ -213,13 +239,12 @@ final class Dictation {
         clock?.invalidate(); clock = nil
         state = .finishing
         level = 0
+        releasedAt = Date()
+        Dictation.logHotkey("отпустили клавишу, запрос в полёте: \(pending ? "да" : "нет")")
         // Обработка занимает секунды, и всё это время плашка стоит над тем
         // местом, куда человек уже пишет дальше: разрешаем оттащить её.
         indicator?.allowMove(true)
-        // Отсчёт до исчезновения плашки идёт с отпускания клавиши, а каждая
-        // напечатанная порция его продлевает: плашка живёт, пока печатает,
-        // и уходит через секунду тишины.
-        holdPlate()
+        compactPlate()
         recorder?.stop()
         // Сторож на случай, если процесс распознавания промолчит: висеть
         // с плашкой «Дописываю…» бесконечно нельзя.
@@ -267,6 +292,8 @@ final class Dictation {
                 guard let self else { return }
                 self.pending = false
                 if final {
+                    Dictation.logHotkey(String(format: "финальный проход вернулся через %.1f с, %d знаков",
+                                               Date().timeIntervalSince(self.releasedAt), text.count))
                     self.commit(text)
                     self.finish(raw: self.spoken + text)
                     return
@@ -352,10 +379,80 @@ final class Dictation {
     private func commit(_ target: String) {
         guard mode == .raw, target.count > typed.count else { return }
         let delta = String(target.dropFirst(typed.count))
-        targetName = Dictation.frontmostName()
-        typer.type(delta)
+        deliver(delta)
         typed = target
-        holdPlate()
+    }
+
+    /// Отдать текст туда, где диктовали.
+    ///
+    /// Окно сменилось — сначала возвращаем его и печатаем уже туда. Не
+    /// вышло — текст уходит в буфер обмена: случайная реплика в чужой
+    /// переписке хуже ненапечатанной. Пока окно возвращается, куски копятся
+    /// в очереди, иначе порядок сломался бы на первой задержке.
+    private func deliver(_ text: String) {
+        outbox += text
+        flush()
+    }
+
+    /// Выполнить, когда всё напечатано: плашка не должна говорить «Готово»,
+    /// пока текст ещё ждёт своего окна.
+    private func whenDelivered(_ next: @escaping () -> Void) {
+        afterDelivery = next
+        flush()
+    }
+
+    private func flush() {
+        guard !restoring else { return }
+        if !outbox.isEmpty {
+            if !missed.isEmpty || owner?.isTerminated == true {
+                handOverClipboard()
+            } else if let owner, !Focus.isAt(owner, ownerWindow) {
+                restoring = true
+                Dictation.logHotkey("окно сменилось на \(Dictation.frontmostName()), возвращаю \(owner.localizedName ?? "")")
+                Focus.restore(owner, ownerWindow)
+                waitForFocus(tries: 5)
+                return
+            } else {
+                targetName = Dictation.frontmostName()
+                typer.type(outbox)
+                outbox = ""
+            }
+        }
+        if let next = afterDelivery {
+            afterDelivery = nil
+            next()
+        }
+    }
+
+    /// Окно выходит вперёд не мгновенно: печать сразу после запроса ушла бы
+    /// ещё прежнему адресату. Проверяем несколько раз за секунду.
+    private func waitForFocus(tries: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self, self.restoring else { return }
+            if let owner = self.owner, Focus.isAt(owner, self.ownerWindow) {
+                self.restoring = false
+                self.flush()
+            } else if tries > 1 {
+                self.waitForFocus(tries: tries - 1)
+            } else {
+                self.restoring = false
+                self.handOverClipboard()
+                self.flush()
+            }
+        }
+    }
+
+    /// Окно не вернулось: весь несданный текст этой диктовки — в буфер.
+    ///
+    /// Диктовка при этом заканчивается обычным порядком и остаётся готовой
+    /// к следующему нажатию: одна осечка не должна её выключать.
+    private func handOverClipboard() {
+        missed += outbox
+        outbox = ""
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(missed, forType: .string)
+        Dictation.logHotkey("окно не вернулось, текст в буфере: \(missed.count) знаков")
+        notice = "Текст в буфере — вставьте ⌘V"
     }
 
     /// Имя приложения, которому достанутся нажатия.
@@ -363,19 +460,18 @@ final class Dictation {
         NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
     }
 
-    /// Убрать плашку, если печатать уже нечего, а обработка ещё идёт.
+    /// Через полторы секунды обработки свернуть надпись в колесико.
     ///
-    /// После отпускания клавиши остаётся последний проход распознавания —
-    /// на длинной фразе это до десятка секунд. Текст к этому времени уже
-    /// напечатан предыдущими проходами, и плашка всё это время просто
-    /// стояла над чужим окном с надписью «Дописываю…». Теперь она уходит
-    /// через секунду после последней напечатанной порции; сама
-    /// обработка идёт как шла, и остаток допечатается без неё.
-    private func holdPlate() {
+    /// Раньше плашка уходила через секунду после последней напечатанной
+    /// порции, хотя последний проход распознавания ещё шёл, — и было не
+    /// понять, допечатается остаток или потерялся. Теперь плашка стоит до
+    /// конца и сменяется на «Готово». А чтобы не занимать место над чужим
+    /// окном, «Дописываю…» показываем только сначала, дальше — колесико.
+    private func compactPlate() {
         plate?.invalidate()
-        plate = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { [weak self] _ in
+        plate = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
             guard let self, case .finishing = self.state else { return }
-            self.indicator?.hide()
+            self.compact = true
         }
     }
 
@@ -407,29 +503,32 @@ final class Dictation {
             worker.tidy(text: raw, level: settings.dictation_level) { [weak self] text, ok in
                 DispatchQueue.main.async {
                     guard let self else { return }
-                    self.targetName = Dictation.frontmostName()
-                    self.typer.type(text)
+                    self.deliver(text)
                     self.typed = text
                     if !ok && !self.tidyUnavailableShown {
                         self.tidyUnavailableShown = true
                         self.warnNoTidy()
                     }
-                    self.done()
+                    self.whenDelivered { self.done() }
                 }
             }
         } else {
-            done()
+            whenDelivered { [weak self] in self?.done() }
         }
     }
 
     private func done() {
+        Dictation.logHotkey(String(format: "готово через %.1f с после отпускания",
+                                   Date().timeIntervalSince(releasedAt)))
         watchdog?.invalidate(); watchdog = nil
         plate?.invalidate(); plate = nil
         finalPending = false
+        compact = false
         state = .idle
         level = 0
         onBusyChanged?(false)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+        // Про буфер обмена надо успеть прочитать — держим дольше «Готово».
+        DispatchQueue.main.asyncAfter(deadline: .now() + (notice == nil ? 1.2 : 3.5)) { [weak self] in
             if case .idle = self?.state { self?.indicator?.hide() }
         }
     }
@@ -686,6 +785,57 @@ private final class Recorder {
     }
 }
 
+// MARK: - Окно, куда диктуют
+
+/// Узнать и вернуть окно, в которое диктовали.
+///
+/// Возвращаем через Accessibility, а не через activate(): начиная с macOS 14
+/// система вправе проигнорировать activate() из фонового приложения, и
+/// прошлая попытка так и осекалась. Доступ к Accessibility у диктовки есть
+/// всегда — без него она не печатает вовсе.
+private enum Focus {
+    static func window(of app: NSRunningApplication) -> AXUIElement? {
+        element(handle(app), kAXFocusedWindowAttribute)
+    }
+
+    /// Занятое приложение отвечает на запросы Accessibility не сразу, а
+    /// ждать его по умолчанию система готова секунды — на главном потоке.
+    private static func handle(_ app: NSRunningApplication) -> AXUIElement {
+        let ax = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(ax, 0.3)
+        return ax
+    }
+
+    /// Нажатия сейчас достанутся этому окну.
+    ///
+    /// Сравниваем окна, а не поля ввода: поле в браузере пересоздаётся при
+    /// каждой перерисовке страницы, и сравнение по нему видело бы подмену
+    /// там, где её нет. Внутри окна приложение само помнит, где стоял курсор.
+    static func isAt(_ app: NSRunningApplication, _ window: AXUIElement?) -> Bool {
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier
+        else { return false }
+        guard let window, let now = Self.window(of: app) else { return true }
+        return CFEqual(now, window)
+    }
+
+    static func restore(_ app: NSRunningApplication, _ window: AXUIElement?) {
+        let ax = handle(app)
+        AXUIElementSetAttributeValue(ax, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+        if let window {
+            AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        }
+        app.activate()
+    }
+
+    private static func element(_ of: AXUIElement, _ attribute: String) -> AXUIElement? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(of, attribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return (value as! AXUIElement)
+    }
+}
+
 // MARK: - Синтез ввода
 
 /// Печатает текст туда, где стоит курсор.
@@ -905,40 +1055,19 @@ private final class Hotkey {
 
 // MARK: - Плашка поверх окон
 
-/// Хост, который подгоняет окно под содержимое.
+/// Хост плашки: сам ведёт перетаскивание.
 ///
-/// Само по себе окно за SwiftUI не следит: надпись сменилась, вид стал
-/// короче, а окно осталось прежней ширины. Панель из NSHostingController
-/// делала бы это сама, но такая панель не рисуется вовсе — проверено
-/// рядом на экране: окно есть, isVisible истинно, а на снимке пусто.
-/// Поэтому окно остаётся обычным, безрамочным, а размер ему сообщает сам
-/// вид — после каждой раскладки.
-private final class FittingHost<Root: View>: NSHostingView<Root> {
-    var onFit: ((NSSize) -> Void)?
+/// На isMovableByWindowBackground не полагаемся: до окна нажатие может и не
+/// дойти — содержимое рисует SwiftUI, и оно вправе забрать событие себе.
+/// performDrag ведёт окно до отпускания кнопки.
+private final class DragHost<Root: View>: NSHostingView<Root> {
     /// Плашку разрешено тащить.
     var movable = false
 
-    required init(rootView: Root) {
-        super.init(rootView: rootView)
-        // Наименьший и наибольший размер окна SwiftUI здесь не ставит:
-        // размер плашки ведёт fit(). Пустой набор не годится — без
-        // .intrinsicContentSize fittingSize ноль, и плашка не подгоняется.
-        // Одного этого мало: см. Indicator.show, почему хост вложен в
-        // контейнер.
-        sizingOptions = [.intrinsicContentSize]
-    }
+    required init(rootView: Root) { super.init(rootView: rootView) }
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("не используется") }
 
-    override func layout() {
-        super.layout()
-        onFit?(fittingSize)
-    }
-
-    /// Перетаскивание запускаем сами, а не полагаемся на
-    /// isMovableByWindowBackground: до окна нажатие может и не дойти —
-    /// содержимое плашки рисует SwiftUI, и оно вправе забрать событие себе.
-    /// performDrag ведёт окно до отпускания кнопки.
     override func mouseDown(with event: NSEvent) {
         guard movable, let window else {
             super.mouseDown(with: event)
@@ -948,42 +1077,60 @@ private final class FittingHost<Root: View>: NSHostingView<Root> {
     }
 }
 
+/// Видна ли плашка — от этого флага SwiftUI проигрывает появление и уход.
+@Observable
+private final class PlateState {
+    var shown = false
+    /// Размер самой пилюли — по нему окно решает, забирать ли щелчок.
+    var pill: CGSize = .zero
+}
+
 /// Показывает, что микрофон слышит и что уже напечатано.
 ///
-/// Плашка висит поверх всех окон, а значит стоит на чужом пути. Отсюда два
-/// правила. Ширина — по содержимому: фиксированные 360 точек оставались
-/// наполовину пустыми и закрывали собой строку ввода. Место — впритык над
-/// доком, ниже всего, что можно закрыть.
+/// Плашка висит поверх всех окон, а значит стоит на чужом пути: место ей —
+/// впритык над доком, ниже всего, что можно закрыть.
 ///
-/// А на время обработки плашку можно оттащить мышью: расшифровка идёт
-/// секунды, и всё это время плашка стоит над тем местом, куда человек уже
-/// пишет дальше. Сдвиг действует до конца этой диктовки: следующая снова
-/// появится по центру. Запоминать сдвинутое место означало бы, что плашка
-/// навсегда уезжает туда, куда её один раз убрали с чужого текста — а
-/// убирают её от помехи, а не выбирают ей новый дом.
-private final class Indicator: NSObject, NSWindowDelegate {
+/// Окно у плашки постоянное и прозрачное, а видимая пилюля внутри меняет
+/// ширину сама. Раньше окно подгонялось под содержимое, и это давало две
+/// беды: SwiftUI менял надпись мгновенно, а окно догоняло его следующей
+/// раскладкой — пилюля обрезалась и прыгала; а собственный сдвиг окна к
+/// центру засчитывался как перетаскивание мышью, и после первой же смены
+/// надписи плашка переставала центрироваться. Теперь окно не двигается
+/// вовсе, пилюля всегда по его середине, и все переходы — пружиной SwiftUI.
+/// Прозрачная часть окна щелчков забирать не должна, а система сама этого
+/// не различает: окно с выключенным ignoresMouseEvents ловит нажатия всей
+/// площадью. Поэтому на обработке окно ловит мышь, только пока она над
+/// самой пилюлей.
+///
+/// На время обработки плашку можно оттащить мышью: расшифровка идёт
+/// секунды, и плашка может стоять над тем, куда человек пишет дальше.
+/// Сдвиг действует до конца этой диктовки, следующая снова появится по
+/// центру: убирают её от помехи, а не выбирают ей новый дом.
+private final class Indicator: NSObject {
+    /// Окно с запасом: самая длинная надпись и тень пилюли.
+    private static let size = NSSize(width: 420, height: 80)
+    /// Сколько окна ниже пилюли — место под тень.
+    private static let below: CGFloat = 12
+
     private var panel: NSPanel?
-    /// Плашку оттащили в этой диктовке — не возвращаем её под курсором.
-    private var moved = false
-    private var host: FittingHost<IndicatorView>?
+    private var host: DragHost<IndicatorView>?
+    private let plate = PlateState()
+    private var hiding: DispatchWorkItem?
+    /// Следит, над пилюлей ли мышь, пока плашку можно тащить.
+    private var hover: Timer?
 
     func show(_ dictation: Dictation) {
-        moved = false
+        hiding?.cancel(); hiding = nil
         if panel == nil {
-            let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 200, height: 46),
+            let window = NSPanel(contentRect: NSRect(origin: .zero, size: Self.size),
                                  styleMask: [.borderless, .nonactivatingPanel],
                                  backing: .buffered, defer: false)
-            let host = FittingHost(rootView: IndicatorView(dictation: dictation))
-            host.onFit = { [weak self] size in self?.fit(size) }
-            // Хост вложен в пустой вид, а не стоит содержимым окна. Хосту-
-            // содержимому SwiftUI сам меняет размер окна (windowDidLayout →
-            // updateAnimatedWindowSize) — при любых sizingOptions, — и вместе
-            // с fit() у размера два хозяина. 30.09 и 01.10.2026 они перетянули
-            // плашку на «Дописываю…», и AppKit уронил программу на пересчёте
-            // раскладки: у окна из пары видов предел два прохода за кадр.
-            // Стенд с жизненным циклом SwiftUI App падал так за секунды;
-            // вложенный хост — ни разу за минуту, SwiftUI окно не трогал.
-            let box = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 46))
+            let host = DragHost(rootView: IndicatorView(dictation: dictation, plate: plate,
+                                                        below: Self.below))
+            // Хост вложен в пустой вид, а не стоит содержимым окна: хосту-
+            // содержимому SwiftUI сам меняет размер окна, и на смене надписи
+            // это роняло программу (30.09 и 01.10.2026, см. ad2dbc7).
+            let box = NSView(frame: NSRect(origin: .zero, size: Self.size))
             host.frame = box.bounds
             host.autoresizingMask = [.width, .height]
             box.addSubview(host)
@@ -991,85 +1138,145 @@ private final class Indicator: NSObject, NSWindowDelegate {
             self.host = host
             window.isOpaque = false
             window.backgroundColor = .clear
-            window.hasShadow = true
+            // Тень рисует сама пилюля: системная тень считается по форме
+            // окна один раз и не поспевает за анимацией.
+            window.hasShadow = false
             window.level = .statusBar
-            // Пока идёт диктовка, щелчки проходят насквозь: плашка не должна
-            // перехватывать попадание по кнопке чужого окна под ней.
-            window.ignoresMouseEvents = true
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-            window.delegate = self
             panel = window
         }
+        allowMove(false)
         center()
         panel?.orderFrontRegardless()
+        // Флаг — уже в видимом окне, иначе появление проиграется невидимо.
+        DispatchQueue.main.async { self.plate.shown = true }
     }
 
     /// Разрешить таскать плашку мышью. Включается на время обработки.
     ///
     /// Панель не становится ключевой и не выводит программу вперёд
     /// (nonactivatingPanel), поэтому окно, в которое сейчас печатается
-    /// текст, фокуса не теряет.
+    /// текст, фокуса не теряет. Пока идёт диктовка, щелчки проходят насквозь:
+    /// плашка не должна перехватывать попадание по кнопке чужого окна.
     func allowMove(_ allowed: Bool) {
-        panel?.ignoresMouseEvents = !allowed
-        panel?.isMovableByWindowBackground = allowed
         host?.movable = allowed
+        hover?.invalidate(); hover = nil
+        panel?.ignoresMouseEvents = true
+        guard allowed else { return }
+        hover = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
+            guard let self, let panel = self.panel else { return }
+            let size = self.plate.pill
+            let rect = NSRect(x: panel.frame.midX - size.width / 2,
+                              y: panel.frame.minY + Self.below,
+                              width: size.width, height: size.height)
+            panel.ignoresMouseEvents = !rect.contains(NSEvent.mouseLocation)
+        }
     }
 
-    func hide() { panel?.orderOut(nil) }
-
-    /// Перетащили — держим это место до конца диктовки.
-    func windowDidMove(_ notification: Notification) {
-        guard host?.movable == true else { return }
-        moved = true
+    /// Проиграть уход и убрать окно, когда пилюля растает.
+    func hide() {
+        plate.shown = false
+        allowMove(false)
+        let work = DispatchWorkItem { [weak self] in self?.panel?.orderOut(nil) }
+        hiding?.cancel()
+        hiding = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
     }
 
-    /// Подогнать окно под содержимое и поставить на место.
-    ///
-    /// Порог в половину точки — против бесконечного круга: смена размера
-    /// вызывает новую раскладку, а та снова придёт сюда.
-    private func fit(_ size: NSSize) {
-        guard let panel, size.width > 1, size.height > 1 else { return }
-        guard abs(panel.frame.width - size.width) > 0.5
-                || abs(panel.frame.height - size.height) > 0.5 else { return }
-        panel.setContentSize(size)
-        // Сдвинутую плашку не трогаем: она стоит там, куда её отвели, и
-        // прыжок в центр на смене надписи выглядел бы поломкой.
-        if !moved { center() }
-    }
-
-    /// Плашка стоит по центру экрана, впритык над доком.
+    /// Пилюля стоит по центру экрана, впритык над доком.
     private func center() {
         guard let panel, let screen = NSScreen.main else { return }
         let frame = screen.visibleFrame
-        panel.setFrameOrigin(NSPoint(x: frame.midX - panel.frame.width / 2,
-                                     y: frame.minY + 12))
+        panel.setFrameOrigin(NSPoint(x: frame.midX - Self.size.width / 2,
+                                     y: frame.minY + 12 - Self.below))
     }
 }
 
 private struct IndicatorView: View {
     @Bindable var dictation: Dictation
+    @Bindable var plate: PlateState
+    let below: CGFloat
 
-    private var label: String {
+    /// Чем отличаются состояния на вид.
+    private enum Look: Equatable { case listening, finishing, spinner, done, other }
+
+    /// Какой вид сейчас разложен в пилюле.
+    ///
+    /// Смена вида идёт в два шага: сначала гаснет то, что уходит, потом
+    /// пилюля меняет ширину. Когда оба шага шли разом, пилюля успевала
+    /// сжаться, а надпись ещё таяла поверх её края — выглядело поломкой.
+    @State private var shape: Look = .other
+    /// К какому виду идём: по нему гаснет уходящее.
+    @State private var goal: Look = .other
+
+    private var look: Look {
         switch dictation.state {
+        case .listening: return .listening
+        case .finishing: return dictation.compact ? .spinner : .finishing
+        case .idle:      return .done
+        default:         return .other
+        }
+    }
+
+    private func label(_ look: Look) -> String {
+        switch look {
         // Пока слушаем, надпись — имя адресата: что запись идёт, видно по
         // красной точке и столбикам громкости, а куда уйдёт текст — из
-        // плашки было не узнать никак.
-        case .listening:  return dictation.targetName.isEmpty ? "Слушаю" : dictation.targetName
-        case .finishing:  return "Дописываю…"
-        case .idle:       return "Готово"
-        default:          return "Диктовка"
+        // плашки было не узнать никак. .fixedSize() для обрезки не годится —
+        // тянет SwiftUICore из macOS 15, поэтому длинное имя режем сами.
+        case .listening:
+            let name = dictation.targetName
+            if name.isEmpty { return "Слушаю" }
+            return name.count > 28 ? String(name.prefix(27)) + "…" : name
+        case .finishing, .spinner: return "Дописываю…"
+        case .done:                return dictation.notice ?? "Готово"
+        case .other:               return "Диктовка"
         }
     }
 
     var body: some View {
+        ZStack(alignment: .bottom) {
+            if plate.shown {
+                pill
+                    .transition(.asymmetric(
+                        insertion: .scale(scale: 0.5, anchor: .bottom)
+                            .combined(with: .opacity)
+                            .combined(with: .offset(y: 10)),
+                        removal: .scale(scale: 0.7, anchor: .bottom)
+                            .combined(with: .opacity)))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .padding(.bottom, below)
+        .animation(.spring(response: 0.34, dampingFraction: 0.72), value: plate.shown)
+        .onAppear { shape = look; goal = look }
+        .onChange(of: look) { _, next in
+            // Невидимой пилюле переходы ни к чему: следующая диктовка должна
+            // появиться сразу в своём виде, а не доигрывать прошлый.
+            guard plate.shown else { shape = next; goal = next; return }
+            withAnimation(.easeOut(duration: 0.14)) { goal = next }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
+                withAnimation(.spring(response: 0.38, dampingFraction: 0.8)) { shape = goal }
+            }
+        }
+    }
+
+    private var pill: some View {
         HStack(spacing: 11) {
-            Circle()
-                .fill(dictation.state == .listening ? Color(hex: 0xE0705F) : Color(hex: 0x19C37D))
-                .frame(width: 9, height: 9)
+            if shape == .finishing || shape == .spinner {
+                Spinner()
+                    .transition(.scale(scale: 0.4).combined(with: .opacity))
+            } else {
+                Circle()
+                    .fill(shape == .listening || dictation.notice != nil
+                          ? Color(hex: 0xE0705F) : Color(hex: 0x19C37D))
+                    .frame(width: 9, height: 9)
+                    .transition(.scale(scale: 0.4).combined(with: .opacity))
+            }
             // Столбики — это громкость микрофона. После отпускания клавиши
             // микрофон уже выключен, они стояли бы неподвижно и занимали
             // место: на обработке показываем только надпись.
-            if dictation.state == .listening {
+            if shape == .listening {
                 HStack(alignment: .bottom, spacing: 2.5) {
                     ForEach(0..<6, id: \.self) { i in
                         RoundedRectangle(cornerRadius: 1.5)
@@ -1078,24 +1285,57 @@ private struct IndicatorView: View {
                     }
                 }
                 .frame(height: 17)
+                .opacity(goal == .listening ? 1 : 0)
+                .transition(.opacity)
             }
-            Text(label).font(.system(size: 13, weight: .medium))
-            if dictation.state == .listening {
+            // Надпись дописывания читается за секунду, дальше хватает колесика:
+            // пилюля сжимается в круг и закрывает собой меньше чужого окна.
+            if shape != .spinner {
+                Text(label(shape))
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+                    .opacity(goal != .spinner && label(goal) == label(shape) ? 1 : 0)
+                    .transition(.opacity)
+            }
+            if shape == .listening {
                 Text(String(format: "%d:%02d", Int(dictation.seconds) / 60, Int(dictation.seconds) % 60))
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(.secondary)
+                    .opacity(goal == .listening ? 1 : 0)
+                    .transition(.opacity)
             }
         }
-        // Ширина ровно по содержимому: на «Дописываю…» плашка короче, чем
-        // на «Слушаю» с таймером, и закрывает собой меньше чужого окна.
         .padding(.horizontal, 16)
         .frame(height: 46)
         .background(
-            RoundedRectangle(cornerRadius: 23)
+            Capsule()
                 .fill(Color(hex: 0x0C1826))
-                .overlay(RoundedRectangle(cornerRadius: 23).stroke(Color(hex: 0x1E3350), lineWidth: 1))
+                .overlay(Capsule().stroke(Color(hex: 0x1E3350), lineWidth: 1))
+                .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
         )
         .foregroundStyle(Color(hex: 0xF2F6FC))
+        .background(GeometryReader { geometry in
+            Color.clear
+                .onAppear { plate.pill = geometry.size }
+                .onChange(of: geometry.size) { _, size in plate.pill = size }
+        })
+    }
+
+    /// Белая дуга вместо системного колесика: то на тёмной пилюле серое и
+    /// едва читается. Угол считается от часов, а не анимацией SwiftUI —
+    /// иначе вращение сбивалось бы пружинами смены состояний.
+    private struct Spinner: View {
+        var body: some View {
+            TimelineView(.animation) { context in
+                let turn = context.date.timeIntervalSinceReferenceDate
+                    .truncatingRemainder(dividingBy: 0.9) / 0.9
+                Circle()
+                    .trim(from: 0.12, to: 0.82)
+                    .stroke(Color(hex: 0xF2F6FC), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                    .frame(width: 14, height: 14)
+                    .rotationEffect(.degrees(turn * 360))
+            }
+        }
     }
 
     private func barHeight(_ index: Int) -> CGFloat {

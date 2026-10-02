@@ -66,6 +66,9 @@ JUNK = [
     r"dimatorzok",
     r"amara\.org",
     r"^\W*\[?\s*(музыка|аплодисменты|смех|тишина)\s*\]?\W*$",
+    # Начало нашей же подсказки — модель повторяет её на тишине.
+    r"рабочая\s+диктовка",
+    r"в\s+речи\s+встречаются\s+термины",
 ]
 JUNK_RE = [re.compile(x, re.IGNORECASE) for x in JUNK]
 
@@ -100,6 +103,46 @@ def load_glossary() -> list:
     except OSError:
         return []
     return [x.strip() for x in lines if x.strip() and not x.strip().startswith("#")]
+
+
+# Сколько терминов словаря уходит в подсказку модели.
+PROMPT_TERMS = 48
+
+
+def strip_prompt_echo(text: str, glossary: list) -> str:
+    """Вырезать повтор подсказки: термины словаря подряд, в его же порядке.
+
+    Словарь уходит модели подсказкой, и на тишине в конце записи Whisper
+    дописывает её в текст: «Приоритизация. ЦОК, МП Учителя, бэклог,
+    спринт, дейли, ретро, стейкхолдер». Фильтр по отрезкам тут не
+    спасает — повтор приходит в одном отрезке с настоящей речью.
+
+    Признак повтора — три и больше термина подряд через запятую ровно в том
+    порядке, в каком они стоят в словаре. Человек, перечисляя термины, их
+    порядок в файле не повторяет, а модель повторяет дословно.
+    """
+    if not text or not glossary:
+        return text
+    order = {}
+    for i, term in enumerate(glossary[:PROMPT_TERMS]):
+        order.setdefault(term.strip().lower(), i)
+    items = [(m.start(), m.end(), order.get(m.group().strip().lower()))
+             for m in re.finditer(r"[^,.;:!?\s][^,.;:!?]*", text)]
+    cuts = []
+    start = 0
+    while start < len(items):
+        end = start
+        while (end + 1 < len(items) and items[end][2] is not None
+               and items[end + 1][2] == items[end][2] + 1):
+            end += 1
+        if end - start >= 2:
+            cuts.append((items[start][0], items[end][1]))
+        start = end + 1
+    for a, b in reversed(cuts):
+        # Вместе с повтором уходят и знаки сразу после него.
+        tail = re.match(r"[,.;:!?\s]*", text[b:]).end()
+        text = text[:a] + text[b + tail:]
+    return re.sub(r"\s{2,}", " ", text).strip()
 
 
 class _Line:
@@ -317,7 +360,7 @@ def main() -> int:
     hotwords = ", ".join(glossary[:64]) if glossary else None
     prompt = (
         "Рабочая диктовка. В речи встречаются термины: "
-        + ", ".join(glossary[:48]) + "."
+        + ", ".join(glossary[:PROMPT_TERMS]) + "."
         if glossary else None
     )
 
@@ -372,6 +415,7 @@ def main() -> int:
             except Exception as exc:  # noqa: BLE001
                 send({"id": command.get("id"), "text": "", "error": str(exc)[:200]})
                 continue
+            text = strip_prompt_echo(text, glossary)
             # Зацикливание внутри фразы — «ну ну ну ну» — см. repeats.py.
             text = collapse_text(text)[0]
             send({"id": command.get("id"), "text": repair(text, glossary, fixer)})

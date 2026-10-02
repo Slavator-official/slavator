@@ -172,7 +172,7 @@ IDENTITY="Slavator Local Signing"
 if security find-certificate -c "$IDENTITY" >/dev/null 2>&1; then
     say "Подписываю постоянным сертификатом"
     codesign --force --deep --sign "$IDENTITY" "$APP" 2>/dev/null \
-        || fail "не удалось подписать сертификатом «$IDENTITY»"
+        || fail "не удалось подписать сертификатом «${IDENTITY}»"
 else
     say "Подписываю (ad-hoc — разрешения будут переспрашиваться)"
     codesign --force --deep --sign - "$APP" 2>/dev/null || true
