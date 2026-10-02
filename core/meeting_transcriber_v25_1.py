@@ -909,6 +909,7 @@ def load_glossary() -> list:
 
 def whisper_model():
     """Модель грузится один раз на процесс (TD-08: не перезагружать модели)."""
+    _local("app_config").quiet_onnxruntime()  # до детектора речи: см. app_config
     global _whisper_model
     if _whisper_model is None:
         try:

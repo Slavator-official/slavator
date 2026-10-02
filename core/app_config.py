@@ -165,3 +165,20 @@ def model_json(url: str, payload: dict | None = None, timeout: float = 30) -> di
                                      method="POST" if data else "GET")
     with open_model(request, timeout) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def quiet_onnxruntime() -> None:
+    """Выключить телеметрию ONNX Runtime.
+
+    Пакет onnxruntime 1.29 (его тянет детектор речи faster-whisper) шлёт
+    телеметрию Microsoft на mobile.events.data.microsoft.com — по умолчанию,
+    без спроса. 02.10.2026 ответ на такую отправку пришёл, когда ядро уже
+    завершалось, и процесс упал на разрушенном мьютексе: обработка прошла,
+    а приложение показало «Обработка не завершилась». Славатор обещает, что
+    ничего не уходит с машины, — значит, выключаем до первого сеанса.
+    """
+    try:
+        import onnxruntime
+        onnxruntime.disable_telemetry_events()
+    except Exception:  # noqa: BLE001 - нет пакета или старая версия: слать нечему
+        pass
