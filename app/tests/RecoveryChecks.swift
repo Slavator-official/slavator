@@ -83,6 +83,36 @@ import Foundation
         let movedLength = try length(moved)
         precondition(movedLength == 32000, "перенесено не всё: \(movedLength)")
 
-        print("PASS: восстановление записи — заголовок после падения, список, сведение, одна дорожка")
+        // Пустая запись: сплошные нули — тишина; хоть один ненулевой отсчёт — звук.
+        func samples(_ name: String, _ values: [Int16]) throws -> URL {
+            let url = dir.appendingPathComponent(name)
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(values.count))!
+            buffer.frameLength = AVAudioFrameCount(values.count)
+            for (i, v) in values.enumerated() { buffer.int16ChannelData![0][i] = v }
+            let file = try AVAudioFile(forWriting: url, settings: format.settings,
+                                       commonFormat: .pcmFormatInt16, interleaved: true)
+            try file.write(from: buffer)
+            return url
+        }
+        let zeros = try samples("zeros.wav", [Int16](repeating: 0, count: 200_000))
+        precondition(RecordingCheck.isSilent(zeros), "сплошные нули — пустая запись")
+        var faint = [Int16](repeating: 0, count: 200_000)
+        faint[199_999] = -1                                   // один отсчёт в самом конце
+        let tail = try samples("faint.wav", faint)
+        precondition(!RecordingCheck.isSilent(tail), "один отсчёт в конце — уже звук")
+        precondition(!RecordingCheck.isSilent(dir.appendingPathComponent("нет.wav")),
+                     "нечитаемый файл пустым не считаем")
+
+        // Слежение за тишиной микрофона.
+        var watch = SilenceWatch()
+        precondition(!watch.isSilent(at: 9.9) && watch.isSilent(at: 10), "10 с без звука с начала")
+        watch.heard(peak: 0, at: 5)
+        precondition(watch.isSilent(at: 10), "нули звуком не считаются")
+        watch.heard(peak: 0.0001, at: 3)
+        precondition(!watch.isSilent(at: 12.9) && watch.isSilent(at: 13), "отсчёт от последнего звука")
+        watch.reset()
+        precondition(watch.isSilent(at: 10), "новая запись — с нуля")
+
+        print("PASS: восстановление записи — заголовок после падения, список, сведение, одна дорожка, пустая запись, тишина микрофона")
     }
 }

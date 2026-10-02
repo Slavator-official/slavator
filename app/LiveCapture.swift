@@ -26,6 +26,12 @@ final class LiveCapture: NSObject {
     private(set) var level: Double = 0          // 0…1, для индикатора
     private(set) var failure: String?
     private(set) var lastFile: URL?
+    /// С микрофона уже 10 секунд не приходит звука — см. SilenceWatch.
+    private(set) var micSilent = false
+    private var silence = SilenceWatch()
+    /// Ошибку конвертера пишем в журнал один раз, а не на каждый кадр.
+    private var micErrorLogged = false
+    private var configObserver: NSObjectProtocol?
 
     private let tap = SystemAudioTap()
     private var engine: AVAudioEngine?
@@ -82,6 +88,10 @@ final class LiveCapture: NSObject {
         active = true
         failure = nil
         seconds = 0
+        micSilent = false
+        silence.reset()
+        micErrorLogged = false
+        Self.log("запись: \(source == .meeting ? "звонок" : "только микрофон")")
         systemFrames = 0
         originHost = 0
 
@@ -175,6 +185,11 @@ final class LiveCapture: NSObject {
         ticker = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             guard let self, self.originHost != 0 else { return }
             self.seconds = Double(mach_absolute_time() - self.originHost) * Self.tickSeconds
+            let silent = self.silence.isSilent(at: self.seconds)
+            if silent && !self.micSilent {
+                Self.log("микрофон молчит \(Int(SilenceWatch.limit)) с — в запись не идёт звук")
+            }
+            self.micSilent = silent
         }
     }
 
@@ -201,20 +216,61 @@ final class LiveCapture: NSObject {
         // Так собеседник не попадает в стенограмму дважды, а системный звук
         // при этом пишется.
 
-        let sourceFormat = input.outputFormat(forBus: 0)
-
-        micConverter = AVAudioConverter(from: sourceFormat, to: Self.format)
-        input.installTap(onBus: 0, bufferSize: 4096, format: sourceFormat) { [weak self] buffer, when in
-            guard let self, let file = self.micFile, let converter = self.micConverter else { return }
-            let host = when.isHostTimeValid ? when.hostTime : mach_absolute_time()
-            self.write(buffer, to: file, using: converter, at: host, meterLevel: true)
-        }
+        installMicrophoneTap(on: engine)
 
         do {
             try engine.start()
         } catch {
             failure = "Микрофон недоступен: \(error.localizedDescription)"
+            Self.log("микрофон не запустился: \(error.localizedDescription)")
             self.engine = nil
+            return
+        }
+
+        // Сменилось устройство ввода — подключили или вынули наушники,
+        // сменили микрофон по умолчанию — и AVAudioEngine останавливается
+        // сам, молча: дорожка микрофона обрывалась на середине встречи.
+        // Приём из Meetily (mic hot-swap): поднимаем микрофон заново, а
+        // пропущенное время закроет выравнивание тишиной.
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+        ) { [weak self] _ in self?.restartMicrophone() }
+    }
+
+    /// Отвод с микрофона — в том формате, в каком микрофон отдаёт звук.
+    ///
+    /// Раньше конвертер собирался один раз, по формату входа до запуска
+    /// движка, и если формат потом становился другим, каждый кадр молча
+    /// выбрасывался: дорожка выходила тишиной на всю длину встречи
+    /// (02.10.2026 — шесть минут нулей). Теперь конвертер — по формату
+    /// пришедшего кадра и пересобирается при его смене, как у системного
+    /// звука.
+    private func installMicrophoneTap(on engine: AVAudioEngine) {
+        engine.inputNode.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, when in
+            guard let self, let file = self.micFile else { return }
+            if self.micConverter == nil || self.micConverter?.inputFormat != buffer.format {
+                self.micConverter = AVAudioConverter(from: buffer.format, to: Self.format)
+                Self.log("микрофон: \(Int(buffer.format.sampleRate)) Гц, каналов \(buffer.format.channelCount)"
+                         + (self.micConverter == nil ? " — конвертер не собрался" : ""))
+            }
+            guard let converter = self.micConverter else { return }
+            let host = when.isHostTimeValid ? when.hostTime : mach_absolute_time()
+            self.write(buffer, to: file, using: converter, at: host, meterLevel: true)
+        }
+    }
+
+    private func restartMicrophone() {
+        guard active, let engine else { return }
+        Self.log("микрофон: устройство сменилось, поднимаю заново")
+        engine.inputNode.removeTap(onBus: 0)
+        engine.stop()
+        micConverter = nil
+        installMicrophoneTap(on: engine)
+        do {
+            try engine.start()
+        } catch {
+            failure = "Микрофон отключился и не поднялся: \(error.localizedDescription)"
+            Self.log("микрофон не поднялся: \(error.localizedDescription)")
         }
     }
 
@@ -256,6 +312,10 @@ final class LiveCapture: NSObject {
             status.pointee = .haveData
             return buffer
         }
+        if let conversionError, meterLevel, !micErrorLogged {
+            micErrorLogged = true
+            Self.log("микрофон: кадр не перевёлся — \(conversionError.localizedDescription)")
+        }
         // До общего начала кадры отбрасываем: иначе дорожки снова разъедутся.
         guard conversionError == nil, out.frameLength > 0, originHost != 0 else { return }
 
@@ -270,7 +330,10 @@ final class LiveCapture: NSObject {
                 peak = max(peak, abs(Int(channel[i])))
             }
             let value = Double(peak) / 32768.0
-            Task { @MainActor in self.level = value }
+            Task { @MainActor in
+                self.level = value
+                self.silence.heard(peak: value, at: self.seconds)
+            }
         }
     }
 
@@ -321,9 +384,14 @@ final class LiveCapture: NSObject {
         active = false
         level = 0
 
+        if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
+        configObserver = nil
         engine?.inputNode.removeTap(onBus: 0)
         engine?.stop()
         engine = nil
+        Self.log(String(format: "остановка: %.0f с, кадров звука компьютера %d, микрофон %@",
+                        seconds, systemFrames, micSilent ? "молчал" : "слышен"))
+        micSilent = false
 
         tap.stop()
 
@@ -398,4 +466,24 @@ final class LiveCapture: NSObject {
 
     /// Готовая запись встречи — одна дорожка, уже сведённая.
     var recording: URL? { lastFile }
+
+    /// Журнал записи: форматы дорожек, смены устройств, молчание микрофона.
+    ///
+    /// 02.10.2026 запись вышла пустой, а понять, на каком шаге пропал звук,
+    /// было не по чему: черновики после сведения удаляются, а в системном
+    /// журнале видно только, что движок работал.
+    static func log(_ line: String) {
+        let dir = Paths.support.appending(path: "logs")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appending(path: "capture.log")
+        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .short, timeStyle: .medium)
+        guard let data = "\(stamp)  \(line)\n".data(using: .utf8) else { return }
+        if let handle = try? FileHandle(forWritingTo: file) {
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+            try? handle.close()
+        } else {
+            try? data.write(to: file)
+        }
+    }
 }

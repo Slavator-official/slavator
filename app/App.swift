@@ -403,6 +403,10 @@ struct Shell: View {
                     Image(systemName: "record.circle.fill").foregroundStyle(Color.hex(0xE0705F))
                     Text("Идёт запись").font(Kind.strong())
                     Text(hms(capture.seconds)).font(Kind.mono()).foregroundStyle(palette.muted)
+                    if capture.micSilent {
+                        Label("микрофон молчит", systemImage: "mic.slash")
+                            .font(Kind.body(12.5)).foregroundStyle(palette.warn)
+                    }
                     Spacer()
                     Button("Остановить и обработать") {
                         picked = finishMeeting(capture: capture, pipeline: pipeline, library: library)

@@ -131,3 +131,50 @@ enum Recovery {
         }
     }
 }
+
+/// Есть ли в записи звук.
+///
+/// 02.10.2026 встреча записалась сплошными нулями: шесть минут, ни одного
+/// ненулевого отсчёта. Ядро узнало об этом только на распознавании, через
+/// несколько минут обработки, и ответило «не распознано ни одной реплики».
+/// Живой микрофон точных нулей не даёт — даже тихая комната слышна шумом
+/// в младших разрядах, — так что сплошной ноль значит одно: звук не шёл.
+enum RecordingCheck {
+    /// В WAV нет ни одного ненулевого отсчёта. Читается кусками: час записи
+    /// в 16 кГц — 115 МБ, держать его в памяти целиком незачем.
+    static func isSilent(_ url: URL) -> Bool {
+        guard let file = try? AVAudioFile(forReading: url, commonFormat: .pcmFormatInt16,
+                                          interleaved: true),
+              let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 65536)
+        else { return false }
+        let channels = Int(file.processingFormat.channelCount)
+        while file.framePosition < file.length {
+            do { try file.read(into: buffer) } catch { return false }
+            guard let data = buffer.int16ChannelData?[0], buffer.frameLength > 0 else { break }
+            for i in 0..<Int(buffer.frameLength) * channels where data[i] != 0 { return false }
+        }
+        return true
+    }
+}
+
+/// Следит, идёт ли с микрофона звук во время записи.
+///
+/// Тишина в 10 секунд — не пауза в разговоре: живой микрофон и в паузе
+/// отдаёт шум. Нули дольше этого значат, что звук не доходит — микрофон
+/// выключен, входная громкость на нуле или кадры теряются по дороге, — и
+/// сказать об этом надо, пока встреча ещё идёт, а не после неё.
+struct SilenceWatch {
+    static let limit: TimeInterval = 10
+    /// Секунда записи, на которой с микрофона в последний раз пришёл звук.
+    private(set) var lastSound: TimeInterval = 0
+
+    mutating func reset() { lastSound = 0 }
+
+    mutating func heard(peak: Double, at second: TimeInterval) {
+        if peak > 0 { lastSound = max(lastSound, second) }
+    }
+
+    func isSilent(at second: TimeInterval) -> Bool {
+        second - lastSound >= Self.limit
+    }
+}

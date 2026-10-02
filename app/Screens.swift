@@ -172,7 +172,10 @@ struct MainScreen: View {
         do {
             let url = try Recovery.restore(lost, into: URL(fileURLWithPath: library.settings.recordingsFolder))
             findInterrupted()
-            if pipeline.isRunning {
+            if RecordingCheck.isSilent(url) {
+                showAlert("Восстановленная запись пустая",
+                          "«\(url.lastPathComponent)» лежит в папке записей, но звука в ней нет — расшифровывать нечего.")
+            } else if pipeline.isRunning {
                 showAlert("Запись восстановлена",
                           "«\(url.lastPathComponent)» лежит в папке записей. Другая встреча ещё обрабатывается — запустите эту, когда она закончится.")
             } else {
@@ -378,6 +381,13 @@ struct MainScreen: View {
                     Button("Остановить") { finishRecording() }.buttonStyle(QuietButton())
                 }
                 .onAppear { pulse = true }
+                if capture.micSilent {
+                    Label("Микрофон молчит больше 10 секунд — в запись не идёт звук. Проверьте микрофон и входную громкость в настройках звука macOS.",
+                          systemImage: "mic.slash")
+                        .font(Kind.body(12.5)).foregroundStyle(p.warn)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 10)
+                }
             } else {
                 HStack(spacing: 10) {
                     Image(systemName: "mic")
@@ -614,6 +624,14 @@ struct MainScreen: View {
 func finishMeeting(capture: LiveCapture, pipeline: Pipeline, library: Library) -> URL? {
     guard let url = capture.stop() else { return nil }
     if let warning = capture.failure { showAlert("Запись сохранена с ограничением", warning) }
+    // Пустую запись в расшифровку не отдаём: ядро всё равно ответит «не
+    // распознано ни одной реплики», только через несколько минут обработки.
+    if RecordingCheck.isSilent(url) {
+        LiveCapture.log("запись пустая — в обработку не отдана: \(url.lastPathComponent)")
+        showAlert("Запись пустая",
+                  "В записи нет звука: ни микрофон, ни звук компьютера не дали ни одного отсчёта. Расшифровывать нечего. Проверьте микрофон и входную громкость в настройках звука macOS. Файл оставлен в папке записей.")
+        return url
+    }
     guard capture.seconds >= 3 else {
         showAlert("Слишком короткая запись", "Записано меньше трёх секунд. Аудиофайл сохранён в папке результатов.")
         return url
