@@ -241,6 +241,9 @@ final class Dictation {
         level = 0
         releasedAt = Date()
         Dictation.logHotkey("отпустили клавишу, запрос в полёте: \(pending ? "да" : "нет")")
+        if let report = recorder?.report {
+            Dictation.logHotkey("микрофон: \(report.format); кадров \(report.frames), пик \(report.loudest) (речь — от 500)")
+        }
         // Обработка занимает секунды, и всё это время плашка стоит над тем
         // местом, куда человек уже пишет дальше: разрешаем оттащить её.
         indicator?.allowMove(true)
@@ -279,7 +282,15 @@ final class Dictation {
         // произносил. Второй рубеж — фильтр в самом рабочем процессе.
         guard rec.heardSpeech else {
             rec.reset()
-            if final { finish(raw: spoken) }
+            if final {
+                // За всё нажатие ни слова — «Готово» тут неправда: человек
+                // ждёт текст, которого не будет. Говорим, что звука не было.
+                if typed.isEmpty && spoken.isEmpty {
+                    let report = rec.report
+                    notice = report.loudest == 0 ? "Микрофон молчит" : "Не слышно речи"
+                }
+                finish(raw: spoken)
+            }
             return
         }
         guard let wav = rec.snapshot() else {
@@ -666,18 +677,34 @@ private final class Recorder {
     /// Была ли речь после последнего сброса. На тишине Whisper выдумывает
     /// титры фильмов, поэтому отправлять её на распознавание нельзя.
     private var heard = false
+    /// Что пришло с микрофона за нажатие: сколько кадров и самый громкий
+    /// отсчёт. По ним журнал отличит молчащий микрофон от тихого голоса —
+    /// 02.10.2026 диктовка четыре раза подряд «не услышала» речь, и понять,
+    /// был ли вообще звук, было не по чему.
+    private var frames = 0
+    private var loudest = 0
+    private var formatNote = "кадров не было"
 
     private static let target = AVAudioFormat(
         commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true)!
 
     func start(onLevel: @escaping (Double) -> Void) -> Bool {
         let input = engine.inputNode
-        let source = input.outputFormat(forBus: 0)
-        guard source.sampleRate > 0 else { return false }
-        converter = AVAudioConverter(from: source, to: Self.target)
+        guard input.outputFormat(forBus: 0).sampleRate > 0 else { return false }
 
-        input.installTap(onBus: 0, bufferSize: 4096, format: source) { [weak self] buffer, _ in
-            guard let self, let converter = self.converter else { return }
+        // Конвертер — по формату пришедшего кадра, а не по формату входа до
+        // запуска движка: если формат после запуска другой, кадры молча
+        // выбрасывались, и диктовка не слышала речь. То же было с записью
+        // встреч (LiveCapture, 02.10.2026).
+        input.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, _ in
+            guard let self else { return }
+            if self.converter == nil || self.converter?.inputFormat != buffer.format {
+                self.converter = AVAudioConverter(from: buffer.format, to: Self.target)
+                let note = "\(Int(buffer.format.sampleRate)) Гц, каналов \(buffer.format.channelCount)"
+                    + (self.converter == nil ? ", конвертер не собрался" : "")
+                self.lock.lock(); self.formatNote = note; self.lock.unlock()
+            }
+            guard let converter = self.converter else { return }
             let ratio = Self.target.sampleRate / buffer.format.sampleRate
             let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024
             guard let out = AVAudioPCMBuffer(pcmFormat: Self.target, frameCapacity: capacity)
@@ -700,6 +727,8 @@ private final class Recorder {
             }
             self.lock.lock()
             self.samples.append(contentsOf: slice)
+            self.frames += slice.count
+            self.loudest = max(self.loudest, peak)
             // Порог низкий: шёпот и тихая речь паузой считаться не должны.
             if peak > 500 { self.lastLoud = Date(); self.heard = true }
             self.lock.unlock()
@@ -713,6 +742,12 @@ private final class Recorder {
     func stop() {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
+    }
+
+    /// Сводка за всё нажатие — для журнала и для честной надписи на плашке.
+    var report: (frames: Int, loudest: Int, format: String) {
+        lock.lock(); defer { lock.unlock() }
+        return (frames, loudest, formatNote)
     }
 
     /// Звучала ли речь с начала текущей фразы.
