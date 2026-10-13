@@ -16,12 +16,30 @@ CORE="$PROJECT/core"
 # не понять. Проверено: .metadata_never_index в обычной папке Spotlight
 # игнорирует, суффикс .noindex работает.
 DIST="$ROOT/dist.noindex"
-APP="$DIST/Славатор.app"
-CONTENTS="$APP/Contents"
-RESOURCES="$CONTENTS/Resources"
 
 say()  { printf '\033[1m==>\033[0m %s\n' "$1"; }
 fail() { printf '\033[31mОШИБКА:\033[0m %s\n' "$1" >&2; exit 1; }
+
+# Редакция сборки: SLAVATOR_EDITION=2 собирает «Славатор 2».
+#
+# Вторая редакция стоит рядом с обычным Славатором, а не вместо него, поэтому
+# у неё всё своё: идентификатор (иначе macOS считает их одной программой и
+# делит разрешения на микрофон), имя процесса (иначе установка закрывает обе
+# версии разом через pkill -x), папка с настройками и окружением Python и
+# папка голосовых профилей - форматы данных у версий расходятся, и общая
+# папка значила бы, что одна портит файлы другой. Общие только модели
+# распознавания и словарь терминов: их обе версии лишь читают.
+EDITION="${SLAVATOR_EDITION:-1}"
+case "$EDITION" in
+    1) APP_NAME="Славатор";   BUNDLE_ID="ru.slavator.app";  EXEC="slavator"
+       SHORT_NAME="Slavator";   PROFILES_DIR="speaker_profiles";   ICON_SUFFIX="" ;;
+    2) APP_NAME="Славатор 2"; BUNDLE_ID="ru.slavator.app2"; EXEC="slavator2"
+       SHORT_NAME="Slavator 2"; PROFILES_DIR="speaker_profiles 2"; ICON_SUFFIX="_2" ;;
+    *) fail "неизвестная редакция SLAVATOR_EDITION=$EDITION: бывает 1 или 2" ;;
+esac
+APP="$DIST/$APP_NAME.app"
+CONTENTS="$APP/Contents"
+RESOURCES="$CONTENTS/Resources"
 
 command -v swiftc >/dev/null || fail "нет swiftc — поставьте Command Line Tools"
 
@@ -33,9 +51,10 @@ SOURCES=(Configuration.swift ProcessOutput.swift OutputVolume.swift Theme.swift 
 for f in "${SOURCES[@]}"; do
     [[ -f "$SWIFT/$f" ]] || fail "нет исходника: $SWIFT/$f"
 done
-for f in meeting_transcriber_v25_1.py onnx_engine.py glossary_fix.py dictation_worker.py app_config.py speaker_memory.py speaker_links.py meeting_store.py speech_alignment.py audio_preview.py desktop_contract.json app_icon.png; do
+for f in meeting_transcriber_v25_1.py onnx_engine.py glossary_fix.py dictation_worker.py app_config.py speaker_memory.py speaker_links.py meeting_store.py speech_alignment.py audio_preview.py desktop_contract.json "app_icon$ICON_SUFFIX.png"; do
     [[ -f "$CORE/$f" ]] || fail "нет файла ядра: $CORE/$f"
 done
+[[ -f "$ROOT/icon_master$ICON_SUFFIX.png" ]] || fail "нет иконки: $ROOT/icon_master$ICON_SUFFIX.png"
 
 say "Проверка синтаксиса Python"
 /usr/bin/python3 -m py_compile \
@@ -53,13 +72,19 @@ cd "$SWIFT"
 # -dead_strip_dylibs убирает зависимости, из которых ничего не используется.
 # Без него линковщик прописывал SwiftUICore - фреймворк из macOS 15, которого
 # на Sonoma не существует, и приложение там падало при запуске.
+#
+# Имя выходного файла - без точки в начале. С ".slavator-bin" ссылка на
+# SwiftUICore появлялась при тех же исходниках и флагах, с "slavator-bin" -
+# нет (проверено попеременными сборками 8 сентября). На коде коллеги от 15
+# сентября старое имя валит сборку на проверке ниже. -dead_strip вдобавок
+# выбрасывает мёртвый код, из которого эта ссылка и росла.
 swiftc -O -parse-as-library -target arm64-apple-macos14.2 \
-    -Xlinker -dead_strip_dylibs \
-    -o "$DIST/.slavator-bin" "${SOURCES[@]}" || fail "не собирается интерфейс"
+    -Xlinker -dead_strip -Xlinker -dead_strip_dylibs \
+    -o "$DIST/slavator-bin" "${SOURCES[@]}" || fail "не собирается интерфейс"
 
 # A view modifier added in a future edit can pull SwiftUICore back in even
 # with dead stripping. Fail before replacing the last runnable bundle.
-if otool -L "$DIST/.slavator-bin" | grep -q '/SwiftUICore.framework/'; then
+if otool -L "$DIST/slavator-bin" | grep -q '/SwiftUICore.framework/'; then
     fail "бинарник зависит от SwiftUICore (macOS 15), но поддерживается macOS 14.2"
 fi
 
@@ -74,16 +99,23 @@ cp "$ROOT/Info.plist" "$CONTENTS/Info.plist"
 # два независимых номера на одну программу — источник путаницы.
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$CONTENTS/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$CONTENTS/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$CONTENTS/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleExecutable $EXEC" "$CONTENTS/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $APP_NAME" "$CONTENTS/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleName $SHORT_NAME" "$CONTENTS/Info.plist"
+# Папки данных интерфейс читает отсюда (AppConfiguration в Configuration.swift).
+/usr/libexec/PlistBuddy -c "Add :SlavatorSupportFolder string $APP_NAME" "$CONTENTS/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :SlavatorProfilesFolder string $PROFILES_DIR" "$CONTENTS/Info.plist"
 cp "$PROJECT/VERSION" "$RESOURCES/VERSION"
 plutil -lint "$CONTENTS/Info.plist" >/dev/null || fail "Info.plist некорректен"
 printf 'APPL????' > "$CONTENTS/PkgInfo"
-install -m 755 "$DIST/.slavator-bin" "$CONTENTS/MacOS/slavator"
-rm -f "$DIST/.slavator-bin"
+install -m 755 "$DIST/slavator-bin" "$CONTENTS/MacOS/$EXEC"
+rm -f "$DIST/slavator-bin"
 
 say "Собираю иконку"
 ICONSET="$DIST/AppIcon.iconset"
 rm -rf "$ICONSET"; mkdir -p "$ICONSET"
-MASTER="$ROOT/icon_master.png"
+MASTER="$ROOT/icon_master$ICON_SUFFIX.png"
 
 # Иконка сборки из рабочего дерева красится в свой цвет.
 #
@@ -111,7 +143,7 @@ for spec in "16:icon_16x16" "32:icon_16x16@2x" "32:icon_32x32" "64:icon_32x32@2x
 done
 iconutil -c icns "$ICONSET" -o "$RESOURCES/AppIcon.icns"
 rm -rf "$ICONSET" "$DIST/icon_tinted.png"
-cp "$CORE/app_icon.png" "$RESOURCES/app_icon.png"
+cp "$CORE/app_icon$ICON_SUFFIX.png" "$RESOURCES/app_icon.png"
 
 say "Копирую ядро обработки"
 for module in meeting_transcriber_v25_1.py onnx_engine.py glossary_fix.py dictation_worker.py app_config.py speaker_memory.py speaker_links.py meeting_store.py meeting_chat.py document_tools.py privacy_files.py speech_alignment.py audio_preview.py desktop_contract.json; do
@@ -167,15 +199,15 @@ else
     # и pgrep -f по такому пути не находит ничего (проверено: процесс есть,
     # а поиск пуст), из-за чего замена шла под работающим приложением.
     RUNNING=""
-    pgrep -x slavator >/dev/null && RUNNING="да"
+    pgrep -x "$EXEC" >/dev/null && RUNNING="да"
     if [[ -n "$RUNNING" ]]; then
-        say "Закрываю работающий Славатор"
-        osascript -e 'quit app "Славатор"' 2>/dev/null || true
+        say "Закрываю работающий $APP_NAME"
+        osascript -e "quit app \"$APP_NAME\"" 2>/dev/null || true
         for _ in 1 2 3 4 5 6 7 8 9 10; do
-            pgrep -x slavator >/dev/null || break
+            pgrep -x "$EXEC" >/dev/null || break
             sleep 0.5
         done
-        pkill -x slavator 2>/dev/null || true
+        pkill -x "$EXEC" 2>/dev/null || true
         sleep 0.5
     fi
     say "Ставлю в /Applications"

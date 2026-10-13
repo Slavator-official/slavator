@@ -103,7 +103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         guard item == nil else { return }
         let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         status.button?.image = NSImage(systemSymbolName: "mic.fill",
-                                       accessibilityDescription: "Славатор")
+                                       accessibilityDescription: AppConfiguration.displayName)
         status.button?.image?.isTemplate = true
         let menu = NSMenu()
         menu.delegate = self
@@ -423,7 +423,7 @@ struct Sidebar: View {
                         .resizable().frame(width: 42, height: 42)
                         .clipShape(RoundedRectangle(cornerRadius: 11))
                 }
-                Text("Славатор").font(Kind.title(19))
+                Text(AppConfiguration.displayName).font(Kind.title(19))
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 10).padding(.bottom, 12)

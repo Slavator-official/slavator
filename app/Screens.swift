@@ -83,7 +83,7 @@ struct MainScreen: View {
             HStack(spacing: 10) {
                 Image(systemName: "arrow.down.circle")
                     .font(.system(size: 19)).foregroundStyle(p.accent).frame(width: 26)
-                Text(setupStarted ? "Идёт установка" : "Славатор ещё не настроен")
+                Text(setupStarted ? "Идёт установка" : "\(AppConfiguration.displayName) ещё не настроен")
                     .font(Kind.strong(14.5))
                 Spacer()
             }

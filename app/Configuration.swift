@@ -18,13 +18,26 @@ enum DesktopContract {
 }
 
 enum AppConfiguration {
+    /// Имя и папки этой редакции. «Славатор 2» стоит рядом с обычным, и у
+    /// него свои настройки, окружение Python и голосовые профили — их задаёт
+    /// build_app.sh в Info.plist. Без ключей (запуск не из бандла) это
+    /// обычный Славатор.
+    static var displayName: String { info("CFBundleDisplayName") ?? "Славатор" }
+    static var supportFolder: String { info("SlavatorSupportFolder") ?? "Славатор" }
+    static var profilesFolder: String { info("SlavatorProfilesFolder") ?? "speaker_profiles" }
+    private static func info(_ key: String) -> String? {
+        let value = Bundle.main.object(forInfoDictionaryKey: key) as? String
+        return value?.trimmingCharacters(in: .whitespaces).isEmpty == false ? value : nil
+    }
+
     static var support: URL {
         let path = ProcessInfo.processInfo.environment["MEETING_TRANSCRIBER_APP_SUPPORT"] ?? ""
         if !path.trimmingCharacters(in: .whitespaces).isEmpty {
             return URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
         }
         return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Славатор")
+            .appendingPathComponent("Library/Application Support")
+            .appendingPathComponent(supportFolder)
     }
     static var settingsURL: URL { support.appendingPathComponent("settings.json") }
     static var usesLocalModel: Bool {
@@ -61,7 +74,7 @@ enum AppConfiguration {
     static func environment(settings: Settings? = nil) -> [String: String] {
         let data = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("whisper-work")
         var env = ["MEETING_TRANSCRIBER_APP_SUPPORT": support.path,
-                   "MEETING_TRANSCRIBER_PROFILES": data.appendingPathComponent("speaker_profiles").path,
+                   "MEETING_TRANSCRIBER_PROFILES": data.appendingPathComponent(profilesFolder).path,
                    "MEETING_TRANSCRIBER_MODELS": data.appendingPathComponent("models").path,
                    // Пока своих настроек нет, модель выбирает память машины,
                    // а не умолчание контракта: на 8 ГБ большая не поедет.

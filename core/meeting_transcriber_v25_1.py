@@ -765,7 +765,8 @@ def preflight(need_llm: bool = True, need_diarization: bool = True) -> bool:
         problems.append(f"  - нет пакета {package}")
 
     if problems:
-        support_hint = (
+        # Папку передаёт приложение: у «Славатора 2» она своя.
+        support_hint = os.environ.get("MEETING_TRANSCRIBER_APP_SUPPORT") or (
             "%APPDATA%\\Славатор" if os.name == "nt"
             else "~/Library/Application Support/Славатор"
         )

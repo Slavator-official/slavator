@@ -8,18 +8,25 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 PROJECT="$(cd "$ROOT/.." && pwd)"
 DIST="$ROOT/dist.noindex"
-APP="$DIST/Славатор.app"
+# SLAVATOR_EDITION=2 упаковывает «Славатор 2» - ту же редакцию, что собрал
+# build_app.sh с этой переменной.
+case "${SLAVATOR_EDITION:-1}" in
+    1) APP_NAME="Славатор" ;;
+    2) APP_NAME="Славатор 2" ;;
+    *) printf 'неизвестная редакция SLAVATOR_EDITION=%s\n' "$SLAVATOR_EDITION" >&2; exit 1 ;;
+esac
+APP="$DIST/$APP_NAME.app"
 STAGE="$DIST/dmg"
 
 FULL=0
 [[ "${1:-}" == "--full" ]] && FULL=1
 
 if [[ $FULL -eq 1 ]]; then
-    DMG="$DIST/Славатор-полный.dmg"
-    VOLNAME="Славатор"
+    DMG="$DIST/$APP_NAME-полный.dmg"
+    VOLNAME="$APP_NAME"
 else
-    DMG="$DIST/Славатор.dmg"
-    VOLNAME="Славатор"
+    DMG="$DIST/$APP_NAME.dmg"
+    VOLNAME="$APP_NAME"
 fi
 
 say()  { printf '\033[1m==>\033[0m %s\n' "$1"; }

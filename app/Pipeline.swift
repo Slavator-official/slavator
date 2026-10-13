@@ -78,7 +78,7 @@ final class Pipeline {
         let python = Paths.venvPython
         guard FileManager.default.fileExists(atPath: python.path) else {
             showAlert("Окружение не установлено",
-                  "Не найден Python в \(python.path).\n\nЗапустите установку заново: удалите папку «Славатор» из ~/Library/Application Support и откройте приложение.")
+                  "Не найден Python в \(python.path).\n\nЗапустите установку заново: удалите папку «\(AppConfiguration.supportFolder)» из ~/Library/Application Support и откройте приложение.")
             return
         }
         guard FileManager.default.fileExists(atPath: Paths.core.path) else {

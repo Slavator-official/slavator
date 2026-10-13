@@ -9,7 +9,23 @@
 set -uo pipefail
 
 RESOURCES="${MEETING_TRANSCRIBER_RESOURCES:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
-SUPPORT="$HOME/Library/Application Support/Славатор"
+# Папка данных - та, из которой приложение запустило этот скрипт.
+#
+# Приложение копирует установщик в <папка данных>/setup и открывает его в
+# Терминале, а через «open -a Terminal» переменные окружения не доходят. У
+# «Славатора 2» папка своя («Славатор 2»), и с жёстко прописанным путём он
+# ставил бы окружение обычному Славатору, а сам оставался неустановленным.
+# Запуск вручную из бандла или репозитория - обычный Славатор.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -n "${MEETING_TRANSCRIBER_APP_SUPPORT:-}" ]]; then
+    SUPPORT="$MEETING_TRANSCRIBER_APP_SUPPORT"
+elif [[ "$(basename "$SCRIPT_DIR")" == "setup" && "$(dirname "$SCRIPT_DIR")" == "$HOME/Library/Application Support/"* ]]; then
+    SUPPORT="$(dirname "$SCRIPT_DIR")"
+else
+    SUPPORT="$HOME/Library/Application Support/Славатор"
+fi
+# Имя папки данных совпадает с именем приложения в обеих редакциях.
+APP_NAME="$(basename "$SUPPORT")"
 VENV="$SUPPORT/env"
 UV="$HOME/.local/bin/uv"
 PYTHON_VERSION="3.12"
@@ -322,4 +338,4 @@ printf '%s╰──────────────────────�
 printf 'Открываю Славатор. Дальше запускайте его как обычно —\n'
 printf 'из Launchpad или папки «Программы».\n\n'
 
-open -a "Славатор" 2>/dev/null || printf 'Откройте Славатор из папки «Программы».\n\n'
+open -a "$APP_NAME" 2>/dev/null || printf 'Откройте %s из папки «Программы».\n\n' "$APP_NAME"
