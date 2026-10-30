@@ -2169,6 +2169,29 @@ def ollama_has_model(names=None) -> bool:
     return OLLAMA_MODEL in known or (":" not in OLLAMA_MODEL and OLLAMA_MODEL + ":latest" in known)
 
 
+def explain_pull_error(name: str, error: str) -> None:
+    """Сказать по-человечески, почему модель не скачалась и что делать.
+
+    Сырой ответ Ollama - «max retries exceeded» и подписанная ссылка на
+    хранилище на полэкрана - человеку ничего не говорит. Самая частая причина
+    у нас - VPN в режиме подмены адресов: он отдаёт для хранилища Ollama
+    внутренний адрес (240.x.x.x, 198.18.x.x), а Ollama на такие адреса не
+    ходит из соображений безопасности и повторяет попытки, пока не сдастся.
+    """
+    short = re.sub(r"\?X-Amz-[^\"\s]*", "", error)
+    warn(f"Ollama не отдала модель {name}: {short}")
+    if "non-public" in error or "resolves to" in error:
+        log("    Похоже, мешает VPN: он подменяет адрес хранилища Ollama "
+            "внутренним, а на такие адреса Ollama не ходит. Выключите VPN на "
+            "время загрузки или переключите его из режима подмены адресов "
+            "(fake-IP) в обычный и нажмите «Дозагрузить» ещё раз.")
+    # Модели для текста, без моделей-эмбеддингов: те не умеют отвечать.
+    others = sorted(m for m in ollama_models() if m != name and "embed" not in m)
+    if others:
+        log(f"    Качать можно и не нужно: на компьютере уже есть {', '.join(others)}. "
+            "Выберите её в Настройках, раздел «Резюме и чат».")
+
+
 def ollama_pull(model: str = "", base: float = 45.0, scale: float = 0.5) -> bool:
     """Скачать языковую модель, показывая, сколько уже пришло.
 
@@ -2196,7 +2219,7 @@ def ollama_pull(model: str = "", base: float = 45.0, scale: float = 0.5) -> bool
                 except json.JSONDecodeError:
                     continue
                 if item.get("error"):
-                    warn(f"Ollama не отдала модель: {item['error']}")
+                    explain_pull_error(name, str(item["error"]))
                     return False
                 total = int(item.get("total") or 0)
                 done = int(item.get("completed") or 0)
