@@ -115,7 +115,7 @@ cp "$ROOT/Info.plist" "$CONTENTS/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" \
     -c "Set :CFBundleExecutable $EXE" -c "Set :CFBundleName '$LATIN'" \
     -c "Set :CFBundleDisplayName '$NAME'" "$CONTENTS/Info.plist"
-say "Сборка «$NAME» ($BUNDLE_ID)"
+say "Сборка «${NAME}» ($BUNDLE_ID)"
 cp "$PROJECT/VERSION" "$RESOURCES/VERSION"
 plutil -lint "$CONTENTS/Info.plist" >/dev/null || fail "Info.plist некорректен"
 printf 'APPL????' > "$CONTENTS/PkgInfo"
@@ -208,7 +208,7 @@ else
     RUNNING=""
     pgrep -x "$EXE" >/dev/null && RUNNING="да"
     if [[ -n "$RUNNING" ]]; then
-        say "Закрываю работающий «$NAME»"
+        say "Закрываю работающий «${NAME}»"
         osascript -e "quit app id \"$BUNDLE_ID\"" 2>/dev/null || true
         for _ in 1 2 3 4 5 6 7 8 9 10; do
             pgrep -x "$EXE" >/dev/null || break

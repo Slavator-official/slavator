@@ -11,7 +11,12 @@ final class Library {
     var reloads = 0
     func reload() { reloads += 1 }
 }
-struct Record { let title: String; let dir: URL }
+struct Record {
+    let title: String
+    let dir: URL
+    var source: URL? = nil
+    var ownTrack: URL? = nil
+}
 func showAlert(_ title: String, _ body: String) { preconditionFailure("\(title): \(body)") }
 
 @main
@@ -29,6 +34,7 @@ struct PipelineChecks {
         let script = """
         import json, sys, time, os
         print('keep_audio=' + str('--keep-audio' in sys.argv), flush=True)
+        print('args=' + json.dumps(sys.argv[1:]), flush=True)
         print('@@PROGRESS@@' + json.dumps({'stage':'asr','pct':42,'detail':'Распознаю'}), flush=True)
         if 'slow' in sys.argv[1]: time.sleep(30)
         print('Готово', flush=True)
@@ -55,5 +61,10 @@ struct PipelineChecks {
         precondition(pipeline.stage == "Готово" && pipeline.percent == 100 && library.reloads == 1)
         precondition(pipeline.log.last == "Готово")
         print("PASS: новый запуск после отмены, финальный вывод, обновление библиотеки")
+        let input = root.appendingPathComponent("fast.wav")
+        pipeline.rerun(record: Record(title: "Встреча", dir: root, source: input), speakers: 3, library: library)
+        spin { !pipeline.isRunning }
+        precondition(pipeline.log.contains { $0.contains("--speakers") && $0.contains("3") })
+        print("PASS: повторный разбор с заданным числом участников")
     }
 }

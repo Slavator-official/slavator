@@ -36,13 +36,11 @@ enum Edition {
     /// видеть память. Докрутим — вернуть true.
     static var hasMemory: Bool { Bundle.main.bundleIdentifier != stableID }
 
-    /// Parakeet в диктовке пробуем в тестовой (01.10.2026): быстрее Whisper
-    /// в разы, но слабее на англицизмах — см. dictation_worker.py.
-    static var hasParakeet: Bool { Bundle.main.bundleIdentifier != stableID }
+    /// Parakeet доступен в обеих сборках; выбор модели остаётся за человеком.
+    static var hasParakeet: Bool { true }
 
-    /// Восстановление записи, оборванной падением, — тоже сначала в
-    /// тестовой (01.10.2026), см. Recovery.swift.
-    static var hasRecovery: Bool { Bundle.main.bundleIdentifier != stableID }
+    /// Восстановление оборванной записи доступно в обеих сборках.
+    static var hasRecovery: Bool { true }
 }
 
 /// Тот же контракт настроек и цветов, который читает Windows-интерфейс.
@@ -336,6 +334,9 @@ struct Settings: Codable {
     var my_company = ""
     /// Определять проект встречи и раскладывать результаты по его папке.
     var project_grouping = false
+    /// Собирать резюме сразу после расшифровки, а не по кнопке. Выключено по
+    /// умолчанию: это самый долгий шаг, и не всякой встрече он нужен.
+    var auto_summary = false
     var dictation_enabled = false
     var dictation_model = DesktopContract.defaults["dictation_model"] as? String ?? "small"
     var dictation_level = DesktopContract.defaults["dictation_level"] as? String ?? "structure"
@@ -353,7 +354,7 @@ struct Settings: Codable {
     enum CodingKeys: String, CodingKey {
         case menubar_enabled, meeting_watch_enabled, dictation_hotkey, dictation_tidy_hotkey, memory_graph_enabled, chat_memory_enabled, my_profile_key
         case theme, results_dir, recordings_dir, widget_enabled, widget_size, widget_output_dir
-        case keep_diagnostics, my_name, my_position, my_company, project_grouping
+        case keep_diagnostics, my_name, my_position, my_company, project_grouping, auto_summary
         case dictation_enabled, dictation_model, dictation_level, dictation_duck
         case llm_model, asr_model
         case voice_threshold
@@ -384,6 +385,7 @@ struct Settings: Codable {
         my_position = (try? values.decode(String.self, forKey: .my_position)) ?? my_position
         my_company = (try? values.decode(String.self, forKey: .my_company)) ?? my_company
         project_grouping = (try? values.decode(Bool.self, forKey: .project_grouping)) ?? project_grouping
+        auto_summary = (try? values.decode(Bool.self, forKey: .auto_summary)) ?? auto_summary
         dictation_enabled = (try? values.decode(Bool.self, forKey: .dictation_enabled)) ?? dictation_enabled
         dictation_model = (try? values.decode(String.self, forKey: .dictation_model)) ?? dictation_model
         dictation_level = (try? values.decode(String.self, forKey: .dictation_level)) ?? dictation_level

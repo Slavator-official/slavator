@@ -102,10 +102,10 @@ final class Pipeline {
                           "--my-position", library.settings.my_position,
                           "--my-company", library.settings.my_company]
         }
-        // Резюме отдельно, по кнопке: оно самое долгое и нужно не всегда.
-        // Расшифровка и голоса ценны сами по себе - ждать ради необязательного
-        // куска лишние минуты незачем.
-        arguments.append("--no-summary")
+        // Резюме по умолчанию отдельно, по кнопке: оно самое долгое и нужно
+        // не всегда. Кому оно нужно всегда, включает автосборку в настройках —
+        // тогда ядро соберёт его тем же запуском.
+        if !library.settings.auto_summary { arguments.append("--no-summary") }
         // Результат складываем туда же, где приложение его ищет. Иначе он
         // ложится рядом с исходником, и в списке записей его не видно.
         arguments += ["--out-dir", library.settings.results_dir]
@@ -207,6 +207,40 @@ final class Pipeline {
                          "--project", project]
         if remember { arguments.append("--add-project") }
         startShort(stage: "Проект", detail: project, arguments: arguments, library: library)
+    }
+
+    /// Разобрать встречу заново с известным числом участников.
+    ///
+    /// Запись с виджета уходит в обработку сразу, и число людей там назвать
+    /// негде — движок гадает. Ошибся — исправить можно только новым
+    /// прогоном: он сам сохранит прошлый как версию.
+    func rerun(record: Record, speakers: Int, library: Library) {
+        guard let source = record.source ?? record.ownTrack else {
+            showAlert("Нет исходной записи",
+                      "Файл встречи перенесли или удалили — разобрать заново не из чего.")
+            return
+        }
+        run(input: source, library: library,
+            voiceTrack: record.ownTrack == source ? nil : record.ownTrack, speakers: speakers)
+    }
+
+    /// Дописать короткую суть к резюме, собранному раньше.
+    func brief(record: Record, library: Library) {
+        guard !isRunning else { return }
+        startShort(stage: "Коротко о встрече", detail: record.title,
+                   arguments: ["-B", Paths.core.path, "--brief", record.dir.path],
+                   library: library)
+    }
+
+    /// Назвать голос встречи по-другому. Пустое имя снимает подпись.
+    func renameVoice(record: Record, voice: String, name: String, profileKey: String = "",
+                     library: Library) {
+        guard !isRunning else { return }
+        var arguments = ["-B", Paths.core.path, "--rename-voice", record.dir.path,
+                         "--voice", voice, "--name", name]
+        if !profileKey.isEmpty { arguments += ["--profile-key", profileKey] }
+        startShort(stage: "Голоса", detail: name.isEmpty ? voice : name,
+                   arguments: arguments, library: library)
     }
 
     /// Переспросить модель, добавив ответы человека.

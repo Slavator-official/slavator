@@ -201,6 +201,28 @@ struct Record: Identifiable {
     }
     var transcript: URL? { existing("01_transcript.docx") }
 
+    private var analysis: [String: Any]? {
+        guard let data = try? Data(contentsOf: dir.appending(path: Paths.extraDir)
+                                    .appending(path: "final_analysis.json")) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
+    /// Полное резюме встречи — связный абзац из анализа.
+    var fullSummary: String? {
+        guard let text = (analysis?["summary"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+        return text
+    }
+
+    /// Суть встречи в 1–3 коротких пунктах. Пусто у встреч, чьё резюме
+    /// собрано до появления этого поля: ядро допишет его по запросу.
+    var brief: [String] {
+        ((analysis?["brief"] as? [String]) ?? [])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .map { $0.prefix(1).uppercased() + $0.dropFirst() }
+    }
+
     /// Исходная запись встречи. Ядро удаляет свою рабочую копию после
     /// обработки, но оригинал остаётся рядом с папкой результата — из него
     /// и слушаем фрагменты, вместо того чтобы просить включить хранение

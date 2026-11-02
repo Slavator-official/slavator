@@ -27,6 +27,8 @@ struct MainScreen: View {
     /// Записи, оборванные падением. Ищутся при показе главной и при
     /// возвращении в программу — как и готовность.
     @State private var interrupted: [InterruptedRecording] = []
+    /// Встреча, открытая нажатием на карточку.
+    @State private var opened: Record?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -506,6 +508,11 @@ struct MainScreen: View {
                 Legend(turns: record.turns, library: library, record: record)
                     .padding(.top, 14)
             }
+            .contentShape(Rectangle())
+            .onTapGesture { opened = record }
+            .sheet(item: $opened) { record in
+                MeetingSheet(record: record, library: library, pipeline: pipeline, player: player)
+            }
         } else {
             Card {
                 VStack(spacing: 8) {
@@ -675,6 +682,8 @@ struct RecordsScreen: View {
     @Environment(\.palette) private var p
     /// Встреча, у которой спрашиваем проект.
     @State private var asking: Record?
+    /// Встреча, открытая нажатием на карточку.
+    @State private var opened: Record?
     @State private var query = ""
     @State private var onlyUnknown = false
 
@@ -921,10 +930,8 @@ struct RecordsScreen: View {
                     .help((record.source ?? record.ownTrack) == nil
                           ? "Исходное аудио не найдено: возможно, файл перенесли или удалили."
                           : "Вся запись: перемотка и скорость доступны в панели снизу.")
-                Label("Стенограмма", systemImage: "doc.text").font(Kind.body(12)).foregroundStyle(p.muted)
-                fileButton(record.transcript, hint: "Открыть стенограмму")
-                Divider().frame(height: 14)
-                Text("Резюме").font(Kind.body(12)).foregroundStyle(p.muted)
+                docButton("Стенограмма", icon: "doc.text", url: record.transcript,
+                          hint: "Открыть стенограмму встречи")
                 summaryButton(for: record)
                 Spacer()
                 Button { renameMeeting(record) } label: {
@@ -942,9 +949,307 @@ struct RecordsScreen: View {
                     .help("Переместить встречу и её прошлые версии в корзину Славатора")
             }.padding(.top, record.turns.isEmpty ? 14 : 0)
         }
+        // Нажатие на свободное место карточки открывает встречу: кнопки
+        // внутри перехватывают свои нажатия сами.
+        .contentShape(Rectangle())
+        .onTapGesture { opened = record }
         .sheet(item: $asking) { record in
             ProjectSheet(record: record, library: library, pipeline: pipeline)
         }
+        .sheet(item: $opened) { record in
+            MeetingSheet(record: record, library: library, pipeline: pipeline, player: player)
+        }
+    }
+}
+
+/// Встреча целиком: сколько было людей и кто есть кто.
+///
+/// Движок ошибается в обе стороны — дробит одного на несколько голосов и
+/// подписывает чужим именем. Знает правду тот, кто был на встрече, и
+/// исправить её должно быть можно здесь же, а не через раздел спикеров.
+private struct MeetingSheet: View {
+    let record: Record
+    @Bindable var library: Library
+    var pipeline: Pipeline
+    var player: Player
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.palette) private var p
+    @State private var speakers = 0
+    /// Имена меняли в этом окне: резюме собрано со старыми.
+    @State private var renamed = false
+    /// Раскрыт ли разбор заново: он нужен редко и не должен отвлекать.
+    @State private var rerunning = false
+    @State private var showFull = false
+
+    /// Свежая версия встречи: после переименования список перечитывается.
+    private var current: Record {
+        library.records.first { $0.dir == record.dir } ?? record
+    }
+
+    private struct Voice: Identifiable {
+        let id: String
+        let name: String
+        let talk: Double
+        let longest: Turn
+    }
+
+    private var voices: [Voice] {
+        Dictionary(grouping: current.turns, by: \.speaker)
+            .compactMap { id, turns -> Voice? in
+                guard let longest = turns.max(by: { $0.duration < $1.duration }) else { return nil }
+                return Voice(id: id, name: turns.first?.name ?? "",
+                             talk: turns.reduce(0) { $0 + $1.duration }, longest: longest)
+            }
+            .sorted { $0.talk > $1.talk }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(current.title).font(Kind.head(17)).lineLimit(2)
+            Text("\(humanDate(current.date)) · \(hms(current.length)) · Участники: \(current.speakerCount)")
+                .font(Kind.body(12)).foregroundStyle(p.muted)
+
+            if !current.turns.isEmpty {
+                Ribbon(turns: current.turns, height: 22, library: library, record: current)
+                    .padding(.vertical, 4)
+            }
+
+            if let full = current.fullSummary {
+                Card {
+                    Text("Коротко").font(Kind.strong(13.5)).padding(.bottom, 6)
+                    if current.brief.isEmpty {
+                        // Резюме собрано до коротких пунктов: ядро сожмёт его
+                        // само, а пока показываем начало полного.
+                        Text(full).font(Kind.body(12.5)).foregroundStyle(p.muted)
+                            .lineLimit(2)
+                        if pipeline.isRunning && pipeline.stage == "Коротко о встрече" {
+                            Text("Сокращаю…").font(Kind.body(11.5)).foregroundStyle(p.faint)
+                                .padding(.top, 4)
+                        }
+                    } else {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(current.brief, id: \.self) { item in
+                                HStack(alignment: .firstTextBaseline, spacing: 7) {
+                                    Text("•").foregroundStyle(p.faint)
+                                    Text(item).fixedSize(horizontal: false, vertical: true)
+                                }
+                                .font(Kind.body(13))
+                            }
+                        }
+                        .textSelection(.enabled)
+                    }
+                    if showFull {
+                        Text(full).font(Kind.body(12.5)).foregroundStyle(p.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                            .padding(.top, 10)
+                    }
+                    HStack(spacing: 16) {
+                        Button { showFull.toggle() } label: {
+                            Label(showFull ? "Свернуть" : "Подробнее",
+                                  systemImage: showFull ? "chevron.up" : "chevron.down")
+                                .font(Kind.body(12)).contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain).foregroundStyle(p.accent2)
+                        if let doc = current.summary {
+                            Button { NSWorkspace.shared.open(doc) } label: {
+                                Label("Резюме целиком", systemImage: "list.bullet.rectangle")
+                                    .font(Kind.body(12)).contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain).foregroundStyle(p.accent2)
+                            .help("Решения, поручения и риски — документ резюме")
+                        }
+                        Spacer(minLength: 0)
+                        // Резюме устаревает: голоса привязали к людям, имена
+                        // поправили, модель сменили. Собрать заново — по кнопке.
+                        Button {
+                            pipeline.summarize(record: current, library: library)
+                            dismiss()
+                        } label: {
+                            Label("Пересобрать", systemImage: "arrow.clockwise")
+                                .font(Kind.body(12)).contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain).foregroundStyle(p.accent2)
+                        .disabled(pipeline.isRunning)
+                        .help("Собрать резюме заново — с нынешними именами участников")
+                    }
+                    .padding(.top, 10)
+                }
+            }
+
+            Card {
+                Text("Кто говорил").font(Kind.strong(13.5)).padding(.bottom, 8)
+                if voices.isEmpty {
+                    Text("В этой встрече голоса не разделены.")
+                        .font(Kind.body(12.5)).foregroundStyle(p.muted)
+                }
+                ForEach(voices) { voice in
+                    voiceRow(voice)
+                    if voice.id != voices.last?.id { Divider().overlay(p.line2) }
+                }
+                if renamed, current.summary != nil {
+                    HStack(spacing: 10) {
+                        Text("Резюме собрано со старыми именами.")
+                            .font(Kind.body(12)).foregroundStyle(p.warn)
+                        Button("Пересобрать резюме") {
+                            pipeline.summarize(record: current, library: library)
+                            dismiss()
+                        }
+                        .buttonStyle(QuietButton())
+                        .disabled(pipeline.isRunning)
+                    }
+                    .padding(.top, 10)
+                }
+
+                // Разбор заново — внизу того же блока: он про то же самое,
+                // кто говорил, и отдельной карточки не заслуживает.
+                Divider().overlay(p.line2).padding(.top, 8).padding(.bottom, 12)
+                if rerunning {
+                    Text("Сколько было участников").font(Kind.strong(13.5))
+                    Text("Назовите число людей — встреча разберётся заново. Имена, исправленные вручную, при этом сбросятся.")
+                        .font(Kind.body(12)).foregroundStyle(p.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 3).padding(.bottom, 10)
+                    HStack(spacing: 0) {
+                        step("−") { speakers = max(1, speakers - 1) }
+                        Text(String(speakers)).font(Kind.mono(13)).frame(width: 30)
+                        step("+") { speakers = min(12, speakers + 1) }
+                    }
+                    .background(RoundedRectangle(cornerRadius: 8).fill(p.raised))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(p.line, lineWidth: 1))
+                    .padding(.bottom, 12)
+                }
+                HStack(spacing: 10) {
+                    if rerunning {
+                        Button("Разобрать заново") {
+                            pipeline.rerun(record: current, speakers: speakers, library: library)
+                            dismiss()
+                        }
+                        .buttonStyle(PrimaryButton())
+                        .disabled(pipeline.isRunning || (current.source ?? current.ownTrack) == nil)
+                        Button("Отмена") { rerunning = false }.buttonStyle(QuietButton())
+                    } else {
+                        Button { rerunning = true } label: {
+                            Label("Разобрать заново", systemImage: "arrow.clockwise")
+                                .font(Kind.body(12)).contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(p.accent2)
+                        .disabled((current.source ?? current.ownTrack) == nil)
+                        Text("если голоса разложены неверно")
+                            .font(Kind.body(12)).foregroundStyle(p.faint)
+                    }
+                    Spacer(minLength: 0)
+                }
+                if (current.source ?? current.ownTrack) == nil {
+                    Text("Исходная запись не найдена — разобрать заново не из чего.")
+                        .font(Kind.body(12)).foregroundStyle(p.warn).padding(.top, 8)
+                }
+            }
+
+            HStack {
+                if pipeline.isRunning {
+                    ProgressView().controlSize(.small)
+                    Text(pipeline.stage).font(Kind.body(12)).foregroundStyle(p.muted)
+                }
+                Spacer()
+                Button("Закрыть") { dismiss() }.buttonStyle(QuietButton())
+            }
+        }
+        .padding(22)
+        .frame(width: 560)
+        .background(p.surface)
+        .onAppear {
+            speakers = max(1, record.speakerCount)
+            // Старое резюме без коротких пунктов сжимаем сразу при открытии:
+            // это одно короткое обращение к модели.
+            if record.fullSummary != nil, record.brief.isEmpty, !pipeline.isRunning {
+                pipeline.brief(record: record, library: library)
+            }
+        }
+    }
+
+    private func voiceRow(_ voice: Voice) -> some View {
+        HStack(spacing: 10) {
+            Circle().fill(library.color(for: voice.longest, in: current)).frame(width: 9, height: 9)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(voice.name.isEmpty ? voice.id : voice.name).font(Kind.strong(13))
+                Text("\(voice.name.isEmpty ? "без имени" : voice.id) · \(hms(voice.talk)) · \(share(voice))%")
+                    .font(Kind.body(11.5)).foregroundStyle(p.faint)
+            }
+            Spacer(minLength: 8)
+            if let source = current.source {
+                Button {
+                    player.play(url: source, label: voice.name.isEmpty ? voice.id : voice.name,
+                                subtitle: current.title, colour: library.color(for: voice.longest, in: current),
+                                from: voice.longest.start,
+                                to: min(voice.longest.end, voice.longest.start + 15))
+                } label: {
+                    Image(systemName: "play.circle").font(.system(size: 16))
+                        .foregroundStyle(p.accent2).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Послушать самую длинную реплику этого голоса")
+            }
+            Menu {
+                ForEach(library.speakers) { person in
+                    Button(person.name) {
+                        rename(voice, to: person.name, key: person.key)
+                    }
+                }
+                if !library.speakers.isEmpty { Divider() }
+                Button("Другое имя…") { askName(for: voice) }
+                if !voice.name.isEmpty {
+                    Button("Убрать имя") { rename(voice, to: "", key: "") }
+                }
+            } label: {
+                Image(systemName: "pencil").font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(p.accent2)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .tint(p.accent2)
+            .fixedSize()
+            .disabled(pipeline.isRunning || voice.id == "OWN")
+            .help(voice.id == "OWN" ? "Это ваша дорожка с микрофона" : "Назвать этот голос по-другому")
+        }
+        .padding(.vertical, 7)
+    }
+
+    /// Доля в разговоре — так же, как в легенде на главной.
+    private func share(_ voice: Voice) -> Int {
+        let total = max(voices.reduce(0) { $0 + $1.talk }, 0.001)
+        return Int((voice.talk / total * 100).rounded())
+    }
+
+    private func rename(_ voice: Voice, to name: String, key: String) {
+        pipeline.renameVoice(record: current, voice: voice.id, name: name, profileKey: key,
+                             library: library)
+        renamed = true
+    }
+
+    private func askName(for voice: Voice) {
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        field.stringValue = voice.name
+        let alert = NSAlert()
+        alert.messageText = "Кто это?"
+        alert.informativeText = "Имя подпишет голос только в этой встрече. Чтобы его узнавали и дальше, заведите человека в разделе «Новые голоса»."
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Сохранить")
+        alert.addButton(withTitle: "Отмена")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard name != voice.name else { return }
+        rename(voice, to: name, key: "")
+    }
+
+    private func step(_ glyph: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(glyph).font(Kind.strong(15)).foregroundStyle(p.muted)
+                .frame(width: 28, height: 28).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -1040,43 +1345,37 @@ private struct ProjectSheet: View {
 // MARK: - Спикеры
 
 extension RecordsScreen {
-    /// Кнопка открытия документа встречи. Пока обработка не дошла до этого
-    /// шага, файла нет — и честнее показать это, чем неработающую кнопку.
-    @ViewBuilder func fileButton(_ url: URL?, hint: String) -> some View {
-        if let url {
-            Button { NSWorkspace.shared.open(url) } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "arrow.down.circle").font(.system(size: 12))
-                    Text("Открыть").font(Kind.body(12.5))
-                }
-                .foregroundStyle(library.palette.accent2)
+    /// Кнопка открытия документа встречи: название и есть кнопка. Пока
+    /// обработка не дошла до этого шага, файла нет — кнопка гаснет и говорит
+    /// почему, а не притворяется рабочей.
+    func docButton(_ title: String, icon: String, url: URL?, hint: String) -> some View {
+        Button { if let url { NSWorkspace.shared.open(url) } } label: {
+            Label(title, systemImage: icon).font(Kind.body(12))
                 .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help(hint)
-        } else {
-            Text("нет").font(Kind.body(12.5)).foregroundStyle(library.palette.faint)
         }
+        .buttonStyle(.plain)
+        .foregroundStyle(url == nil ? library.palette.faint : library.palette.accent2)
+        .disabled(url == nil)
+        .help(url == nil ? "\(title): ещё нет файла" : hint)
     }
 
-    /// Резюме собирается отдельно, по запросу: это самый долгий шаг и
-    /// единственный, которому нужна языковая модель. Пока его не просили,
-    /// в колонке стоит кнопка, а не прочерк.
+    /// Резюме собирается отдельно, по запросу (или сразу, если так выбрано в
+    /// настройках): это самый долгий шаг и единственный, которому нужна
+    /// языковая модель. Пока его нет, на месте кнопки «Резюме» — «Собрать».
     @ViewBuilder func summaryButton(for record: Record) -> some View {
         if record.summary != nil {
-            fileButton(record.summary, hint: "Открыть резюме встречи")
+            docButton("Резюме", icon: "list.bullet.rectangle", url: record.summary,
+                      hint: "Открыть резюме встречи")
         } else if pipeline.isRunning {
-            Text("занято").font(Kind.body(12.5)).foregroundStyle(library.palette.faint)
+            Label("Резюме: занято", systemImage: "hourglass").font(Kind.body(12))
+                .foregroundStyle(library.palette.faint)
         } else {
             Button { pipeline.summarize(record: record, library: library) } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "sparkles").font(.system(size: 12))
-                    Text("Собрать").font(Kind.body(12.5))
-                }
-                .foregroundStyle(library.palette.accent2)
-                .contentShape(Rectangle())
+                Label("Собрать резюме", systemImage: "sparkles").font(Kind.body(12))
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .foregroundStyle(library.palette.accent2)
             .help("Собрать резюме, решения и поручения по этой встрече")
         }
     }
@@ -1714,6 +2013,17 @@ struct SettingsScreen: View {
                             selection: Binding(
                                 get: { library.settings.llm_model },
                                 set: { library.settings.llm_model = $0; library.settings.save() }))
+                Divider().overlay(p.line2).padding(.top, 12)
+                SettingRow(title: "Резюме встречи",
+                           subtitle: library.settings.auto_summary
+                               ? "Собирается сразу после расшифровки — обработка дольше на несколько минут"
+                               : "Собирается по кнопке «Собрать резюме» в карточке встречи") {
+                    Segmented(options: [("auto", "Автоматически"), ("manual", "По кнопке")],
+                              selection: Binding(
+                                get: { library.settings.auto_summary ? "auto" : "manual" },
+                                set: { library.settings.auto_summary = $0 == "auto"; library.settings.save() }))
+                        .frame(width: 280)
+                }
                 if installedLLM == nil {
                     // «Ничего не установлено» и «некому ответить» — разные
                     // вещи: во втором случае кнопка «Скачать» тоже не сработает.

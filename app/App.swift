@@ -481,7 +481,10 @@ struct Sidebar: View {
                     NavButton(title: item.1, symbol: item.2,
                               active: isActive(item.0),
                               badge: item.0 == .speakers && !library.unknown.isEmpty
-                                  ? library.unknown.count : nil) {
+                                  ? library.unknown.count : nil,
+                              // Число — это новые голоса, и нажатие на него ведёт
+                              // прямо к ним, минуя список спикеров.
+                              badgeAction: { screen = .newVoices }) {
                         screen = item.0
                     }
                 }
@@ -512,6 +515,7 @@ private struct NavButton: View {
     let symbol: String
     let active: Bool
     var badge: Int? = nil
+    var badgeAction: (() -> Void)? = nil
     let action: () -> Void
     @State private var hovering = false
 
@@ -529,6 +533,9 @@ private struct NavButton: View {
                         .foregroundStyle(p == .dark ? Color.hex(0x241A02) : .white)
                         .padding(.horizontal, 7).padding(.vertical, 1)
                         .background(Capsule().fill(p.warn))
+                        .contentShape(Capsule())
+                        .highPriorityGesture(TapGesture().onEnded { (badgeAction ?? action)() })
+                        .help("Открыть новые голоса")
                 }
             }
             .foregroundStyle(active ? p.text : p.muted)
