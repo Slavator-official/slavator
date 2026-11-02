@@ -5,8 +5,20 @@
 
 ## Установка
 
+Скачайте `Slavator-0.14.0-Windows-x64-Setup.exe` со
+[страницы выпуска](https://github.com/Slavator-official/slavator/releases/tag/v0.14.0)
+и запустите. Нужны Windows 10/11 x64, интернет и установленный App Installer (winget).
+После установки откройте «Славатор» через меню «Пуск».
+Установщик не подписан сертификатом издателя.
+
+Версия 0.14.0 собрана из отдельной Windows-ветки (`windows-v0.14.0`).
+Новые карточки встреч и другие изменения интерфейса macOS в неё не перенесены.
+Повторная установка сохраняет существующий `config.env`.
+
+Установка из исходников:
+
 ```powershell
-git clone git@github.com:pvaleragpt/-.git slavator
+git clone --branch windows-v0.14.0 git@github.com:Slavator-official/slavator.git slavator
 cd slavator
 powershell -ExecutionPolicy Bypass -File windows\install.ps1
 ```

@@ -94,12 +94,14 @@ CJM
 }
 
 $Config = Join-Path $SupportDir "config.env"
+if (-not (Test-Path $Config)) {
 @"
 # Локальная конфигурация Windows.
 MEETING_TRANSCRIBER_ASR="faster-whisper"
 MEETING_TRANSCRIBER_LLM="qwen3:8b"
 MEETING_TRANSCRIBER_GLOSSARY="$Glossary"
 "@ | Set-Content -Encoding UTF8 $Config
+}
 
 if (-not $SkipOllama) {
     Step "Ollama и qwen3:8b"

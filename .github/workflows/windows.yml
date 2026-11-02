@@ -133,3 +133,28 @@ jobs:
           # --check возвращает 1, когда нет Ollama, и это здесь ожидаемо:
           # важно, что ядро запустилось и внятно отчиталось, а не упало.
           if ($LASTEXITCODE -gt 1) { throw "ядро не запускается, код $LASTEXITCODE" }
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" windows/setup.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+
+      - name: Test packaged installer and preserve settings
+        shell: pwsh
+        run: |
+          $config = Join-Path $env:APPDATA "Славатор/config.env"
+          Add-Content -Path $config -Value "`n# release-upgrade-check"
+          $before = (Get-FileHash $config).Hash
+          $exe = (Get-ChildItem dist/*-Setup.exe).FullName
+          $process = Start-Process $exe -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /SP- /SkipOllama=1 /LOG=installer.log' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { Get-Content installer.log; throw "Packaged installer failed" }
+          if ((Get-FileHash $config).Hash -ne $before) { throw "Existing settings overwritten" }
+          $installedVersion = Get-Content (Join-Path $env:LOCALAPPDATA "Programs/Славатор/VERSION")
+          if ($installedVersion.Trim() -ne (Get-Content VERSION).Trim()) { throw "Wrong installed version" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Slavator-Windows-installer
+          path: dist/*-Setup.exe
+          if-no-files-found: error
