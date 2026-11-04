@@ -289,6 +289,7 @@ final class Library {
     var speakers: [Speaker] = []
     var records: [Record] = []
     var unknown: [UnknownVoice] = []
+    private(set) var dismissed: [UnknownVoice] = []
 
     /// Цвет закрепляется за человеком по месту в отсортированном списке.
     /// Не по хешу: хеш давал коллизии, и двое на одной встрече оказывались
@@ -301,6 +302,7 @@ final class Library {
         speakers = Self.readSpeakers()
         records = Self.readRecords(in: settings.results_dir)
         unknown = records.flatMap(Self.readUnknown)
+        dismissed = records.flatMap(Self.readDismissed)
         let shades = palette.speakers
         colors = Dictionary(uniqueKeysWithValues:
             speakers.map(\.key).sorted().enumerated().map { ($1, shades[$0 % shades.count]) })
@@ -316,8 +318,6 @@ final class Library {
         return speakers.first { $0.name.caseInsensitiveCompare(mine) == .orderedSame }
     }
 
-    /// Голоса, отложенные как неопознаваемые, по всем встречам.
-    var dismissed: [UnknownVoice] { records.flatMap(Self.readDismissed) }
 
     /// Отложить голос: человек его не узнаёт, и в списке он только мешает.
     ///
@@ -341,6 +341,7 @@ final class Library {
         guard !files.fileExists(atPath: target.path) else { return }
         do { try files.moveItem(at: url, to: target) } catch { return }
         unknown = records.flatMap(Self.readUnknown)
+        dismissed = records.flatMap(Self.readDismissed)
     }
 
     /// Сохранить «о себе» и продублировать в свою карточку.
@@ -410,6 +411,21 @@ final class Library {
         return palette.speakers[index % palette.speakers.count]
     }
 
+    /// Resolve a whole ribbon once, rather than sorting every speaker for every turn.
+    func ribbonColors(for turns: [Turn], in record: Record?) -> [Color] {
+        let palette = palette
+        let ids = record.map { Set($0.turns.map(\.speaker)).sorted() } ?? []
+        let fallback = Dictionary(uniqueKeysWithValues: ids.enumerated().map {
+            ($1, palette.speakers[$0 % palette.speakers.count])
+        })
+        let named = Dictionary(speakers.map { ($0.name, colors[$0.key] ?? palette.unknown) },
+                               uniquingKeysWith: { first, _ in first })
+        return turns.map { turn in
+            if !turn.name.isEmpty, let color = named[turn.name] { return color }
+            return fallback[turn.speaker] ?? palette.unknown
+        }
+    }
+
     func color(forName name: String) -> Color {
         guard !name.isEmpty,
               let match = speakers.first(where: { $0.name == name }),
@@ -460,9 +476,21 @@ final class Library {
                 name: info["name"] as? String ?? key,
                 position: info["position"] as? String ?? "",
                 company: info["company"] as? String ?? "",
-                samples: info["samples"] as? Int ?? 0
+                samples: sampleFiles(profileKey: key).count
             )
         }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// Only audio that is actually available can be offered for playback.
+    static func sampleFiles(profileKey: String) -> [URL] {
+        let key = String(profileKey.map { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" ? $0 : "_" })
+            .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+        let folder = Paths.profiles.appending(path: "samples").appending(path: key.isEmpty ? "speaker" : key)
+        let files = (try? FileManager.default.contentsOfDirectory(at: folder,
+                        includingPropertiesForKeys: [.isRegularFileKey])) ?? []
+        return files.filter { $0.pathExtension.lowercased() == "wav"
+            && (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 
     /// Названия проектов из списка — для выбора руками.
@@ -549,8 +577,17 @@ final class Library {
         let items = (try? FileManager.default.contentsOfDirectory(
             at: folder, includingPropertiesForKeys: nil)) ?? []
         let names = readNames(in: record.dir)
+        let extra = record.dir.appending(path: Paths.extraDir)
+        var confirmed = Set<String>()
+        for file in ["speaker_links.json", "speaker_labels.json"] {
+            if let data = try? Data(contentsOf: extra.appending(path: file)),
+               let labels = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
+                confirmed.formUnion(labels.filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.keys)
+            }
+        }
         return items.filter { $0.pathExtension.lowercased() == "wav" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .filter { !confirmed.contains($0.deletingPathExtension().lastPathComponent.components(separatedBy: " — ").first ?? "") }
             .map { url in
                 let id = url.deletingPathExtension().lastPathComponent
                     .components(separatedBy: " — ").first ?? ""

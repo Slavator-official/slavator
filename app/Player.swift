@@ -25,8 +25,26 @@ final class Player {
     private var temporaryAudio: URL?
     private var segment: ClosedRange<Double>?
 
+    /// Identity uses the source and requested range, never the display name:
+    /// different speakers can share a name and clips can share an audio file.
+    private struct Selection: Equatable {
+        let url: URL
+        let from: Double?
+        let to: Double?
+        let voice: URL?
+    }
+    private var selection: Selection?
+
+    func isPlaying(url: URL, from: Double? = nil, to: Double? = nil,
+                   voice: URL? = nil) -> Bool {
+        isPlaying && selection == Selection(url: url, from: from, to: to, voice: voice)
+    }
+
     func playMeeting(_ record: Record, colour: Color) {
-        if recordingID == record.dir && canSeek { toggle(); return }
+        if recordingID == record.dir && (canSeek || isPreparing) {
+            if isPreparing { stop() } else { toggle() }
+            return
+        }
         guard let source = record.source ?? record.ownTrack else { return }
         play(url: source, label: record.title, subtitle: "Запись встречи", colour: colour,
              voice: record.ownTrack == source ? nil : record.ownTrack)
@@ -35,7 +53,13 @@ final class Player {
 
     func play(url: URL, label: String, subtitle: String = "",
               colour: Color, from: Double? = nil, to: Double? = nil, voice: URL? = nil) {
+        let requested = Selection(url: url, from: from, to: to, voice: voice)
+        if selection == requested {
+            if isPreparing { stop(); return }
+            if canSeek { toggle(); return }
+        }
         stop()
+        selection = requested
         self.label = label; self.subtitle = subtitle; self.colour = colour
         isActive = true
         if let audio = try? AVAudioPlayer(contentsOf: url) {
@@ -161,7 +185,7 @@ final class Player {
         engine?.stop(); companion?.stop(); engine = nil; companion = nil
         stopTicker()
         isPlaying = false; isActive = false; position = 0; length = 0
-        segment = nil; recordingID = nil
+        segment = nil; recordingID = nil; selection = nil
         if let temporaryAudio { try? FileManager.default.removeItem(at: temporaryAudio) }
         temporaryAudio = nil
     }

@@ -195,7 +195,8 @@ struct MemoryScreen: View {
                                         memory.loadContext(quote, settings: library.settings)
                                     }.buttonStyle(QuietButton()).disabled(memory.busy)
                                     Button { playMemoryQuote(quote, player: player, colour: p.accent2) } label: {
-                                        Label("Слушать", systemImage: "play.fill")
+                                        Label(memoryQuotePlaying(quote, player: player) ? "Пауза" : "Слушать",
+                                              systemImage: memoryQuotePlaying(quote, player: player) ? "pause.fill" : "play.fill")
                                     }.buttonStyle(QuietButton()).disabled(quote.audio == nil)
                                     Button("Папка встречи") { NSWorkspace.shared.open(URL(fileURLWithPath: quote.meeting)) }
                                         .buttonStyle(QuietButton())
@@ -211,6 +212,10 @@ struct MemoryScreen: View {
             }
         }
     }
+}
+
+private func memoryQuotePlaying(_ quote: MemoryQuote, player: Player) -> Bool {
+    quote.audio.map { player.isPlaying(url: $0, from: quote.start, to: quote.end) } ?? false
 }
 
 func playMemoryQuote(_ quote: MemoryQuote, player: Player, colour: Color) {
@@ -250,7 +255,10 @@ struct QuoteContext: View {
                             HStack {
                                 Text(item.time + " · " + item.name).font(Kind.strong(13))
                                 Spacer()
-                                Button("Слушать") { playMemoryQuote(item, player: player, colour: p.accent2) }
+                                Button { playMemoryQuote(item, player: player, colour: p.accent2) } label: {
+                                    Label(memoryQuotePlaying(item, player: player) ? "Пауза" : "Слушать",
+                                          systemImage: memoryQuotePlaying(item, player: player) ? "pause.fill" : "play.fill")
+                                }
                                     .buttonStyle(QuietButton()).disabled(item.audio == nil)
                             }
                             Text(item.text).font(Kind.body(14)).textSelection(.enabled)

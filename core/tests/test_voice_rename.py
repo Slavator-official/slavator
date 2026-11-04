@@ -31,3 +31,16 @@ def test_rename_updates_both_transcripts_and_document(tmp_path, monkeypatch, nam
     assert links.get('A', '') == key
     if not key:
         assert json.loads((extra / 'speaker_recognition.json').read_text())[0]['profile_key'] == ''
+
+
+@pytest.mark.parametrize("name,key", [("Вручную", ""), ("Карточка", "new"), ("", "")])
+def test_explicit_confirmation_is_separate_from_inferred_names(tmp_path, monkeypatch, name, key):
+    extra = tmp_path / core.EXTRA_DIR_NAME
+    extra.mkdir()
+    (tmp_path / core.TRANSCRIPT_JSON).write_text(json.dumps({"utterances": []}))
+    monkeypatch.setattr(core, "write_transcript_docx", lambda *args: None)
+    core.rename_voice(tmp_path, "A", name, key)
+    labels = json.loads((extra / "speaker_labels.json").read_text())
+    assert ("A" in labels) == bool(name or key)
+    core.rename_voice(tmp_path, "A", "", "")
+    assert "A" not in json.loads((extra / "speaker_labels.json").read_text())

@@ -1911,6 +1911,13 @@ def rename_voice(result_dir: Path, speaker_id: str, name: str, profile_key: str 
         names.pop(speaker_id, None)
     write_json(extra_dir / "speaker_links.json", links)
     write_json(extra_dir / "speaker_names.json", names)
+    # Explicit human decisions are separate from names inferred by the model.
+    labels = table("speaker_labels.json")
+    if name or profile_key:
+        labels[speaker_id] = name or profile_key
+    else:
+        labels.pop(speaker_id, None)
+    write_json(extra_dir / "speaker_labels.json", labels)
 
     data = json.loads(transcript_path.read_text(encoding="utf-8"))
     meta = data if isinstance(data, dict) else {}

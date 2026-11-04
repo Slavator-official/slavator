@@ -26,19 +26,25 @@ struct Ribbon: View {
                             .font(Kind.body(11)).foregroundStyle(p.faint)
                     )
             } else {
+                let duration = span
+                let colors = library.ribbonColors(for: turns, in: record)
+                let ids = record.map { Set($0.turns.map(\.speaker)).sorted() } ?? []
+                let labels = Dictionary(uniqueKeysWithValues: ids.enumerated().map { ($1, "Голос \($0 + 1)") })
                 ZStack(alignment: .leading) {
-                    ForEach(turns) { turn in
-                        let x = geo.size.width * turn.start / span
+                    ForEach(Array(turns.enumerated()), id: \.element.id) { index, turn in
+                        let x = geo.size.width * turn.start / duration
                         // Минимальная ширина: короткая реплика должна остаться
                         // видимой, иначе лента теряет участников с репликами
                         // в пару слов.
-                        let w = max(2, geo.size.width * turn.duration / span - 2)
+                        let w = max(2, geo.size.width * turn.duration / duration - 2)
                         RoundedRectangle(cornerRadius: 2.5)
-                            .fill(library.color(for: turn, in: record))
+                            .fill(colors[index])
                             .frame(width: w, height: geo.size.height)
                             .offset(x: x)
                             .onTapGesture { onPick?(turn) }
-                            .help(turn.name.isEmpty ? Legend.label(for: turn, in: record) : turn.name)
+                            .help(turn.name.isEmpty
+                                  ? (turn.speaker == "OWN" ? "Вы" : labels[turn.speaker] ?? "Неизвестный голос")
+                                  : turn.name)
                     }
                 }
             }

@@ -541,7 +541,7 @@ struct MainScreen: View {
             VStack(spacing: 8) {
                 ForEach(library.unknown.prefix(2)) { voice in
                     RowBox {
-                        PlayDot(size: 28) {
+                        PlayDot(size: 28, playing: player.isPlaying(url: voice.url)) {
                             player.play(url: voice.url, label: library.label(for: voice),
                                         subtitle: "неопознанный голос",
                                         colour: library.color(for: voice))
@@ -1185,11 +1185,18 @@ private struct MeetingSheet: View {
                                 from: voice.longest.start,
                                 to: min(voice.longest.end, voice.longest.start + 15))
                 } label: {
-                    Image(systemName: "play.circle").font(.system(size: 16))
+                    Image(systemName: player.isPlaying(url: source, from: voice.longest.start,
+                                                       to: min(voice.longest.end, voice.longest.start + 15))
+                          ? "pause.circle" : "play.circle").font(.system(size: 16))
                         .foregroundStyle(p.accent2).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("Послушать самую длинную реплику этого голоса")
+                .help(player.isPlaying(url: source, from: voice.longest.start,
+                                       to: min(voice.longest.end, voice.longest.start + 15))
+                      ? "Приостановить воспроизведение" : "Послушать самую длинную реплику этого голоса")
+                .accessibilityLabel(player.isPlaying(url: source, from: voice.longest.start,
+                                                     to: min(voice.longest.end, voice.longest.start + 15))
+                                    ? "Приостановить воспроизведение" : "Воспроизвести образец голоса")
             }
             Menu {
                 ForEach(library.speakers) { person in
@@ -1431,7 +1438,12 @@ struct SpeakerProfilesScreen: View {
                     VStack(spacing: 8) {
                         ForEach(library.speakers) { person in
                             RowBox {
-                                PlayDot(size: 28) { playSample(person) }
+                                PlayDot(size: 28, playing: sampleFile(person).map { player.isPlaying(url: $0) } ?? false) {
+                                    playSample(person)
+                                }
+                                .disabled(person.samples == 0)
+                                .opacity(person.samples == 0 ? 0.4 : 1)
+                                .help(person.samples == 0 ? "Аудиообразцы не сохранены. Голосовой профиль доступен для распознавания." : "Послушать образец голоса")
                                 Avatar(text: person.initials, colour: library.color(for: person))
                                 VStack(alignment: .leading, spacing: 1) {
                                     Text(person.name).font(Kind.strong(14.5))
@@ -1443,7 +1455,7 @@ struct SpeakerProfilesScreen: View {
                                 Spacer(minLength: 8)
                                 VStack(alignment: .trailing, spacing: 0) {
                                     Text("\(person.samples)").font(Kind.mono(13)).foregroundStyle(p.text)
-                                    Text("образцов").font(Kind.body(11)).foregroundStyle(p.muted)
+                                    Text(person.samples == 0 ? "нет аудио" : "аудиообразцов").font(Kind.body(11)).foregroundStyle(p.muted)
                                 }
                             }
                             .contentShape(Rectangle())
@@ -1455,11 +1467,12 @@ struct SpeakerProfilesScreen: View {
         }
     }
 
+    private func sampleFile(_ person: Speaker) -> URL? {
+        Library.sampleFiles(profileKey: person.key).first
+    }
+
     private func playSample(_ person: Speaker) {
-        let folder = Paths.profiles.appending(path: "samples/\(person.key)")
-        let items = (try? FileManager.default.contentsOfDirectory(at: folder,
-                                                                  includingPropertiesForKeys: nil)) ?? []
-        guard let first = items.first(where: { $0.pathExtension.lowercased() == "wav" }) else {
+        guard let first = sampleFile(person) else {
             showAlert("Нет образцов", "Для этого человека пока нет записей голоса.")
             return
         }
@@ -1496,7 +1509,7 @@ struct NewVoicesScreen: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        LazyVStack(alignment: .leading, spacing: 0) {
             HStack {
                 ScreenTitle(text: "Новые голоса")
                 Spacer()
@@ -1696,7 +1709,7 @@ private struct VoiceCard: View {
                         .foregroundStyle(selected ? p.accent : p.faint)
                 }
                 .buttonStyle(.plain)
-                PlayDot { player.play(url: voice.url, label: library.label(for: voice),
+                PlayDot(playing: player.isPlaying(url: voice.url)) { player.play(url: voice.url, label: library.label(for: voice),
                                       subtitle: "неопознанный голос",
                                       colour: library.color(for: voice)) }
                 VStack(alignment: .leading, spacing: 1) {
@@ -1842,12 +1855,12 @@ struct PersonScreen: View {
                     Text("Образцы голоса").font(Kind.head(16)).padding(.bottom, 14)
                     let samples = sampleFiles(person)
                     if samples.isEmpty {
-                        Text("Образцов пока нет").font(Kind.body(13.5)).foregroundStyle(p.muted)
+                        Text("Сохранённых аудиообразцов нет. Голосовой профиль используется для распознавания; аудио можно добавить через «Новые голоса».").font(Kind.body(13.5)).foregroundStyle(p.muted)
                     } else {
                         VStack(spacing: 8) {
                             ForEach(samples, id: \.self) { url in
                                 RowBox {
-                                    PlayDot(size: 28) {
+                                    PlayDot(size: 28, playing: player.isPlaying(url: url)) {
                                         player.play(url: url, label: person.name,
                                                     subtitle: "образец голоса",
                                                     colour: library.color(for: person))
@@ -1871,12 +1884,7 @@ struct PersonScreen: View {
     }
 
     private func sampleFiles(_ person: Speaker) -> [URL] {
-        let folder = Paths.profiles.appending(path: "samples/\(person.key)")
-        let items = (try? FileManager.default.contentsOfDirectory(at: folder,
-                                                                  includingPropertiesForKeys: nil)) ?? []
-        return items.filter { $0.pathExtension.lowercased() == "wav" }.sorted {
-            $0.lastPathComponent < $1.lastPathComponent
-        }
+        Library.sampleFiles(profileKey: person.key)
     }
 }
 
