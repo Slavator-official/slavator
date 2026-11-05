@@ -106,6 +106,12 @@ struct MemoryQuote: Codable, Identifiable, Equatable {
     private(set) var failure: String?
     private(set) var warnings: [String] = []
     private var process: Process?
+    /// Запрос, пришедший, пока память была занята. Раньше такой запрос
+    /// молча выбрасывался: «Записи» при запуске просят каталог, человек
+    /// переходит в «Память», её запрос на синхронизацию и хронологию
+    /// натыкается на занятость — и экран навсегда показывал «0 реплик».
+    /// Храним только последний: он и отражает то, чего человек ждёт сейчас.
+    private var queued: (() -> Void)?
     private var root = ""
 
     private struct Reply: Decodable {
@@ -176,7 +182,10 @@ struct MemoryQuote: Codable, Identifiable, Equatable {
     }
 
     func search(settings: Settings, more: Bool = false, keepNotice: Bool = false) {
-        guard !busy else { return }
+        guard !busy else {
+            queued = { [weak self] in self?.search(settings: settings, more: more, keepNotice: keepNotice) }
+            return
+        }
         if !more { hits = []; total = 0 }
         let offset = more ? hits.count : 0
         run(["action": "search", "query": query, "mode": mode,
@@ -203,7 +212,7 @@ struct MemoryQuote: Codable, Identifiable, Equatable {
         guard !isMutating else { return }
         // Invalidate callbacks immediately; SQLite rolls back an unfinished write.
         if let process, process.isRunning { process.terminate() }
-        process = nil; busy = false
+        process = nil; busy = false; queued = nil
         progress = ""
         notice = "Остановлено. Уже сохранённая память останется на диске."
     }
@@ -211,7 +220,12 @@ struct MemoryQuote: Codable, Identifiable, Equatable {
     private func run(_ request: [String: Any], settings: Settings,
                      append: Bool = false, keepNotice: Bool = false,
                      done: (() -> Void)? = nil) {
-        guard !busy else { return }
+        guard !busy else {
+            queued = { [weak self] in
+                self?.run(request, settings: settings, append: append, keepNotice: keepNotice, done: done)
+            }
+            return
+        }
         let worker = Process()
         worker.executableURL = Paths.venvPython
         worker.arguments = ["-B", Paths.core.deletingLastPathComponent().appending(path: "speaker_memory.py").path,
@@ -258,6 +272,9 @@ struct MemoryQuote: Codable, Identifiable, Equatable {
                 if status != 0 || !received {
                     self.failure = self.failure ?? "Не удалось прочитать память встреч. Проверьте окружение и доступ к папке результатов."
                 } else { done?() }
+                // Отложенный запрос — после своего продолжения: если done
+                // уже запустил следующий шаг, очередь дождётся и его.
+                if !self.busy, let next = self.queued { self.queued = nil; next() }
             })
         } catch {
             if worker.isRunning { worker.terminate() }
