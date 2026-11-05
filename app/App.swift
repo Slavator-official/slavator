@@ -41,14 +41,20 @@ struct SlavatorApp: App {
                     dictation.refresh(settings: library.settings)
                 }
         }
-        .windowStyle(.titleBar)
+        // Без отдельной полосы заголовка: боковая панель поднимается под
+        // кнопки окна, как в Finder и Почте. Название окна и так написано
+        // в боковой панели, полоса над ней дублировала его.
+        .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1180, height: 800)
         .commands { CommandGroup(replacing: .newItem) { } }
     }
 }
 
+/// «Главной» больше нет: она повторяла «Записи» — та же последняя встреча и
+/// те же кнопки. Новая встреча начинается прямо в «Записях», над списком
+/// (apple-design: экран называют по тому, что в нём лежит, а не «Главная»).
 enum Screen: Hashable {
-    case main, memory, records, speakers, newVoices, settings, chat, privacy
+    case memory, records, speakers, newVoices, settings, chat, privacy
     case person(String)
 }
 
@@ -244,31 +250,31 @@ struct ModeSwitch: View {
     private var inChat: Bool { screen == .chat || screen == .privacy }
 
     var body: some View {
-        HStack(spacing: 3) {
+        HStack(spacing: 2) {
             button(symbol: "waveform", active: !inChat, hint: "Славатор") {
-                if inChat { screen = (back == .chat || back == .privacy) ? .main : back }
+                if inChat { screen = (back == .chat || back == .privacy) ? .records : back }
             }
             button(symbol: "bubble.left.and.bubble.right", active: inChat, hint: "Чат с моделью") {
                 if !inChat { back = screen }
                 screen = .chat
             }
         }
-        .padding(3)
+        .padding(2)
         .frame(maxWidth: .infinity)
-        .background(RoundedRectangle(cornerRadius: 9).fill(p.surface))
-        .overlay(RoundedRectangle(cornerRadius: 9).stroke(p.line2, lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: 8).fill(p.selection))
     }
 
     private func button(symbol: String, active: Bool, hint: String,
                         action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Label(hint == "Славатор" ? "Встречи" : "Чат", systemImage: symbol)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(active ? Color.white : p.muted)
+                .font(.system(size: 12, weight: active ? .semibold : .medium))
+                .foregroundStyle(active ? p.text : p.muted)
                 .frame(maxWidth: .infinity)
-                .frame(height: 27)
-                .background(RoundedRectangle(cornerRadius: 7)
-                    .fill(active ? p.accent : Color.clear))
+                .frame(height: 24)
+                .background(RoundedRectangle(cornerRadius: 6)
+                    .fill(active ? p.segment : Color.clear)
+                    .shadow(color: .black.opacity(active ? 0.12 : 0), radius: 1, y: 0.5))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -285,9 +291,9 @@ struct Shell: View {
     var chat: Chat
     var memory: SpeakerMemory
     var doctor: Doctor
-    @State private var screen: Screen = .main
+    @State private var screen: Screen = .records
     /// Куда вернуться из чата.
-    @State private var lastAppScreen: Screen = .main
+    @State private var lastAppScreen: Screen = .records
     @State private var picked: URL?
     @State private var privacyWorkspace = DocumentWorkspace()
     @Environment(\.colorScheme) private var systemScheme
@@ -300,7 +306,7 @@ struct Shell: View {
         HStack(spacing: 0) {
             Sidebar(library: library, screen: $screen,
                     lastAppScreen: $lastAppScreen, chat: chat)
-            Divider().overlay(palette.line2)
+            Rectangle().fill(palette.line).frame(width: 0.5)
 
             VStack(spacing: 0) {
                 // Чат живёт вне общей прокрутки: внутри неё высота не
@@ -315,12 +321,10 @@ struct Shell: View {
                 ScrollView {
                     Group {
                         switch screen {
-                        case .main:      MainScreen(library: library, player: player,
-                                                    pipeline: pipeline, capture: capture,
-                                                    doctor: doctor, picked: $picked,
-                                                    screen: $screen)
                         case .records:   RecordsScreen(library: library, player: player,
-                                                      pipeline: pipeline, memory: memory, screen: $screen)
+                                                      pipeline: pipeline, capture: capture,
+                                                      doctor: doctor, memory: memory,
+                                                      picked: $picked, screen: $screen)
                         case .memory:    MemoryScreen(library: library, player: player, memory: memory)
                         case .speakers:  SpeakerProfilesScreen(library: library, player: player,
                                                                screen: $screen)
@@ -341,7 +345,9 @@ struct Shell: View {
                 }
                 }
 
-                if capture.isRecording || pipeline.isRunning {
+                // В «Записях» запись и расшифровка видны в панели новой
+                // встречи; нижняя полоса там повторяла бы её слово в слово.
+                if (capture.isRecording || pipeline.isRunning) && screen != .records {
                     activityBar
                 }
                 if player.isActive {
@@ -353,7 +359,9 @@ struct Shell: View {
         }
         .environment(\.palette, palette)
         .foregroundStyle(palette.text)
-        .onAppear { applyAppearance(library.settings.theme) }
+        .onAppear {
+            applyAppearance(library.settings.theme)
+        }
         .onChange(of: library.settings.theme) { _, value in applyAppearance(value) }
         .onChange(of: pipeline.isRunning) { _, running in if running { chat.stop() } }
         .preferredColorScheme(library.settings.theme == "system" ? nil : (palette == .dark ? .dark : .light))
@@ -368,13 +376,13 @@ struct Shell: View {
         VStack(spacing: 10) {
             if capture.isRecording {
                 HStack(spacing: 12) {
-                    Image(systemName: "record.circle.fill").foregroundStyle(Color.hex(0xE0705F))
+                    Circle().fill(palette.accent).frame(width: 9, height: 9)
                     Text("Идёт запись").font(Kind.strong())
-                    Text(hms(capture.seconds)).font(Kind.mono()).foregroundStyle(palette.muted)
+                    Text(hms(capture.seconds)).font(Kind.body(13)).monospacedDigit().foregroundStyle(palette.muted)
                     Spacer()
-                    Button("Остановить и обработать") {
+                    Button("Остановить и расшифровать") {
                         picked = finishMeeting(capture: capture, pipeline: pipeline, library: library)
-                    }.buttonStyle(QuietButton())
+                    }.buttonStyle(PrimaryButton())
                 }
             }
             if pipeline.isRunning {
@@ -388,7 +396,7 @@ struct Shell: View {
                     if let left = pipeline.remainingText, !pipeline.isSuspended {
                         Text(left).font(Kind.body(12)).foregroundStyle(palette.muted)
                     }
-                    Text("\(Int(pipeline.percent))% ").font(Kind.mono())
+                    Text("\(Int(pipeline.percent))%").font(Kind.body(13)).monospacedDigit()
                     Button(pipeline.isCancelling ? "Останавливаю…" : "Прервать") { pipeline.cancel() }
                         .buttonStyle(QuietButton()).disabled(pipeline.isCancelling)
                 }
@@ -396,7 +404,7 @@ struct Shell: View {
         }
         .padding(.horizontal, 28).padding(.vertical, 12)
         .background(palette.surface)
-        .overlay(alignment: .top) { Rectangle().fill(palette.line2).frame(height: 1) }
+        .overlay(alignment: .top) { Rectangle().fill(palette.line).frame(height: 0.5) }
     }
 }
 
@@ -407,57 +415,81 @@ struct Sidebar: View {
     var chat: Chat
     @Environment(\.palette) private var p
 
+    /// Пункты названы по содержимому: «Записи» открываются первыми и
+    /// начинают новую встречу, «Главной» больше нет.
     private var items: [(Screen, String, String)] {
-        [(.main, "Главная", "house"),
-         (.memory, "Память встреч", "brain"),
-         (.records, "Записи", "clock"),
-         (.speakers, "Спикеры", "person"),
+        [(.records, "Записи", "waveform"),
+         (.memory, "Память встреч", "point.3.connected.trianglepath.dotted"),
+         (.speakers, "Спикеры", "person.2"),
          (.settings, "Настройки", "gearshape")]
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
-                if let icon = NSImage(named: "AppIcon") ?? bundledIcon() {
+                if let icon = bundledIcon() ?? NSImage(named: "AppIcon") {
                     Image(nsImage: icon)
-                        .resizable().frame(width: 42, height: 42)
-                        .clipShape(RoundedRectangle(cornerRadius: 11))
+                        .resizable().interpolation(.high)
+                        .frame(width: 34, height: 34)
+                        .clipShape(RoundedRectangle(cornerRadius: 9))
                 }
-                Text(AppConfiguration.displayName).font(Kind.title(19))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(AppConfiguration.displayName)
+                        .font(.system(size: 15, weight: .semibold)).kerning(-0.15)
+                    Text("Всё на этом Mac").font(Kind.body(11.5)).foregroundStyle(p.muted)
+                }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 10).padding(.bottom, 12)
+            .padding(.horizontal, 8).padding(.bottom, 14)
 
             // Переключатель режимов стоит здесь, у названия: это выбор
             // «чем сейчас занимаемся», а не действие внутри экрана, и в
             // правом верхнем углу он читался как случайная кнопка.
             ModeSwitch(screen: $screen, back: $lastAppScreen)
-                .padding(.horizontal, 10).padding(.bottom, 18)
+                .padding(.horizontal, 4).padding(.bottom, 16)
 
             if screen == .chat || screen == .privacy {
                 NavButton(title: "Обезличивание", symbol: "lock.shield",
                           active: screen == .privacy, badge: nil) { screen = .privacy }
-                    .padding(.bottom, 18)
-                // В режиме чата «Главная» и «Записи» не нужны, а список
-                // переписок нужен постоянно — он и занимает их место.
+                    .padding(.bottom, 14)
+                // В режиме чата «Записи» не нужны, а список переписок нужен
+                // постоянно — он и занимает их место.
                 ChatHistory(chat: chat, showsSelection: screen == .chat, onOpen: { screen = .chat })
             } else {
-            VStack(spacing: 2) {
-                ForEach(items, id: \.1) { item in
-                    NavButton(title: item.1, symbol: item.2,
-                              active: isActive(item.0),
-                              badge: item.0 == .speakers && !library.unknown.isEmpty
-                                  ? library.unknown.count : nil) {
-                        screen = item.0
+                VStack(spacing: 1) {
+                    ForEach(items, id: \.1) { item in
+                        NavButton(title: item.1, symbol: item.2,
+                                  active: isActive(item.0),
+                                  badge: item.0 == .speakers && !library.unknown.isEmpty
+                                      ? library.unknown.count : nil) {
+                            screen = item.0
+                        }
                     }
                 }
             }
-            }
             Spacer()
+            // Главное обещание программы — видно всегда: записи и модели не
+            // уходят с компьютера, а если чего-то не хватает, это тоже видно.
+            HStack(spacing: 7) {
+                Circle().fill(Paths.isReady ? p.ok : p.warn).frame(width: 7, height: 7)
+                Text(Paths.isReady ? "Работает без интернета" : "Нужна установка")
+                    .font(Kind.body(11.5)).foregroundStyle(p.muted)
+            }
+            .padding(.horizontal, 10)
         }
-        .padding(.vertical, 22).padding(.horizontal, 12)
+        // Сверху — место под кнопки окна: полосы заголовка больше нет.
+        .padding(.top, 44).padding(.bottom, 16).padding(.horizontal, 10)
         .frame(width: 224, alignment: .leading)
-        .background(p.sidebar)
+        .frame(maxHeight: .infinity, alignment: .top)
+        // Стекло тонировано тёплым графитом. Чистый системный материал брал
+        // цвет обоев: на синих обоях боковая панель становилась синей и
+        // спорила с красной гаммой «Славатора 2». Сквозь тонировку обои
+        // только угадываются, а при «Уменьшить прозрачность» система сама
+        // делает стекло глухим.
+        .background(ZStack {
+            SidebarMaterial()
+            p.sidebar.opacity(0.84)
+        }.ignoresSafeArea())
     }
 
     private func isActive(_ target: Screen) -> Bool {
@@ -472,6 +504,9 @@ struct Sidebar: View {
     }
 }
 
+/// Строка боковой панели по образцу системных: значок в цвете акцента,
+/// текст обычного цвета, выбранная строка — серая подложка. Переход между
+/// экранами мгновенный: его делают десятки раз в день.
 private struct NavButton: View {
     @Environment(\.palette) private var p
     let title: String
@@ -483,24 +518,23 @@ private struct NavButton: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 11) {
+            HStack(spacing: 9) {
                 Image(systemName: symbol)
-                    .font(.system(size: 15, weight: .regular))
+                    .font(.system(size: 14, weight: .regular))
+                    .foregroundStyle(p.accent2)
                     .frame(width: 18)
-                Text(title).font(.system(size: 14, weight: active ? .semibold : .regular))
+                Text(title).font(.system(size: 13, weight: active ? .semibold : .regular))
+                    .foregroundStyle(p.text)
                 Spacer(minLength: 4)
                 if let badge {
                     Text("\(badge)")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(p == .dark ? Color.hex(0x241A02) : .white)
-                        .padding(.horizontal, 7).padding(.vertical, 1)
-                        .background(Capsule().fill(p.warn))
+                        .font(.system(size: 11.5, weight: .semibold)).monospacedDigit()
+                        .foregroundStyle(p.muted)
                 }
             }
-            .foregroundStyle(active ? p.text : p.muted)
-            .padding(.horizontal, 10).padding(.vertical, 9)
-            .background(RoundedRectangle(cornerRadius: 9)
-                .fill(active ? p.accentSoft : (hovering ? p.raised : .clear)))
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 7)
+                .fill(active ? p.selection.opacity(1.4) : (hovering ? p.selection : .clear)))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -514,8 +548,9 @@ struct ScreenTitle: View {
     @Environment(\.palette) private var p
     let text: String
     var body: some View {
-        Text(text).font(Kind.title(24)).foregroundStyle(p.text)
-            .padding(.bottom, 18)
+        // Крупный кегль — плотнее трекинг: так буквы не рассыпаются.
+        Text(text).font(Kind.title(26)).kerning(-0.5).foregroundStyle(p.text)
+            .padding(.bottom, 4)
     }
 }
 
@@ -555,11 +590,14 @@ struct PlayDot: View {
 
     var body: some View {
         Button(action: action) {
+            // Нейтральная: красный оставлен записи и главному действию, а
+            // кнопок «послушать» на экране бывает десяток.
             ZStack {
-                Circle().fill(p.accent).frame(width: size, height: size)
+                Circle().fill(p.selection.opacity(1.5)).frame(width: size, height: size)
                 Image(systemName: playing ? "pause.fill" : "play.fill")
-                    .font(.system(size: size * 0.36, weight: .bold))
-                    .foregroundStyle(.white)
+                    .font(.system(size: size * 0.34, weight: .bold))
+                    .foregroundStyle(p.text)
+                    .offset(x: playing ? 0 : size * 0.03)
             }
         }
         .buttonStyle(.plain)
@@ -588,13 +626,10 @@ struct RowBox<Content: View>: View {
 
     var body: some View {
         HStack(spacing: 13) { content }
-            .padding(.horizontal, 14).padding(.vertical, 11)
+            .padding(.horizontal, 14).padding(.vertical, 10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(hovering ? p.raised : p.row)
-            .overlay(RoundedRectangle(cornerRadius: 10)
-                .stroke(hovering ? p.line : p.line2, lineWidth: 1))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .background(hovering ? p.selection : Color.clear)
+            .contentShape(Rectangle())
             .onHover { hovering = $0 }
-            .animation(.easeOut(duration: 0.12), value: hovering)
     }
 }
