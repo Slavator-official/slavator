@@ -51,12 +51,14 @@ struct SlavatorApp: App {
     }
 }
 
-/// Экраны. «Встречи» (records) — список и открытая встреча; запись и импорт
-/// там же. Обезличивание из меню пока убрано: его экран в коде остался и
-/// вернётся одной строкой в Sidebar.items.
+/// Экраны. «Запись» (capture) — начать запись или расшифровать файл,
+/// «Встречи» (records) — список; встреча (meeting) открывается в том же окне.
+/// Обезличивание из меню пока убрано: его экран в коде остался и вернётся
+/// одной строкой в Sidebar.items.
 enum Screen: Hashable {
-    case memory, records, speakers, newVoices, settings, chat, privacy
+    case capture, memory, records, speakers, newVoices, settings, chat, privacy
     case person(String)
+    case meeting(URL)
 }
 
 /// Значок в строке меню. Сделан на AppKit намеренно: MenuBarExtra из SwiftUI
@@ -251,7 +253,9 @@ struct Shell: View {
     var chat: Chat
     var memory: SpeakerMemory
     var doctor: Doctor
-    @State private var screen: Screen = .records
+    @State private var screen: Screen = .capture
+    /// Куда ведёт «Назад» со встречи.
+    @State private var beforeMeeting: Screen = .records
     @State private var picked: URL?
     @State private var privacyWorkspace = DocumentWorkspace()
     @Environment(\.colorScheme) private var systemScheme
@@ -267,10 +271,6 @@ struct Shell: View {
             VStack(spacing: 12) {
                 Group {
                     switch screen {
-                    case .records:
-                        MeetingsScreen(library: library, player: player, pipeline: pipeline,
-                                       capture: capture, doctor: doctor, memory: memory, chat: chat,
-                                       picked: $picked, screen: $screen)
                     case .chat:
                         // Переписки — средней колонкой, как список встреч:
                         // слева что выбрать, справа сама переписка.
@@ -282,6 +282,13 @@ struct Shell: View {
                             .frame(width: 270)
                             ChatScreen(library: library, chat: chat, memory: memory, player: player)
                         }
+                    case .meeting(let dir):
+                        MeetingPage(dir: dir,
+                                    backTitle: beforeMeeting == .capture ? "Запись" : "Встречи",
+                                    back: { screen = beforeMeeting },
+                                    library: library, player: player, pipeline: pipeline,
+                                    chat: chat, memory: memory, screen: $screen)
+                            .id(dir)
                     case .privacy:
                         // Пункта в меню нет; ветка нужна, чтобы перечисление
                         // было исчерпано, и экран вернётся без переделок.
@@ -290,6 +297,11 @@ struct Shell: View {
                         ScrollView {
                             Group {
                                 switch screen {
+                                case .capture:   RecordScreen(library: library, player: player, pipeline: pipeline,
+                                                              capture: capture, doctor: doctor, chat: chat,
+                                                              memory: memory, picked: $picked, screen: $screen)
+                                case .records:   RecordsScreen(library: library, player: player, pipeline: pipeline,
+                                                               chat: chat, memory: memory, screen: $screen)
                                 case .memory:    MemoryScreen(library: library, player: player, memory: memory)
                                 case .speakers:  SpeakerProfilesScreen(library: library, player: player,
                                                                        screen: $screen)
@@ -309,14 +321,14 @@ struct Shell: View {
                     }
                 }
 
-                // На «Встречах» запись и расшифровка видны в списке; нижняя
+                // На «Записи» запись и расшифровка — весь экран; нижняя
                 // полоса там повторяла бы их слово в слово.
-                if (capture.isRecording || pipeline.isRunning) && screen != .records {
+                if (capture.isRecording || pipeline.isRunning) && screen != .capture {
                     activityBar
                 }
-                // Встречу слушают из её плеера; полоса снизу нужна для
-                // остального — образцов голоса, реплик из памяти.
-                if player.isActive && !(screen == .records && player.recordingID != nil) {
+                // Встречу слушают из её плеера; полоса снизу — для остального:
+                // образцов голоса, реплик из памяти.
+                if player.isActive && !(screen == .meeting(player.recordingID ?? URL(fileURLWithPath: "/")) ) {
                     PlayerBar(player: player)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                         .overlay(RoundedRectangle(cornerRadius: 12).stroke(palette.line, lineWidth: 1))
@@ -333,12 +345,20 @@ struct Shell: View {
         }
         .onChange(of: library.settings.theme) { _, value in applyAppearance(value) }
         .onChange(of: pipeline.isRunning) { _, running in if running { chat.stop() } }
+        .onChange(of: screen) { old, new in
+            if case .meeting = new, !isMeeting(old) { beforeMeeting = old }
+        }
         .preferredColorScheme(library.settings.theme == "system" ? nil : (palette == .dark ? .dark : .light))
         .animation(.easeOut(duration: 0.18), value: player.isActive)
         .background(palette.bg)
         .onReceive(NotificationCenter.default.publisher(for: .settingsSaveFailed)) { message in
             showAlert("Не удалось сохранить настройки", message.object as? String ?? "Проверьте доступ к папке приложения.")
         }
+    }
+
+    private func isMeeting(_ value: Screen) -> Bool {
+        if case .meeting = value { return true }
+        return false
     }
 
     private var activityBar: some View {
@@ -385,7 +405,8 @@ struct Sidebar: View {
     @Environment(\.palette) private var p
 
     private var items: [(Screen, String, String)] {
-        [(.records, "Встречи", "calendar"),
+        [(.capture, "Запись", "record.circle"),
+         (.records, "Встречи", "calendar"),
          (.memory, "Память встреч", "point.3.connected.trianglepath.dotted"),
          (.speakers, "Спикеры", "person.2"),
          (.chat, "Чат", "bubble.left"),
@@ -437,6 +458,7 @@ struct Sidebar: View {
 
     private func isActive(_ target: Screen) -> Bool {
         if case .person = screen, target == .speakers { return true }
+        if case .meeting = screen, target == .records { return true }
         if screen == .newVoices, target == .speakers { return true }
         return screen == target
     }

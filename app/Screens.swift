@@ -27,7 +27,7 @@ func finishMeeting(capture: LiveCapture, pipeline: Pipeline, library: Library) -
         return url
     }
     guard !pipeline.isRunning else {
-        showAlert("Запись сохранена", "Другая встреча ещё обрабатывается. Новая запись выбрана в «Записях» — запустите её, когда обработка завершится.")
+        showAlert("Запись сохранена", "Другая встреча ещё обрабатывается. Новая запись выбрана на экране «Запись» — запустите её, когда обработка завершится.")
         return url
     }
     // Дорожки сведены в один файл ещё при остановке, отдельной микрофонной
@@ -145,6 +145,30 @@ struct ProjectSheet: View {
 }
 
 // MARK: - Спикеры
+
+extension RecordsScreen {
+    /// Статус встречи: важно не «готово», а есть ли неразобранные голоса.
+    @ViewBuilder func statusPill(for record: Record) -> some View {
+        let unknown = library.unknown.filter { $0.record == record.dir }.count
+        let card = record.meeting
+        if let card, card.needs_review {
+            // Не «ошибка», а незаконченное дело: нажатие открывает вопросы.
+            Button { asking = record } label: {
+                Pill(text: "уточнить проект",
+                     fg: library.palette.warn, bg: library.palette.warnBg)
+            }
+            .buttonStyle(.plain)
+            .help("Ядро не смогло определить проект — спросите его или выберите руками")
+        } else if unknown > 0 {
+            Pill(text: unknown == 1 ? "1 новый голос" : "\(unknown) новых голоса",
+                 fg: library.palette.warn, bg: library.palette.warnBg)
+        } else if let card, !card.project.isEmpty {
+            Pill(text: card.project, fg: library.palette.ok, bg: library.palette.okBg)
+        } else {
+            Pill(text: "Готово", fg: library.palette.ok, bg: library.palette.okBg)
+        }
+    }
+}
 
 struct SpeakerProfilesScreen: View {
     @Bindable var library: Library
@@ -623,6 +647,66 @@ struct PersonScreen: View {
 
 // MARK: - Настройки
 
+/// Миниатюра темы, как в «Системных настройках» Mac: маленькое окно в её
+/// цветах. По картинке выбирают быстрее, чем по слову.
+private struct ThemeTile: View {
+    let kind: String
+    let title: String
+    let selected: Bool
+    let action: () -> Void
+    @Environment(\.palette) private var p
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 8) {
+                ZStack {
+                    if kind == "system" {
+                        HStack(spacing: 0) { window(.light); window(.dark) }
+                    } else {
+                        window(kind == "dark" ? .dark : .light)
+                    }
+                }
+                .frame(width: 124, height: 80)
+                .clipShape(RoundedRectangle(cornerRadius: 9))
+                .overlay(RoundedRectangle(cornerRadius: 9)
+                    .stroke(selected ? p.accent : p.line, lineWidth: selected ? 2.5 : 1))
+                Text(title).font(.system(size: 13, weight: selected ? .semibold : .regular))
+                    .foregroundStyle(selected ? p.accent2 : p.text)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle())
+        .accessibilityLabel("Тема: " + title)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    /// Окно в цветах темы: меню слева, белая панель, синяя кнопка.
+    private func window(_ theme: Palette) -> some View {
+        HStack(spacing: 5) {
+            VStack(alignment: .leading, spacing: 5) {
+                RoundedRectangle(cornerRadius: 2).fill(theme.accent).frame(width: 18, height: 5)
+                RoundedRectangle(cornerRadius: 2).fill(theme.line).frame(width: 22, height: 4)
+                RoundedRectangle(cornerRadius: 2).fill(theme.line).frame(width: 16, height: 4)
+                Spacer(minLength: 0)
+            }
+            .padding(.top, 10).padding(.leading, 7)
+            VStack(alignment: .leading, spacing: 5) {
+                RoundedRectangle(cornerRadius: 2).fill(theme.text.opacity(0.75)).frame(width: 34, height: 5)
+                RoundedRectangle(cornerRadius: 2).fill(theme.line).frame(height: 4)
+                RoundedRectangle(cornerRadius: 2).fill(theme.line).frame(width: 30, height: 4)
+                Spacer(minLength: 0)
+                RoundedRectangle(cornerRadius: 3).fill(theme.accent).frame(width: 26, height: 9)
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(RoundedRectangle(cornerRadius: 5).fill(theme.surface))
+            .padding(.vertical, 6).padding(.trailing, 6)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.bg)
+    }
+}
+
 struct SettingsScreen: View {
     @Bindable var library: Library
     var dictation: Dictation
@@ -643,6 +727,24 @@ struct SettingsScreen: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             ScreenTitle(text: "Настройки")
+
+            // Тема — первой: это первое, что ищут в настройках, а в самом
+            // низу её не находили.
+            Card {
+                Text("Оформление").font(Kind.head(16))
+                Text("«Авто» следует за настройкой macOS: днём светлая, вечером тёмная.")
+                    .font(Kind.body(13)).foregroundStyle(p.muted).padding(.top, 3).padding(.bottom, 14)
+                HStack(spacing: 14) {
+                    ForEach([("light", "Светлая"), ("dark", "Тёмная"), ("system", "Авто")], id: \.0) { value, title in
+                        ThemeTile(kind: value, title: title, selected: library.settings.theme == value) {
+                            library.settings.theme = value
+                            library.settings.save()
+                            library.reload()
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
 
             dictationCard
 
@@ -761,17 +863,6 @@ struct SettingsScreen: View {
                         .font(Kind.body(12)).foregroundStyle(p.warn)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.top, 10)
-                }
-            }
-
-            Card {
-                Text("Оформление").font(Kind.head(16)).padding(.bottom, 12)
-                SettingRow(title: "Тема") {
-                    Segmented(options: [("dark", "Тёмная"), ("light", "Светлая"), ("system", "Авто")],
-                              selection: Binding(
-                                get: { library.settings.theme },
-                                set: { library.settings.theme = $0; library.settings.save(); library.reload() }))
-                        .frame(width: 260)
                 }
             }
 

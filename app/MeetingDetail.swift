@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Открытая встреча — правая панель «Встреч».
+/// Встреча: заголовок, плеер и вкладки «Решения / Источники / Чат».
 ///
 /// Сверху то, что нужно всегда: название, когда и сколько, плеер. Ниже три
 /// вкладки: «Решения» — что договорились и кто сколько говорил,
@@ -13,8 +13,9 @@ struct MeetingDetail: View {
     var pipeline: Pipeline
     var chat: Chat
     @Bindable var memory: SpeakerMemory
-    @Binding var screen: Screen
     @Binding var tab: String
+    /// Открыть «Новые голоса» в главном окне.
+    let openVoices: () -> Void
     let rename: () -> Void
     let delete: () -> Void
     let askProject: () -> Void
@@ -95,7 +96,7 @@ struct MeetingDetail: View {
         if !unknown.isEmpty || card?.needs_review == true || !(card?.project ?? "").isEmpty {
             HStack(spacing: 6) {
                 if !unknown.isEmpty {
-                    Button { screen = .newVoices } label: {
+                    Button(action: openVoices) {
                         chip("person.crop.circle.badge.questionmark",
                              plural(unknown.count, "голос без имени", "голоса без имени", "голосов без имени"),
                              fg: p.warn, bg: p.warnBg)
