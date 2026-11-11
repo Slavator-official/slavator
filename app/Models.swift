@@ -174,6 +174,28 @@ struct MeetingCard: Decodable {
     var needs_review = false
 }
 
+/// Разбор встречи, который ядро сохраняет вместе с резюме: решения,
+/// поручения и связный пересказ. Поля необязательные — файл пишут разные
+/// версии ядра, и отсутствие одного списка не должно прятать остальные.
+struct MeetingAnalysis: Decodable {
+    struct Todo: Decodable {
+        let task: String
+        let owner: String?
+        let due: String?
+    }
+    let summary: String?
+    let decisions: [String]?
+    let todos: [Todo]?
+}
+
+/// Реплика стенограммы для краткого показа: время, кто, что.
+struct BriefLine: Identifiable {
+    let id = UUID()
+    let start: Double
+    let name: String
+    let text: String
+}
+
 struct Record: Identifiable {
     var id: URL { dir }
     let dir: URL
@@ -196,6 +218,32 @@ struct Record: Identifiable {
         return try? JSONDecoder().decode(MeetingCard.self, from: data)
     }
     var transcript: URL? { existing("01_transcript.docx") }
+
+    /// Решения и поручения. Появляются, когда собрано резюме.
+    var analysis: MeetingAnalysis? {
+        guard let url = existing("\(Paths.extraDir)/final_analysis.json"),
+              let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(MeetingAnalysis.self, from: data)
+    }
+
+    /// Первые содержательные реплики — пока резюме нет, по ним видно, о чём
+    /// был разговор. Короткие «да», «угу» пропускаем: они ничего не говорят.
+    func opening(_ limit: Int = 4) -> [BriefLine] {
+        guard let url = existing("transcript.json"),
+              let data = try? Data(contentsOf: url),
+              let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let items = raw["utterances"] as? [[String: Any]] else { return [] }
+        var lines: [BriefLine] = []
+        for item in items {
+            let text = (item["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard text.count >= 40 else { continue }
+            let name = (item["speaker_name"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                ?? (item["speaker_id"] as? String ?? "")
+            lines.append(BriefLine(start: item["start"] as? Double ?? 0, name: name, text: text))
+            if lines.count == limit { break }
+        }
+        return lines
+    }
 
     /// Исходная запись встречи. Ядро удаляет свою рабочую копию после
     /// обработки, но оригинал остаётся рядом с папкой результата — из него

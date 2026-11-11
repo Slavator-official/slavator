@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 from speaker_memory import Memory, Embedder, emit, normalize, STOP_WORDS, read
 
 SELF = re.compile(r"\b(я|мне|мной|мною|мои|моих|мою|мой|моя|мое|моею)\b", re.I)
@@ -19,7 +20,8 @@ class RecallEmbedder(Embedder):
         return super().request(endpoint, body, timeout)
 
 
-def recall(memory, question, profile="", progress=lambda _: None, model=None, generate=True, on_sources=lambda _: None):
+def recall(memory, question, profile="", progress=lambda _: None, model=None, generate=True, on_sources=lambda _: None,
+           meeting=""):
     question = question.strip()[:2000]
     if not question:
         raise ValueError("Напишите, что найти в памяти встреч")
@@ -38,9 +40,14 @@ def recall(memory, question, profile="", progress=lambda _: None, model=None, ge
     if not query:
         return {"text": "Уточните тему или приведите часть фразы, которую нужно найти.", "sources": []}
     progress("Ищу реплики в сохранённых встречах…")
-    matches = memory.search(query, mode="semantic", person=person, limit=6, embedder=RecallEmbedder())
+    # Вопрос из вкладки встречи ищется только в ней: ключ — полный путь папки,
+    # как его записывает синхронизация памяти.
+    meeting = str(Path(meeting).resolve()) if meeting else ""
+    matches = memory.search(query, mode="semantic", person=person, meeting=meeting, limit=6, embedder=RecallEmbedder())
     sources = matches["hits"]
     if not sources:
+        if meeting:
+            return {"text": "В этой встрече не нашёл подходящих реплик. Попробуйте другие слова — или спросите в общем чате, по всем встречам.", "sources": [], "notice": matches["notice"]}
         return {"text": "В сохранённых встречах не нашёл подходящих реплик. Попробуйте другие слова или обновите память. Это не означает, что вы никогда этого не говорили.", "sources": [], "notice": matches["notice"]}
     fallback = "Нашёл возможные совпадения, но пока не могу дать уверенный ответ. Ниже — исходные цитаты; проверьте соседние реплики."
     result = {"text": fallback, "sources": sources, "notice": matches["notice"], "generated": False}
@@ -87,7 +94,8 @@ def main():
         progress = lambda message: emit("progress", message=message)
         warnings = memory.sync(progress)
         result = recall(memory, request.get("question", ""), request.get("profile", ""), progress,
-                        on_sources=lambda sources: emit("sources", sources=sources))
+                        on_sources=lambda sources: emit("sources", sources=sources),
+                        meeting=request.get("meeting", ""))
         result["warnings"] = warnings
         emit("result", **result)
         return 0

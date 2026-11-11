@@ -46,7 +46,7 @@ struct RuntimeChecks {
 
         let env = AppConfiguration.readEnv("\u{FEFF}# header\nKEY = \"C:\\Мои файлы\\a=b\"\nSINGLE='value'\n")
         precondition(env["KEY"] == "C:\\Мои файлы\\a=b" && env["SINGLE"] == "value")
-        precondition(DesktopContract.theme("dark")["bg"] as? String == "1D1A1A")
+        precondition(DesktopContract.theme("dark")["bg"] as? String == "12161D")
         print("PASS: общий контракт и Windows config.env с BOM")
 
         let expected = ["Первый голос", "@@PROGRESS@@{\"pct\":45,\"detail\":\"Распознаю речь\"}", "Последняя строка"]

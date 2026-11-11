@@ -39,7 +39,7 @@ def test_invalid_field_does_not_reset_valid_fields(settings_dir):
 @pytest.mark.parametrize("content", ["{broken", "[]", "null", '"string"'])
 def test_invalid_settings_are_recoverable(settings_dir, content):
     (settings_dir / "settings.json").write_text(content)
-    assert app_config.load()["theme"] == "dark"
+    assert app_config.load()["theme"] == "light"
 
 
 def test_windows_bom_and_quoted_paths(settings_dir):

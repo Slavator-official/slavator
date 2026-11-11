@@ -46,7 +46,7 @@ command -v swiftc >/dev/null || fail "нет swiftc — поставьте Comma
 SOURCES=(Configuration.swift ProcessOutput.swift OutputVolume.swift Theme.swift Models.swift Documents.swift
          SpeakerMemory.swift SpeakerMemoryScreen.swift Ribbon.swift Player.swift
          Pipeline.swift SystemAudio.swift LiveCapture.swift Mixdown.swift
-         Dictation.swift Chat.swift Enroll.swift Screens.swift Doctor.swift
+         Dictation.swift Chat.swift Enroll.swift Screens.swift Meetings.swift MeetingDetail.swift Doctor.swift
          DeskWidget.swift MeetingWatch.swift App.swift)
 for f in "${SOURCES[@]}"; do
     [[ -f "$SWIFT/$f" ]] || fail "нет исходника: $SWIFT/$f"

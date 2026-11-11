@@ -21,7 +21,8 @@ struct SlavatorApp: App {
             Shell(library: library, player: player,
                   pipeline: pipeline, capture: capture,
                   dictation: dictation, chat: chat, memory: memory, doctor: doctor)
-                .frame(minWidth: 1080, minHeight: 620)
+                // Три колонки «меню — встречи — встреча»: 216 + 360 + ~480.
+                .frame(minWidth: 1100, minHeight: 640)
                 .onAppear {
                     library.reload()
                     // Диктовка придерживает разбор встречи: иначе она сама
@@ -45,14 +46,14 @@ struct SlavatorApp: App {
         // кнопки окна, как в Finder и Почте. Название окна и так написано
         // в боковой панели, полоса над ней дублировала его.
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 1180, height: 800)
+        .defaultSize(width: 1320, height: 840)
         .commands { CommandGroup(replacing: .newItem) { } }
     }
 }
 
-/// «Главной» больше нет: она повторяла «Записи» — та же последняя встреча и
-/// те же кнопки. Новая встреча начинается прямо в «Записях», над списком
-/// (apple-design: экран называют по тому, что в нём лежит, а не «Главная»).
+/// Экраны. «Встречи» (records) — список и открытая встреча; запись и импорт
+/// там же. Обезличивание из меню пока убрано: его экран в коде остался и
+/// вернётся одной строкой в Sidebar.items.
 enum Screen: Hashable {
     case memory, records, speakers, newVoices, settings, chat, privacy
     case person(String)
@@ -140,7 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         menu.addItem(.separator())
         menu.addItem(note("Держите " + HotCombo.label(library?.settings.dictation_hotkey ?? "ropt") + " — говорите"))
         menu.addItem(.separator())
-        menu.addItem(entry("Открыть Славатор", #selector(openApp)))
+        menu.addItem(entry("Открыть " + AppConfiguration.displayName, #selector(openApp)))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Выйти",
                                 action: #selector(NSApplication.terminate(_:)),
@@ -241,47 +242,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     }
 }
 
-/// Два значка: слева Славатор, справа разговор с моделью.
-struct ModeSwitch: View {
-    @Binding var screen: Screen
-    @Binding var back: Screen
-    @Environment(\.palette) private var p
-
-    private var inChat: Bool { screen == .chat || screen == .privacy }
-
-    var body: some View {
-        HStack(spacing: 2) {
-            button(symbol: "waveform", active: !inChat, hint: "Славатор") {
-                if inChat { screen = (back == .chat || back == .privacy) ? .records : back }
-            }
-            button(symbol: "bubble.left.and.bubble.right", active: inChat, hint: "Чат с моделью") {
-                if !inChat { back = screen }
-                screen = .chat
-            }
-        }
-        .padding(2)
-        .frame(maxWidth: .infinity)
-        .background(RoundedRectangle(cornerRadius: 8).fill(p.selection))
-    }
-
-    private func button(symbol: String, active: Bool, hint: String,
-                        action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Label(hint == "Славатор" ? "Встречи" : "Чат", systemImage: symbol)
-                .font(.system(size: 12, weight: active ? .semibold : .medium))
-                .foregroundStyle(active ? p.text : p.muted)
-                .frame(maxWidth: .infinity)
-                .frame(height: 24)
-                .background(RoundedRectangle(cornerRadius: 6)
-                    .fill(active ? p.segment : Color.clear)
-                    .shadow(color: .black.opacity(active ? 0.12 : 0), radius: 1, y: 0.5))
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help(hint)
-    }
-}
-
 struct Shell: View {
     @Bindable var library: Library
     var player: Player
@@ -292,8 +252,6 @@ struct Shell: View {
     var memory: SpeakerMemory
     var doctor: Doctor
     @State private var screen: Screen = .records
-    /// Куда вернуться из чата.
-    @State private var lastAppScreen: Screen = .records
     @State private var picked: URL?
     @State private var privacyWorkspace = DocumentWorkspace()
     @Environment(\.colorScheme) private var systemScheme
@@ -304,57 +262,68 @@ struct Shell: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            Sidebar(library: library, screen: $screen,
-                    lastAppScreen: $lastAppScreen, chat: chat)
-            Rectangle().fill(palette.line).frame(width: 0.5)
+            Sidebar(library: library, screen: $screen)
 
-            VStack(spacing: 0) {
-                // Чат живёт вне общей прокрутки: внутри неё высота не
-                // задаётся, и экран обрывался на середине окна.
-                if screen == .chat {
-                    ChatScreen(library: library, chat: chat, memory: memory, player: player)
-                        .padding(.horizontal, 28)
-                        .padding(.vertical, 22)
-                } else if screen == .privacy {
-                    DocumentSheet(workspace: privacyWorkspace, settings: library.settings, attach: { _ in }, standalone: true)
-                } else {
-                ScrollView {
-                    Group {
-                        switch screen {
-                        case .records:   RecordsScreen(library: library, player: player,
-                                                      pipeline: pipeline, capture: capture,
-                                                      doctor: doctor, memory: memory,
-                                                      picked: $picked, screen: $screen)
-                        case .memory:    MemoryScreen(library: library, player: player, memory: memory)
-                        case .speakers:  SpeakerProfilesScreen(library: library, player: player,
-                                                               screen: $screen)
-                        case .newVoices: NewVoicesScreen(library: library, player: player)
-                        // Чат нарисован выше, вне прокрутки. Ветка нужна
-                        // только чтобы перечисление было исчерпано.
-                        case .chat, .privacy: EmptyView()
-                        case .settings:  SettingsScreen(library: library, dictation: dictation,
-                                                        pipeline: pipeline)
-                        case .person(let key): PersonScreen(library: library, player: player,
-                                                            key: key, screen: $screen, memory: memory)
+            VStack(spacing: 12) {
+                Group {
+                    switch screen {
+                    case .records:
+                        MeetingsScreen(library: library, player: player, pipeline: pipeline,
+                                       capture: capture, doctor: doctor, memory: memory, chat: chat,
+                                       picked: $picked, screen: $screen)
+                    case .chat:
+                        // Переписки — средней колонкой, как список встреч:
+                        // слева что выбрать, справа сама переписка.
+                        HStack(spacing: 12) {
+                            Panel {
+                                ChatHistory(chat: chat, showsSelection: true, onOpen: {})
+                                    .padding(.top, 16)
+                            }
+                            .frame(width: 270)
+                            ChatScreen(library: library, chat: chat, memory: memory, player: player)
+                        }
+                    case .privacy:
+                        // Пункта в меню нет; ветка нужна, чтобы перечисление
+                        // было исчерпано, и экран вернётся без переделок.
+                        DocumentSheet(workspace: privacyWorkspace, settings: library.settings, attach: { _ in }, standalone: true)
+                    default:
+                        ScrollView {
+                            Group {
+                                switch screen {
+                                case .memory:    MemoryScreen(library: library, player: player, memory: memory)
+                                case .speakers:  SpeakerProfilesScreen(library: library, player: player,
+                                                                       screen: $screen)
+                                case .newVoices: NewVoicesScreen(library: library, player: player)
+                                case .settings:  SettingsScreen(library: library, dictation: dictation,
+                                                                pipeline: pipeline)
+                                case .person(let key): PersonScreen(library: library, player: player,
+                                                                    key: key, screen: $screen, memory: memory)
+                                default: EmptyView()
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.top, 14)
+                            .padding(.bottom, 24)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
-                    .padding(.horizontal, 28)
-                    .padding(.top, 26)
-                    .padding(.bottom, 32)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
                 }
 
-                // В «Записях» запись и расшифровка видны в панели новой
-                // встречи; нижняя полоса там повторяла бы её слово в слово.
+                // На «Встречах» запись и расшифровка видны в списке; нижняя
+                // полоса там повторяла бы их слово в слово.
                 if (capture.isRecording || pipeline.isRunning) && screen != .records {
                     activityBar
                 }
-                if player.isActive {
+                // Встречу слушают из её плеера; полоса снизу нужна для
+                // остального — образцов голоса, реплик из памяти.
+                if player.isActive && !(screen == .records && player.recordingID != nil) {
                     PlayerBar(player: player)
-                        .transition(.move(edge: .bottom))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(palette.line, lineWidth: 1))
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
+            .padding(.vertical, 12).padding(.trailing, 12)
             .background(palette.bg)
         }
         .environment(\.palette, palette)
@@ -376,13 +345,13 @@ struct Shell: View {
         VStack(spacing: 10) {
             if capture.isRecording {
                 HStack(spacing: 12) {
-                    Circle().fill(palette.accent).frame(width: 9, height: 9)
+                    Circle().fill(palette.error).frame(width: 9, height: 9)
                     Text("Идёт запись").font(Kind.strong())
                     Text(hms(capture.seconds)).font(Kind.body(13)).monospacedDigit().foregroundStyle(palette.muted)
                     Spacer()
                     Button("Остановить и расшифровать") {
                         picked = finishMeeting(capture: capture, pipeline: pipeline, library: library)
-                    }.buttonStyle(PrimaryButton())
+                    }.buttonStyle(PrimaryButton(destructive: true))
                 }
             }
             if pipeline.isRunning {
@@ -402,25 +371,24 @@ struct Shell: View {
                 }
             }
         }
-        .padding(.horizontal, 28).padding(.vertical, 12)
-        .background(palette.surface)
-        .overlay(alignment: .top) { Rectangle().fill(palette.line).frame(height: 0.5) }
+        .padding(.horizontal, 18).padding(.vertical, 12)
+        .background(RoundedRectangle(cornerRadius: 12).fill(palette.surface))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(palette.line, lineWidth: 1))
     }
 }
 
+/// Боковое меню «Светлого кабинета»: знак и название, пункты по содержимому,
+/// внизу — обещание работы без сети. Ширина 216 pt по спецификации.
 struct Sidebar: View {
     @Bindable var library: Library
     @Binding var screen: Screen
-    @Binding var lastAppScreen: Screen
-    var chat: Chat
     @Environment(\.palette) private var p
 
-    /// Пункты названы по содержимому: «Записи» открываются первыми и
-    /// начинают новую встречу, «Главной» больше нет.
     private var items: [(Screen, String, String)] {
-        [(.records, "Записи", "waveform"),
+        [(.records, "Встречи", "calendar"),
          (.memory, "Память встреч", "point.3.connected.trianglepath.dotted"),
          (.speakers, "Спикеры", "person.2"),
+         (.chat, "Чат", "bubble.left"),
          (.settings, "Настройки", "gearshape")]
     }
 
@@ -428,68 +396,43 @@ struct Sidebar: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
                 if let icon = bundledIcon() ?? NSImage(named: "AppIcon") {
-                    Image(nsImage: icon)
-                        .resizable().interpolation(.high)
-                        .frame(width: 34, height: 34)
-                        .clipShape(RoundedRectangle(cornerRadius: 9))
+                    Image(nsImage: icon).resizable().interpolation(.high)
+                        .frame(width: 32, height: 32)
                 }
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(AppConfiguration.displayName)
-                        .font(.system(size: 15, weight: .semibold)).kerning(-0.15)
-                    Text("Всё на этом Mac").font(Kind.body(11.5)).foregroundStyle(p.muted)
-                }
+                Text(AppConfiguration.displayName)
+                    .font(.system(size: 19, weight: .semibold)).kerning(-0.3)
+                    .lineLimit(1)
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 8).padding(.bottom, 14)
+            .padding(.horizontal, 8).padding(.bottom, 24)
 
-            // Переключатель режимов стоит здесь, у названия: это выбор
-            // «чем сейчас занимаемся», а не действие внутри экрана, и в
-            // правом верхнем углу он читался как случайная кнопка.
-            ModeSwitch(screen: $screen, back: $lastAppScreen)
-                .padding(.horizontal, 4).padding(.bottom, 16)
-
-            if screen == .chat || screen == .privacy {
-                NavButton(title: "Обезличивание", symbol: "lock.shield",
-                          active: screen == .privacy, badge: nil) { screen = .privacy }
-                    .padding(.bottom, 14)
-                // В режиме чата «Записи» не нужны, а список переписок нужен
-                // постоянно — он и занимает их место.
-                ChatHistory(chat: chat, showsSelection: screen == .chat, onOpen: { screen = .chat })
-            } else {
-                VStack(spacing: 1) {
-                    ForEach(items, id: \.1) { item in
-                        NavButton(title: item.1, symbol: item.2,
-                                  active: isActive(item.0),
-                                  badge: item.0 == .speakers && !library.unknown.isEmpty
-                                      ? library.unknown.count : nil) {
-                            screen = item.0
-                        }
+            VStack(spacing: 2) {
+                ForEach(items, id: \.1) { item in
+                    NavButton(title: item.1, symbol: item.2,
+                              active: isActive(item.0),
+                              badge: item.0 == .speakers && !library.unknown.isEmpty
+                                  ? library.unknown.count : nil) {
+                        screen = item.0
                     }
                 }
             }
             Spacer()
-            // Главное обещание программы — видно всегда: записи и модели не
-            // уходят с компьютера, а если чего-то не хватает, это тоже видно.
-            HStack(spacing: 7) {
-                Circle().fill(Paths.isReady ? p.ok : p.warn).frame(width: 7, height: 7)
-                Text(Paths.isReady ? "Работает без интернета" : "Нужна установка")
-                    .font(Kind.body(11.5)).foregroundStyle(p.muted)
+            Rectangle().fill(p.line).frame(height: 1).padding(.horizontal, 8).padding(.bottom, 14)
+            HStack(alignment: .top, spacing: 9) {
+                Circle().fill(Paths.isReady ? p.ok : p.warn).frame(width: 8, height: 8).padding(.top, 5)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(Paths.isReady ? "Офлайн-режим" : "Нужна установка")
+                        .font(.system(size: 13, weight: .medium))
+                    Text("Данные на этом Mac").font(Kind.body(12)).foregroundStyle(p.muted)
+                }
             }
             .padding(.horizontal, 10)
         }
-        // Сверху — место под кнопки окна: полосы заголовка больше нет.
-        .padding(.top, 44).padding(.bottom, 16).padding(.horizontal, 10)
-        .frame(width: 224, alignment: .leading)
+        // Сверху — место под кнопки окна: полосы заголовка нет.
+        .padding(.top, 50).padding(.bottom, 18).padding(.horizontal, 12)
+        .frame(width: 216, alignment: .leading)
         .frame(maxHeight: .infinity, alignment: .top)
-        // Стекло тонировано тёплым графитом. Чистый системный материал брал
-        // цвет обоев: на синих обоях боковая панель становилась синей и
-        // спорила с красной гаммой «Славатора 2». Сквозь тонировку обои
-        // только угадываются, а при «Уменьшить прозрачность» система сама
-        // делает стекло глухим.
-        .background(ZStack {
-            SidebarMaterial()
-            p.sidebar.opacity(0.84)
-        }.ignoresSafeArea())
+        .background(p.sidebar.ignoresSafeArea())
     }
 
     private func isActive(_ target: Screen) -> Bool {
@@ -504,9 +447,8 @@ struct Sidebar: View {
     }
 }
 
-/// Строка боковой панели по образцу системных: значок в цвете акцента,
-/// текст обычного цвета, выбранная строка — серая подложка. Переход между
-/// экранами мгновенный: его делают десятки раз в день.
+/// Пункт меню: значок и текст; выбранный — мягкий синий фон и синий значок.
+/// Переход мгновенный: его делают десятки раз в день.
 private struct NavButton: View {
     @Environment(\.palette) private var p
     let title: String
@@ -518,23 +460,26 @@ private struct NavButton: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 9) {
+            HStack(spacing: 11) {
                 Image(systemName: symbol)
-                    .font(.system(size: 14, weight: .regular))
-                    .foregroundStyle(p.accent2)
-                    .frame(width: 18)
-                Text(title).font(.system(size: 13, weight: active ? .semibold : .regular))
+                    .font(.system(size: 15, weight: .regular))
+                    .foregroundStyle(active ? p.accent2 : p.muted)
+                    .frame(width: 20)
+                Text(title).font(.system(size: 14, weight: active ? .semibold : .regular))
                     .foregroundStyle(p.text)
                 Spacer(minLength: 4)
                 if let badge {
                     Text("\(badge)")
                         .font(.system(size: 11.5, weight: .semibold)).monospacedDigit()
-                        .foregroundStyle(p.muted)
+                        .foregroundStyle(p.warn)
+                        .padding(.horizontal, 6).frame(height: 18)
+                        .background(Capsule().fill(p.warnBg))
+                        .help("Голоса без имени")
                 }
             }
-            .padding(.horizontal, 10).padding(.vertical, 6)
-            .background(RoundedRectangle(cornerRadius: 7)
-                .fill(active ? p.selection.opacity(1.4) : (hovering ? p.selection : .clear)))
+            .padding(.horizontal, 10).frame(height: 36)
+            .background(RoundedRectangle(cornerRadius: 9)
+                .fill(active ? p.accentSoft : (hovering ? p.selection : .clear)))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

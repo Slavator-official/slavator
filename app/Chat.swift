@@ -48,6 +48,11 @@ final class Chat {
         var title: String
         var updated: Date
         var messages: [Message]
+        /// Переписка о конкретной встрече: путь к её папке и название.
+        /// Ответы ищутся только в этой встрече. У старых переписок полей нет —
+        /// необязательные поля читаются как пустые.
+        var meeting: String? = nil
+        var meetingTitle: String? = nil
 
         /// Заголовок из первого вопроса: списку нужны разные названия, а не
         /// десять строк «Новый чат».
@@ -102,8 +107,26 @@ final class Chat {
         failure = nil
         // Пустой черновик не плодим: если текущая переписка ещё без единого
         // сообщения, «новый чат» — это она и есть.
-        if let current, current.messages.isEmpty { return }
+        if let current, current.messages.isEmpty, current.meeting == nil { return }
         let fresh = Conversation(title: "Новый чат", updated: Date(), messages: [])
+        conversations.insert(fresh, at: 0)
+        currentID = fresh.id
+        save()
+    }
+
+    /// Открыть переписку о встрече; если её ещё нет — завести.
+    func openMeeting(_ dir: URL, title: String) {
+        let key = dir.resolvingSymlinksInPath().path
+        if let existing = conversations.first(where: { $0.meeting == key }) {
+            open(existing.id)
+            return
+        }
+        stop()
+        documents.reset()
+        attachedDocument = nil
+        failure = nil
+        let fresh = Conversation(title: "Встреча: " + title, updated: Date(), messages: [],
+                                 meeting: key, meetingTitle: title)
         conversations.insert(fresh, at: 0)
         currentID = fresh.id
         save()
@@ -141,7 +164,8 @@ final class Chat {
             conversations[index].title = Conversation.name(from: prompt)
         }
         let readingDocument = attachedDocument != nil
-        let fromMemory = settings.chat_memory_enabled && !readingDocument
+        let scope = conversations[index].meeting
+        let fromMemory = (settings.chat_memory_enabled || scope != nil) && !readingDocument
         conversations[index].messages.append(Message(role: .user, text: prompt, fromMemory: fromMemory,
                                                      fromDocument: readingDocument, documentName: attachedDocument?.title))
         conversations[index].messages.append(Message(role: .model, text: "", fromMemory: fromMemory,
@@ -163,6 +187,12 @@ final class Chat {
             }
             askDocument(["action": "conversation", "history": history], settings: settings,
                         token: token, conversationID: conversationID)
+            return
+        }
+        // Вопрос о встрече всегда ищется в её расшифровке: свободный разговор
+        // с моделью здесь отвечал бы выдумкой, а не тем, что было сказано.
+        if let scope {
+            recall(prompt, settings: settings, token: token, conversationID: conversationID, meeting: scope)
             return
         }
         if settings.chat_memory_enabled {
@@ -313,7 +343,8 @@ final class Chat {
         var warnings: [String]?
     }
 
-    private func recall(_ question: String, settings: Settings, token: UUID, conversationID: UUID) {
+    private func recall(_ question: String, settings: Settings, token: UUID, conversationID: UUID,
+                        meeting: String = "") {
         let worker = Process(), input = Pipe(), output = Pipe()
         worker.executableURL = Paths.venvPython
         worker.arguments = ["-B", Paths.core.deletingLastPathComponent().appending(path: "meeting_chat.py").path,
@@ -325,7 +356,8 @@ final class Chat {
         progress = "Ищу в памяти встреч…"
         var received = false
         do {
-            let payload = try JSONSerialization.data(withJSONObject: ["question": question, "profile": settings.my_profile_key])
+            let payload = try JSONSerialization.data(withJSONObject: ["question": question, "profile": settings.my_profile_key,
+                                                                      "meeting": meeting])
             try worker.run()
             try input.fileHandleForWriting.write(contentsOf: payload + Data([10]))
             try input.fileHandleForWriting.close()
@@ -402,6 +434,9 @@ struct ChatScreen: View {
     var chat: Chat
     var memory: SpeakerMemory
     var player: Player
+    /// Встроен во вкладку встречи: без своих рамок, без вложений и без
+    /// переключателя памяти — вопросы и так ищутся в этой встрече.
+    var embedded = false
     @State private var detail: MemoryQuote?
     @Environment(\.palette) private var p
     @State private var draft = ""
@@ -409,10 +444,32 @@ struct ChatScreen: View {
     @State private var showDocuments = false
     @FocusState private var writing: Bool
 
+    /// Переписка о конкретной встрече: ищем только в ней.
+    private var scoped: Bool { chat.current?.meeting != nil }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Card(fill: true) {
-                if chat.messages.isEmpty { empty } else { conversation }
+            if !embedded {
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(chat.current?.title ?? "Чат").font(Kind.title(22)).kerning(-0.3).lineLimit(1)
+                        if let title = chat.current?.meetingTitle {
+                            Label("Ответы только по встрече «\(title)»", systemImage: "calendar")
+                                .font(Kind.body(12.5)).foregroundStyle(p.muted).lineLimit(1)
+                        }
+                    }
+                    Spacer(minLength: 8)
+                    LocalBadge()
+                }
+                .padding(.top, 4)
+            }
+            if embedded {
+                Group { if chat.messages.isEmpty { empty } else { conversation } }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            } else {
+                Card(fill: true) {
+                    if chat.messages.isEmpty { empty } else { conversation }
+                }
             }
             if let failure = chat.failure {
                 Card {
@@ -461,13 +518,13 @@ struct ChatScreen: View {
             Spacer(minLength: 0)
             Image(systemName: "bubble.left.and.bubble.right")
                 .font(.system(size: 26)).foregroundStyle(p.faint)
-            Text(chat.attachedDocument != nil ? "Что узнать из документа?" : (library.settings.chat_memory_enabled ? "Что вспомнить из встреч?" : "Спросите что угодно")).font(Kind.strong(14.5))
-            Text(chat.attachedDocument != nil ? "Например: «Какие сроки и обязательства указаны?»" : (library.settings.chat_memory_enabled ? "Например: «Когда я говорил про перенос сроков?»" : (AppConfiguration.usesLocalModel ? "Ответит локальная модель" : "Используется настроенный адрес модели")))
-                .font(Kind.body(12.5)).foregroundStyle(p.muted)
+            Text(scoped ? "Что узнать об этой встрече?" : chat.attachedDocument != nil ? "Что узнать из документа?" : (library.settings.chat_memory_enabled ? "Что вспомнить из встреч?" : "Спросите что угодно")).font(Kind.strong(14.5))
+            Text(scoped ? "Например: «Какие сроки назвали?» или «Кто отвечает за презентацию?»" : chat.attachedDocument != nil ? "Например: «Какие сроки и обязательства указаны?»" : (library.settings.chat_memory_enabled ? "Например: «Когда я говорил про перенос сроков?»" : (AppConfiguration.usesLocalModel ? "Ответит локальная модель" : "Используется настроенный адрес модели")))
+                .font(Kind.body(12.5)).foregroundStyle(p.muted).multilineTextAlignment(.center)
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 40)
+        .padding(.vertical, embedded ? 16 : 40)
     }
 
     private var conversation: some View {
@@ -547,8 +604,12 @@ struct ChatScreen: View {
             ?? AttributedString(text)
     }
 
-    private var composer: some View {
-        Card {
+    @ViewBuilder private var composer: some View {
+        if embedded { composerBody } else { Card { composerBody } }
+    }
+
+    private var composerBody: some View {
+        VStack(alignment: .leading, spacing: 0) {
             if let document = chat.attachedDocument {
                 HStack(spacing: 8) {
                     Image(systemName: "doc.text").foregroundStyle(p.accent2)
@@ -569,7 +630,11 @@ struct ChatScreen: View {
                         .help("Обработка локальная. В истории остаются вопросы, ответы и цитаты, не весь исходник. Для поиска по встречам начните новую переписку; для чтения всего файла прикрепите его снова.")
                 }.font(Kind.body(11)).foregroundStyle(p.muted).padding(.bottom, 8)
             }
-            if chat.attachedDocument == nil && !chat.containsDocumentData {
+            if scoped && !embedded {
+                Label("Ищу только в этой встрече", systemImage: "calendar")
+                    .font(Kind.body(12)).foregroundStyle(p.muted).padding(.bottom, 8)
+            }
+            if chat.attachedDocument == nil && !chat.containsDocumentData && !scoped {
             HStack {
                 Toggle("Искать во встречах", isOn: Binding(
                     get: { library.settings.chat_memory_enabled },
@@ -598,41 +663,49 @@ struct ChatScreen: View {
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.bottom, 10)
             }
             }
-            HStack(alignment: .bottom, spacing: 10) {
-                Button { showDocuments = true } label: {
-                    Image(systemName: "paperclip").font(.system(size: 18, weight: .medium))
-                        .frame(width: 38, height: 38)
-                        .background(RoundedRectangle(cornerRadius: 9).fill(p.raised))
-                }.buttonStyle(.plain).foregroundStyle(p.muted).disabled(chat.isAnswering)
-                    .accessibilityLabel("Прикрепить файлы").help("Прикрепить PDF, Word или текстовые файлы")
-                // Полю нужны собственные отступы и подложка: без них оно
-                // прилипало к верху, а кнопка со своими отступами оказывалась
-                // выше — строка выглядела разъехавшейся.
-                TextField("Напишите сообщение…", text: $draft, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .font(Kind.body(14))
-                    .lineLimit(1...6)
-                    .focused($writing)
-                    .onSubmit(send)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 9)
-                    .background(RoundedRectangle(cornerRadius: 9).fill(p.raised))
-                    .overlay(RoundedRectangle(cornerRadius: 9)
-                        .stroke(writing ? p.accent2 : p.line, lineWidth: 1))
-                if chat.isAnswering {
-                    Button { chat.stop() } label: {
-                        Image(systemName: "stop.fill").frame(width: 38, height: 38)
-                            .background(RoundedRectangle(cornerRadius: 9).fill(p.raised))
-                    }.buttonStyle(.plain).accessibilityLabel("Остановить ответ").help("Остановить ответ")
-                } else {
-                    Button(action: send) {
-                        Image(systemName: "arrow.up").font(.system(size: 17, weight: .semibold))
-                            .foregroundStyle(Color.white).frame(width: 38, height: 38)
-                            .background(RoundedRectangle(cornerRadius: 9).fill(p.accent))
-                    }.buttonStyle(.plain).accessibilityLabel("Отправить сообщение").help("Отправить сообщение")
-                        .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || needsOwnProfile)
-                        .opacity(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || needsOwnProfile ? 0.4 : 1)
+            HStack(alignment: .bottom, spacing: 8) {
+                if !scoped {
+                    Button { showDocuments = true } label: {
+                        Image(systemName: "paperclip").font(.system(size: 15, weight: .medium))
+                            .frame(width: 40, height: 40)
+                            .background(RoundedRectangle(cornerRadius: 10).fill(p.surface))
+                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(p.line, lineWidth: 1))
+                    }.buttonStyle(PressStyle()).foregroundStyle(p.muted).disabled(chat.isAnswering)
+                        .accessibilityLabel("Прикрепить файлы").help("Прикрепить PDF, Word или текстовые файлы")
                 }
+                // Поле по макету: значок сообщения слева, отправка — внутри
+                // поля справа, а не отдельной синей плиткой.
+                HStack(alignment: .bottom, spacing: 9) {
+                    Image(systemName: "bubble.left").font(.system(size: 14))
+                        .foregroundStyle(p.faint).padding(.bottom, 12)
+                    TextField(scoped ? "Задайте вопрос по встрече…" : "Напишите сообщение…", text: $draft, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .font(Kind.body(14))
+                        .lineLimit(1...6)
+                        .focused($writing)
+                        .onSubmit(send)
+                        .padding(.vertical, 10)
+                    if chat.isAnswering {
+                        Button { chat.stop() } label: {
+                            Image(systemName: "stop.circle.fill").font(.system(size: 18))
+                                .foregroundStyle(p.muted).frame(width: 28, height: 28)
+                        }.buttonStyle(PressStyle()).padding(.bottom, 6)
+                            .accessibilityLabel("Остановить ответ").help("Остановить ответ")
+                    } else {
+                        let empty = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        Button(action: send) {
+                            Image(systemName: "paperplane").font(.system(size: 16, weight: .medium))
+                                .foregroundStyle(empty || needsOwnProfile ? p.faint : p.accent2)
+                                .frame(width: 28, height: 28).contentShape(Rectangle())
+                        }.buttonStyle(PressStyle()).padding(.bottom, 6)
+                            .accessibilityLabel("Отправить сообщение").help("Отправить сообщение")
+                            .disabled(empty || needsOwnProfile)
+                    }
+                }
+                .padding(.leading, 12).padding(.trailing, 8)
+                .background(RoundedRectangle(cornerRadius: 10).fill(p.surface))
+                .overlay(RoundedRectangle(cornerRadius: 10)
+                    .stroke(writing ? p.accent : p.line, lineWidth: writing ? 1.5 : 1))
             }
         }
     }
@@ -711,29 +784,33 @@ struct ChatHistory: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                Text("Переписки").font(Kind.eyebrow()).tracking(0.8).foregroundStyle(p.faint)
+                Text("Переписки").font(Kind.title(20)).kerning(-0.3)
                 Spacer()
                 Button { chat.startNew(); onOpen() } label: {
-                    Image(systemName: "square.and.pencil").font(.system(size: 13))
-                        .foregroundStyle(p.accent2)
+                    Image(systemName: "square.and.pencil").font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(p.accent2).frame(width: 32, height: 32)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(p.surface))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(p.line, lineWidth: 1))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressStyle())
                 .help("Новая переписка")
             }
-            .padding(.horizontal, 10).padding(.bottom, 9)
+            .padding(.horizontal, 16).padding(.bottom, 12)
 
-            TextField("Поиск", text: $search)
-                .textFieldStyle(.plain)
-                .font(Kind.body(12.5))
-                .padding(.horizontal, 9).padding(.vertical, 6)
-                .background(RoundedRectangle(cornerRadius: 7).fill(p.raised))
-                .padding(.horizontal, 10).padding(.bottom, 9)
+            HStack(spacing: 7) {
+                Image(systemName: "magnifyingglass").font(.system(size: 12.5)).foregroundStyle(p.faint)
+                TextField("Поиск по перепискам", text: $search).textFieldStyle(.plain).font(Kind.body(13.5))
+            }
+            .padding(.horizontal, 10).frame(height: 32)
+            .background(RoundedRectangle(cornerRadius: 8).fill(p.surface))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(p.line, lineWidth: 1))
+            .padding(.horizontal, 16).padding(.bottom, 10)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(shown) { item in row(item) }
                 }
-                .padding(.horizontal, 6)
+                .padding(.horizontal, 8).padding(.bottom, 10)
             }
         }
     }
@@ -741,18 +818,22 @@ struct ChatHistory: View {
     private func row(_ item: Chat.Conversation) -> some View {
         let active = showsSelection && item.id == chat.currentID
         return Button { chat.open(item.id); onOpen() } label: {
-            HStack(spacing: 7) {
-                Circle()
-                    .fill(active ? p.accent2 : p.faint.opacity(0.5))
-                    .frame(width: 5, height: 5)
-                Text(item.title)
-                    .font(Kind.body(13)).lineLimit(1).truncationMode(.tail)
-                    .foregroundStyle(active ? p.text : p.muted)
+            HStack(alignment: .top, spacing: 9) {
+                // Переписка о встрече отмечена календарём: её ответы — только
+                // по одной встрече.
+                Image(systemName: item.meeting == nil ? "bubble.left" : "calendar")
+                    .font(.system(size: 12.5)).foregroundStyle(active ? p.accent2 : p.faint)
+                    .frame(width: 16).padding(.top, 2)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.title).font(Kind.body(13.5)).lineLimit(1).truncationMode(.tail)
+                        .foregroundStyle(p.text)
+                    Text(meetingDate(item.updated)).font(Kind.body(11.5)).foregroundStyle(p.muted)
+                }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 8).padding(.vertical, 7)
-            .background(RoundedRectangle(cornerRadius: 7)
-                .fill(active ? p.raised : Color.clear))
+            .padding(.horizontal, 10).padding(.vertical, 8)
+            .background(RoundedRectangle(cornerRadius: 9)
+                .fill(active ? p.accentSoft : Color.clear))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
