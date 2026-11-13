@@ -107,7 +107,7 @@ def model_path(name: str) -> Path:
 
 
 def missing(names) -> List[str]:
-    return [n for n in names if not model_path(n).exists()]
+    return [n for n in names if not model_path(n).is_file() or model_path(n).stat().st_size == 0]
 
 
 def ensure_models(names, log=print) -> None:
@@ -118,36 +118,46 @@ def ensure_models(names, log=print) -> None:
 
     total = sum(MODELS[n]["size_mb"] for n in todo)
     log(f"    Нужно загрузить моделей: {len(todo)} (~{total} МБ)")
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
     for name in todo:
         spec = MODELS[name]
         target = model_path(name)
-        target.parent.mkdir(parents=True, exist_ok=True)
         log(f"    Загружаю: {spec['title']} (~{spec['size_mb']} МБ)")
 
         tmp = MODELS_DIR / f".{name}.part"
         try:
+            target.parent.mkdir(parents=True, exist_ok=True)
             with urllib.request.urlopen(spec["url"], timeout=120) as response, \
                  tmp.open("wb") as handle:
                 shutil.copyfileobj(response, handle)
-        except (urllib.error.URLError, OSError) as exc:
-            tmp.unlink(missing_ok=True)
+
+            if spec.get("archive"):
+                with tarfile.open(tmp, "r:bz2") as archive:
+                    archive.extractall(MODELS_DIR, filter="data")
+                tmp.unlink(missing_ok=True)
+            else:
+                tmp.replace(target)
+        except (urllib.error.URLError, OSError, tarfile.TarError) as exc:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            if isinstance(exc, urllib.error.HTTPError):
+                detail = f"сервер вернул HTTP {exc.code}: {exc.reason}"
+            elif isinstance(exc, urllib.error.URLError):
+                detail = f"ошибка соединения: {exc.reason}"
+            elif isinstance(exc, TimeoutError):
+                detail = f"истекло время ожидания загрузки: {exc}"
+            elif isinstance(exc, tarfile.TarError):
+                detail = f"не удалось распаковать архив: {exc}"
+            else:
+                detail = f"ошибка файла: {exc}"
             raise EngineError(
                 f"Не удалось загрузить модель «{spec['title']}». "
-                "Проверьте подключение к интернету."
+                f"Причина: {detail}. Повторите дозагрузку после устранения причины."
             ) from exc
 
-        if spec.get("archive"):
-            with tarfile.open(tmp, "r:bz2") as archive:
-                # Архив приходит из сети: не разрешаем именам выйти
-                # за MODELS_DIR или создать опасные ссылки.
-                archive.extractall(MODELS_DIR, filter="data")
-            tmp.unlink(missing_ok=True)
-        else:
-            tmp.replace(target)
-
-        if not target.exists():
+        if missing([name]):
             raise EngineError(f"Модель «{spec['title']}» загрузилась не полностью.")
     log("    Модели на месте")
 

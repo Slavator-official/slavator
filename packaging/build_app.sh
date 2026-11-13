@@ -151,7 +151,7 @@ else
 fi
 
 say "Копирую ядро обработки"
-for module in meeting_transcriber_v25_1.py onnx_engine.py glossary_fix.py repeats.py dictation_worker.py app_config.py speaker_memory.py speaker_links.py meeting_store.py meeting_chat.py speech_alignment.py audio_preview.py desktop_contract.json; do
+for module in meeting_transcriber_v25_1.py onnx_engine.py setup_runtime.py glossary_fix.py repeats.py dictation_worker.py app_config.py speaker_memory.py speaker_links.py meeting_store.py meeting_chat.py speech_alignment.py audio_preview.py desktop_contract.json; do
     cp "$CORE/$module" "$RESOURCES/core/"
 done
 cp -R "$CORE/speaker_service" "$RESOURCES/core/speaker_service"

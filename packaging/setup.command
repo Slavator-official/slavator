@@ -17,9 +17,9 @@ PYTHON_VERSION="3.12"
 # (ModelCatalog.recommendedLLM в app/Configuration.swift): иначе установщик
 # скачает пять гигабайт, а окно настроек первым делом посоветует другое.
 MEM_GB=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 17179869184) / 1073741824 ))
-if   (( MEM_GB < 10 )); then DEFAULT_LLM="qwen3:1.7b"; DEFAULT_LLM_SIZE="1,4 ГБ"
-elif (( MEM_GB < 18 )); then DEFAULT_LLM="qwen3:4b";   DEFAULT_LLM_SIZE="2,6 ГБ"
-else                         DEFAULT_LLM="qwen3:8b";   DEFAULT_LLM_SIZE="5,2 ГБ"
+if   (( MEM_GB < 10 )); then DEFAULT_LLM="qwen3:1.7b"; DEFAULT_LLM_SIZE="1,4 ГБ"; DEFAULT_ASR="small"
+elif (( MEM_GB < 18 )); then DEFAULT_LLM="qwen3:4b";   DEFAULT_LLM_SIZE="2,6 ГБ"; DEFAULT_ASR="large-v3-turbo"
+else                         DEFAULT_LLM="qwen3:8b";   DEFAULT_LLM_SIZE="5,2 ГБ"; DEFAULT_ASR="large-v3"
 fi
 
 B=$'\033[1m'; DIM=$'\033[2m'; GREEN=$'\033[32m'; RED=$'\033[31m'; Y=$'\033[33m'; N=$'\033[0m'
@@ -52,7 +52,7 @@ fi
 
 printf '\nБудет установлено:\n'
 printf '  • Python и библиотеки обработки   ~250 МБ\n'
-printf '  • Модели распознавания и голосов  ~1,5 ГБ, при первой обработке\n'
+printf '  • Модели распознавания и голосов  будут загружены и проверены сейчас\n'
 if [[ -f "${MEETING_TRANSCRIBER_PAYLOAD:-}/Ollama.dmg" ]]; then
     printf '  • Ollama и языковая модель        ~5 ГБ, из комплекта\n'
 else
@@ -66,6 +66,8 @@ read -r -p "Продолжить? [Enter — да, n — выход] " answer
 mkdir -p "$SUPPORT" || die "нет доступа к $SUPPORT"
 # Здесь переписки с моделью, настройки и записи — только владельцу.
 chmod 700 "$SUPPORT"
+# Прерванная повторная установка не должна оставлять старый успех.
+rm -f "$SUPPORT/.ready" || die "не удалось сбросить статус установки"
 
 # --------------------------------------------------------------------------
 step "Движок распознавания речи"
@@ -291,7 +293,7 @@ if curl -fsS --max-time 4 http://127.0.0.1:11434/api/version >/dev/null 2>&1; th
         warn "поиск по фразе работает; для поиска по смыслу выполните позже: ollama pull embeddinggemma:300m"
     fi
 else
-    warn "Ollama не установлена - это НЕ ошибка установки"
+    warn "Ollama недоступна — полная установка пока не завершена"
     printf '\n      Расшифровка, разделение по голосам и стенограмма работают\n'
     printf '      без неё. Ollama нужна для резюме встречи, определения\n'
     printf '      имён и смыслового поиска. Поиск по фразе работает без неё.\n\n'
@@ -308,10 +310,11 @@ step "Модели распознавания"
 SPEECH_DIR="$HOME/whisper-work/models"
 if [[ -d "$PAYLOAD/speech-models" ]]; then
     mkdir -p "$SPEECH_DIR"
-    cp -R "$PAYLOAD/speech-models/"* "$SPEECH_DIR/" 2>/dev/null
-    ok "модели разделения голосов взяты из комплекта"
+    cp -R "$PAYLOAD/speech-models/"* "$SPEECH_DIR/" \
+        || die "не удалось скопировать модели голосов из комплекта"
+    ok "модели из комплекта скопированы; проверю их ниже"
 else
-    ok "модели скачаются при первой обработке (~33 МБ)"
+    printf '    Недостающие модели будут загружены до завершения установки.\n'
 fi
 
 # --------------------------------------------------------------------------
@@ -320,10 +323,11 @@ step "Сохраняю настройки"
 {
     printf '# Настройки Славатора. Файл создан при установке.\n'
     printf 'MEETING_TRANSCRIBER_ASR="%s"\n' "$ENGINE"
+    printf 'MEETING_TRANSCRIBER_WHISPER_MODEL="%s"\n' "$DEFAULT_ASR"
     printf 'MEETING_TRANSCRIBER_LLM="%s"\n' "$DEFAULT_LLM"
     printf 'MEETING_TRANSCRIBER_GLOSSARY="%s/whisper-work/glossary.txt"\n' "$HOME"
-} > "$SUPPORT/config.env"
-chmod 600 "$SUPPORT/config.env"     # внутри личный токен
+} > "$SUPPORT/config.env" || die "не удалось сохранить настройки"
+chmod 600 "$SUPPORT/config.env" || die "не удалось ограничить доступ к настройкам"
 ok "настройки сохранены"
 
 GLOSSARY="$HOME/whisper-work/glossary.txt"
@@ -351,12 +355,22 @@ GLOSS
     ok "создан словарь терминов: $GLOSSARY"
 fi
 
-date > "$SUPPORT/.ready"
-
-printf '\n%s╭────────────────────────────────────────╮%s\n' "$GREEN" "$N"
-printf '%s│  Готово. Славатор установлен.          │%s\n' "$GREEN" "$N"
-printf '%s╰────────────────────────────────────────╯%s\n\n' "$GREEN" "$N"
+step "Загружаю модели и проверяю готовность"
+# В бандле и в копии установщика ядро лежит в core; при запуске из Git —
+# рядом с packaging. Проверка читает config.env и settings.json как приложение.
+CORE="$RESOURCES/core"
+[[ -f "$CORE/setup_runtime.py" ]] || CORE="$RESOURCES/../core"
+[[ -f "$CORE/setup_runtime.py" ]] || die "не найден модуль завершения установки; скачайте новый установщик"
+PYTHONDONTWRITEBYTECODE=1 MEETING_TRANSCRIBER_APP_SUPPORT="$SUPPORT" \
+    "$PY" -B "$CORE/setup_runtime.py"
+SETUP_STATUS=$?
+if [[ $SETUP_STATUS -ge 2 ]]; then
+    die "распознавание и модели голосов не готовы; причина указана выше. Повторный запуск продолжит загрузку"
+fi
+# Код 1 означает рабочую расшифровку без готовой Ollama/языковой модели.
+# Не объявляем полную готовность: точный список напечатала проверка ядра.
 printf 'Открываю Славатор. Дальше запускайте его как обычно —\n'
 printf 'из Launchpad или папки «Программы».\n\n'
 
 open -a "Славатор" 2>/dev/null || printf 'Откройте Славатор из папки «Программы».\n\n'
+exit "$SETUP_STATUS"

@@ -5,6 +5,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import meeting_transcriber_v25_1 as core
 
 
+def test_missing_ollama_does_not_block_speech_downloads():
+    report = {"ok": False, "needs_setup": True, "items": [
+        dict(key=key, state="ok" if key == "packages" else "missing",
+             title=key, detail="", fixable=key not in ("packages", "ollama", "llm"))
+        for key in ("packages", "speech", "asr", "ollama", "llm")
+    ]}
+    with patch.object(core, "OLLAMA_HOST", "http://127.0.0.1:11434"), \
+         patch.object(core, "readiness", return_value=report), \
+         patch.object(core, "_speech_models", return_value=(["segmentation"], [], 0)), \
+         patch.object(core, "_engine") as engine, \
+         patch.object(core, "whisper_model") as whisper, \
+         patch.object(core, "ollama_serve", return_value=False), \
+         patch.object(core, "ollama_running", return_value=False):
+        assert core.repair(allow_download=True) == 1
+        engine.return_value.ensure_models.assert_called_once()
+        whisper.assert_called_once()
+
+
 def test_exact_model_tag():
     with patch.object(core, "OLLAMA_MODEL", "qwen3:8b"):
         assert core.ollama_has_model({"qwen3:8b"})

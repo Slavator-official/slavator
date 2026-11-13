@@ -3754,9 +3754,11 @@ def repair(allow_download: bool = False) -> int:
     if report["ok"]:
         log("Всё на месте — дозагружать нечего.")
         return 0
-    if report["needs_setup"]:
-        broken = next(item for item in report["items"]
-                      if item["state"] != "ok" and not item["fixable"])
+    # Отсутствие Ollama не мешает загрузить речевые модели. Блокируют
+    # дозагрузку только библиотеки, без которых движки нельзя запустить.
+    broken = next((item for item in report["items"]
+                   if item["key"] == "packages" and item["state"] != "ok"), None)
+    if broken:
         log("")
         log(f"ОШИБКА: не хватает того, что ставит установщик: {broken['title']}")
         if broken["detail"]:

@@ -10,6 +10,18 @@ import Foundation
         setenv("MEETING_TRANSCRIBER_APP_SUPPORT", root.path, 1)
         setenv("MEETING_TRANSCRIBER_PROFILES", profiles.path, 1)
 
+        try fm.createDirectory(at: Paths.venvPython.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data().write(to: Paths.venvPython)
+        precondition(!Paths.isReady, "Наличие Python ещё не означает готовность распознавания")
+        let readyMarker = root.appendingPathComponent(".ready")
+        try Data("Fri Nov 13 2026\n".utf8).write(to: readyMarker)
+        precondition(!Paths.isReady, "Старый установщик писал дату без проверки моделей")
+        try Data("speech-ready\n".utf8).write(to: readyMarker)
+        precondition(Paths.isReady)
+        try fm.removeItem(at: readyMarker)
+        precondition(!Paths.isReady, "Прерванная установка снимает готовность")
+        print("PASS: Python без подтверждённой установки не считается готовым окружением")
+
         func write(_ value: Any, to url: URL) throws {
             try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try JSONSerialization.data(withJSONObject: value).write(to: url)

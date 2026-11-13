@@ -14,9 +14,10 @@ enum Paths {
     static var configEnv: URL { support.appending(path: "config.env") }
     static var venvPython: URL { support.appending(path: "env/bin/python3") }
 
-    /// Окружение развёрнуто и обработка запустится.
+    /// Python установлен, а установщик проверил распознавание и модели голосов.
     static var isReady: Bool {
         FileManager.default.fileExists(atPath: venvPython.path)
+            && (try? String(contentsOf: support.appending(path: ".ready"), encoding: .utf8)) == "speech-ready\n"
     }
 
     /// Открыть установщик в Терминале.
@@ -32,6 +33,16 @@ enum Paths {
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
 
         guard let resources = Bundle.main.resourceURL else { return }
+        // Завершение установки использует ту же дозагрузку и проверку,
+        // что приложение. Копируем ядро до запуска Терминала, чтобы можно
+        // было отключить DMG, а Python не писал кэш в подписанный бандл.
+        let setupCore = dir.appending(path: "core")
+        do {
+            if fm.fileExists(atPath: setupCore.path) { try fm.removeItem(at: setupCore) }
+            try fm.copyItem(at: resources.appending(path: "core"), to: setupCore)
+        } catch {
+            return
+        }
         // Опись комплекта едет вместе со скриптом: по ней установщик решает,
         // верить ли папке «ресурсы» на томе. Старую копию убираем и тогда,
         // когда в этой сборке описи нет, — иначе прошлая опись приняла бы
